@@ -50,7 +50,7 @@ func ReplacePVCByHostDisk(vmi *v1.VirtualMachineInstance, clientset kubecli.Kube
 			}
 
 			volumeSource.HostDisk = &v1.HostDisk{
-				Path:     getPVCDiskImgPath(vmi.Spec.Volumes[i].Name),
+				Path:     getPVCDiskImgPath(vmi.Spec.Volumes[i].Name, vmi.Spec.Domain.Devices.Disks[i].FilePath),
 				Type:     v1.HostDiskExistsOrCreate,
 				Capacity: pvc.Status.Capacity[k8sv1.ResourceStorage],
 			}
@@ -81,7 +81,10 @@ func createSparseRaw(fullPath string, size int64) error {
 	return nil
 }
 
-func getPVCDiskImgPath(volumeName string) string {
+func getPVCDiskImgPath(volumeName, filepath string) string {
+	if filepath != "" {
+		return path.Join(pvcBaseDir, volumeName, filepath)
+	}
 	return path.Join(pvcBaseDir, volumeName, "disk.img")
 }
 

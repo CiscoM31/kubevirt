@@ -21,6 +21,7 @@ package api
 
 import (
 	"bytes"
+	"encoding/csv"
 	"fmt"
 	"io/ioutil"
 	"net"
@@ -60,6 +61,8 @@ type ConverterContext struct {
 
 func Convert_v1_Disk_To_api_Disk(diskDevice *v1.Disk, disk *Disk, devicePerBus map[string]int, numQueues *uint) error {
 
+	imageFormat := ""
+
 	if diskDevice.Disk != nil {
 		disk.Device = "disk"
 		disk.Target.Bus = diskDevice.Disk.Bus
@@ -76,6 +79,7 @@ func Convert_v1_Disk_To_api_Disk(diskDevice *v1.Disk, disk *Disk, devicePerBus m
 		}
 		disk.ReadOnly = toApiReadOnly(diskDevice.Disk.ReadOnly)
 		disk.Serial = diskDevice.Serial
+		imageFormat = diskDevice.Disk.ImageFormat
 	} else if diskDevice.LUN != nil {
 		disk.Device = "lun"
 		disk.Target.Bus = diskDevice.LUN.Bus
@@ -100,6 +104,7 @@ func Convert_v1_Disk_To_api_Disk(diskDevice *v1.Disk, disk *Disk, devicePerBus m
 	}
 	disk.Driver = &DiskDriver{
 		Name: "qemu",
+		Type: imageFormat,
 	}
 	if numQueues != nil {
 		disk.Driver.Queues = numQueues
@@ -152,7 +157,7 @@ func toApiReadOnly(src bool) *ReadOnly {
 	return nil
 }
 
-func Convert_v1_Volume_To_api_Disk(source *v1.Volume, disk *Disk, c *ConverterContext) error {
+func Convert_v1_Volume_To_api_Disk(source *v1.Volume, filePath string, disk *Disk, c *ConverterContext) error {
 
 	if source.RegistryDisk != nil {
 		return Convert_v1_RegistryDiskSource_To_api_Disk(source.Name, source.RegistryDisk, disk, c)
@@ -167,11 +172,11 @@ func Convert_v1_Volume_To_api_Disk(source *v1.Volume, disk *Disk, c *ConverterCo
 	}
 
 	if source.PersistentVolumeClaim != nil {
-		return Convert_v1_PersistentVolumeClaim_To_api_Disk(source.Name, disk, c)
+		return Convert_v1_PersistentVolumeClaim_To_api_Disk(source.Name, filePath, disk, c)
 	}
 
 	if source.DataVolume != nil {
-		return Convert_v1_FilesystemVolumeSource_To_api_Disk(source.Name, disk, c)
+		return Convert_v1_FilesystemVolumeSource_To_api_Disk(source.Name, filePath, disk, c)
 	}
 
 	if source.Ephemeral != nil {
@@ -221,18 +226,29 @@ func GetBlockDeviceVolumePath(volumeName string) string {
 	return filepath.Join(string(filepath.Separator), "dev", volumeName)
 }
 
-func Convert_v1_PersistentVolumeClaim_To_api_Disk(name string, disk *Disk, c *ConverterContext) error {
+func Convert_v1_PersistentVolumeClaim_To_api_Disk(name string, filePath string, disk *Disk, c *ConverterContext) error {
 	if c.IsBlockPVC[name] {
 		return Convert_v1_BlockVolumeSource_To_api_Disk(name, disk, c)
 	}
-	return Convert_v1_FilesystemVolumeSource_To_api_Disk(name, disk, c)
+	return Convert_v1_FilesystemVolumeSource_To_api_Disk(name, filePath, disk, c)
 }
 
 // Convert_v1_FilesystemVolumeSource_To_api_Disk takes a FS source and builds the KVM Disk representation
-func Convert_v1_FilesystemVolumeSource_To_api_Disk(volumeName string, disk *Disk, c *ConverterContext) error {
-	disk.Type = "file"
-	disk.Driver.Type = "raw"
-	disk.Source.File = GetFilesystemVolumePath(volumeName)
+func Convert_v1_FilesystemVolumeSource_To_api_Disk(volumeName string, filePath string, disk *Disk, c *ConverterContext) error {
+	if disk.Driver.Type == "" {
+		disk.Driver.Type = "raw"
+	}
+
+	diskPath := filePath
+	if diskPath == "" {
+		diskPath = "disk.img"
+	}
+
+	disk.Source.File = filepath.Join(
+		"/var/run/kubevirt-private",
+		"vmi-disks",
+		volumeName,
+		diskPath)
 	return nil
 }
 
@@ -245,7 +261,9 @@ func Convert_v1_BlockVolumeSource_To_api_Disk(volumeName string, disk *Disk, c *
 
 func Convert_v1_HostDisk_To_api_Disk(path string, disk *Disk, c *ConverterContext) error {
 	disk.Type = "file"
-	disk.Driver.Type = "raw"
+	if disk.Driver.Type == "" {
+		disk.Driver.Type = "raw"
+	}
 	disk.Source.File = path
 	return nil
 }
@@ -295,7 +313,7 @@ func Convert_v1_EphemeralVolumeSource_To_api_Disk(volumeName string, source *v1.
 	disk.BackingStore = &BackingStore{}
 
 	backingDisk := &Disk{Driver: &DiskDriver{}}
-	err := Convert_v1_FilesystemVolumeSource_To_api_Disk(volumeName, backingDisk, c)
+	err := Convert_v1_FilesystemVolumeSource_To_api_Disk(volumeName, "", backingDisk, c)
 	if err != nil {
 		return err
 	}
@@ -412,6 +430,20 @@ func Convert_v1_Features_To_api_Features(source *v1.Features, features *Features
 
 func Convert_v1_Machine_To_api_OSType(source *v1.Machine, ost *OSType, c *ConverterContext) error {
 	ost.Machine = source.Type
+
+	return nil
+}
+
+func Convert_v1_OS_to_api(source *v1.OS, os *OS, c *ConverterContext) error {
+
+	devListReader := csv.NewReader(strings.NewReader(source.BootOrder))
+	devList, err := devListReader.Read()
+	if err != nil {
+		return err
+	}
+	for _, bootDev := range devList {
+		os.BootOrder = append(os.BootOrder, Boot{bootDev})
+	}
 
 	return nil
 }
@@ -588,7 +620,7 @@ func Convert_v1_VirtualMachine_To_api_Domain(vmi *v1.VirtualMachineInstance, dom
 		if volume == nil {
 			return fmt.Errorf("No matching volume with name %s found", disk.VolumeName)
 		}
-		err = Convert_v1_Volume_To_api_Disk(volume, &newDisk, c)
+		err = Convert_v1_Volume_To_api_Disk(volume, disk.FilePath, &newDisk, c)
 		if err != nil {
 			return err
 		}
@@ -689,6 +721,11 @@ func Convert_v1_VirtualMachine_To_api_Domain(vmi *v1.VirtualMachineInstance, dom
 	if vmi.IsCPUDedicated() {
 		if err := formatDomainCPUTune(vmi, domain, c); err != nil {
 			log.Log.Reason(err).Error("failed to format domain cputune.")
+		}
+	}
+	if vmi.Spec.Domain.OS != nil && vmi.Spec.Domain.OS.BootOrder != "" {
+		err = Convert_v1_OS_to_api(vmi.Spec.Domain.OS, &domain.Spec.OS, c)
+		if err != nil {
 			return err
 		}
 	}

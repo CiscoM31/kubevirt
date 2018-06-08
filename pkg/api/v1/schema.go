@@ -112,6 +112,9 @@ type DomainSpec struct {
 	CPU *CPU `json:"cpu,omitempty"`
 	// Memory allow specifying the VMI memory features.
 	// +optional
+	OS *OS `json:"os,omitempty"`
+	// Machine type
+	// +optional
 	Memory *Memory `json:"memory,omitempty"`
 	// Machine type.
 	// +optional
@@ -170,6 +173,14 @@ type CPU struct {
 	// with enough dedicated pCPUs and pin the vCPUs to it.
 	// +optional
 	DedicatedCPUPlacement bool `json:"dedicatedCpuPlacement,omitempty"`
+}
+
+// OS allow specifying the boot order
+// ---
+// +k8s:openapi-gen=true
+type OS struct {
+	// BootOrder specifies the boot order prority.
+	BootOrder string `json:"bootorder,omitempty"`
 }
 
 // Memory allows specifying the VirtualMachineInstance memory features.
@@ -256,6 +267,8 @@ type Disk struct {
 	// Defaults to false.
 	// +optional
 	DedicatedIOThread *bool `json:"dedicatedIOThread,omitempty"`
+	// File path of the disk image file
+	FilePath string `json:"filePath,omitempty"`
 }
 
 // Represents the target of a volume to mount.
@@ -285,6 +298,8 @@ type DiskTarget struct {
 	// If specified, the virtual disk will be placed on the guests pci address with the specifed PCI address. For example: 0000:81:01.10
 	// +optional
 	PciAddress string `json:"pciAddress,omitempty"`
+	// Image format
+	ImageFormat string `json:"imageFormat,omitempty"`
 }
 
 // ---
@@ -296,6 +311,8 @@ type LunTarget struct {
 	// ReadOnly.
 	// Defaults to false.
 	ReadOnly bool `json:"readonly,omitempty"`
+	// Image format
+	ImageFormat string `json:"imageFormat,omitempty"`
 }
 
 // ---
