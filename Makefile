@@ -1,16 +1,15 @@
 export GO15VENDOREXPERIMENT := 1
 
-all:
-	hack/dockerized "./hack/check.sh && KUBEVIRT_VERSION=${KUBEVIRT_VERSION} ./hack/build-go.sh install ${WHAT} && ./hack/build-copy-artifacts.sh ${WHAT} && DOCKER_PREFIX=${DOCKER_PREFIX} DOCKER_TAG=${DOCKER_TAG} ./hack/build-manifests.sh"
+all: build manifests
 
 generate:
 	hack/dockerized "./hack/generate.sh"
 
-apidocs:
-	hack/dockerized "./hack/generate.sh && ./hack/gen-swagger-doc/gen-swagger-docs.sh v1 html"
+apidocs: generate
+	./hack/gen-swagger-doc/gen-swagger-docs.sh v1 html"
 
-client-python:
-	hack/dockerized "./hack/generate.sh && TRAVIS_TAG=${TRAVIS_TAG} ./hack/gen-client-python/generate.sh"
+client-python: generate
+	TRAVIS_TAG=${TRAVIS_TAG} ./hack/gen-client-python/generate.sh"
 
 build:
 	hack/dockerized "./hack/check.sh && KUBEVIRT_VERSION=${KUBEVIRT_VERSION} ./hack/build-go.sh install ${WHAT}" && ./hack/build-copy-artifacts.sh ${WHAT}
@@ -48,7 +47,7 @@ publish: docker
 	hack/build-docker.sh push ${WHAT}
 
 manifests:
-	hack/dockerized "DOCKER_PREFIX=${DOCKER_PREFIX} DOCKER_TAG=${DOCKER_TAG} ./hack/build-manifests.sh"
+	hack/dockerized "DOCKER_PREFIX=${DOCKER_PREFIX} DOCKER_TAG=${DOCKER_TAG} IMAGE_PULL_POLICY=${IMAGE_PULL_POLICY} ./hack/build-manifests.sh"
 
 .release-functest:
 	make functest > .release-functest 2>&1
@@ -62,7 +61,7 @@ cluster-up:
 cluster-down:
 	./cluster/down.sh
 
-cluster-build:
+cluster-build: manifests build publish
 	./cluster/build.sh
 
 cluster-clean:
