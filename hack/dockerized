@@ -1,9 +1,31 @@
 #!/bin/bash
-set -e
+set -ex
 
+usage() {
+    echo "Usage: $(basename $0) [ -c container base name] [ -i docker image ]"
+    exit 1
+}
+
+DOCKER_IMG=docker-builder
+while getopts "c:i:" opt; do
+    case $opt in
+    c)
+        CONTAINER_BASE=$OPTARG
+        ;;
+    i)
+        DOCKER_IMG=$OPTARG
+        ;;
+    *)
+        usage
+        ;;
+    esac
+done
+shift $((OPTIND - 1))
+
+# Fill in the environment
 source $(dirname "$0")/common.sh
 
-DOCKER_DIR=${KUBEVIRT_DIR}/hack/docker-builder
+DOCKER_DIR=${KUBEVIRT_DIR}/hack/$DOCKER_IMG
 
 SYNC_OUT=${SYNC_OUT:-true}
 
@@ -74,7 +96,10 @@ _rsync --delete --exclude 'cluster/**/.kubectl' --exclude 'cluster/**/.oc' --exc
 
 # Run the command
 test -t 1 && USE_TTY="-it"
-docker run --rm -v "${BUILDER}:/root:rw,z" --security-opt label:disable ${USE_TTY} -w "/root/go/src/kubevirt.io/kubevirt" ${BUILDER} "$@"
+
+ENV_ARG=
+[ -e $DOCKER_DIR/docker_env ] && ENV_ARG="--env-file=${DOCKER_DIR}/docker_env"
+docker run --rm -v "${BUILDER}:/root:rw,z" $ENV_ARG --security-opt label:disable ${USE_TTY} -w "/root/go/src/kubevirt.io/kubevirt" ${BUILDER} "$@"
 
 # Copy the whole kubevirt data out to get generated sources and formatting changes
 _rsync --exclude '.glide*' --exclude 'cluster/**/.kubectl' --exclude 'cluster/**/.oc' --exclude 'cluster/**/.kubeconfig' --exclude "_out" --exclude "vendor" --exclude ".vagrant" --exclude ".git" "rsync://root@127.0.0.1:${RSYNCD_PORT}/build" ${KUBEVIRT_DIR}/
@@ -83,7 +108,7 @@ _rsync --delete "rsync://root@127.0.0.1:${RSYNCD_PORT}/build/cluster/examples/" 
 if [ "$SYNC_VENDOR" = "true" ]; then
     _rsync --delete "rsync://root@127.0.0.1:${RSYNCD_PORT}/vendor" "${VENDOR_DIR}/"
 fi
-# Copy the build output out of the container, make sure that _out exactly matches the build result
+# Copy the build output out of the container
 if [ "$SYNC_OUT" = "true" ]; then
-    _rsync --delete "rsync://root@127.0.0.1:${RSYNCD_PORT}/out" ${OUT_DIR}
+    _rsync "rsync://root@127.0.0.1:${RSYNCD_PORT}/out" ${OUT_DIR}
 fi
