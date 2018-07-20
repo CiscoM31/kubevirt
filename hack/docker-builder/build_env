@@ -2,7 +2,3 @@
 # If no value is specified, Docker will evaluate them at run-time based on its environment
 KUBEVIRT_VERSION
 KUBEVIRT_PROVIDER
-TRAVIS_TAG
-TRAVIS_JOB_ID
-TRAVIS_PULL_REQUEST
-TRAVIS_BRANCH

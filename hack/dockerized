@@ -1,17 +1,24 @@
 #!/bin/bash
-set -ex
+set -e
 
 usage() {
-    echo "Usage: $(basename $0) [ -c container base name] [ -i docker image ]"
+    echo "Usage: $(basename $0) [ -c container name] [ -e environment ] [ -i docker image template ]"
     exit 1
 }
 
 DOCKER_IMG=docker-builder
-while getopts "c:i:" opt; do
+ENV_FILE=
+while getopts "c:e:i:" opt; do
     case $opt in
+    # Allow specifying a named container
     c)
         CONTAINER_BASE=$OPTARG
         ;;
+    # Allow specifying an environment variable file for runtime in the container
+    e)
+        ENV_FILE=$OPTARG
+        ;;
+    # Allow specifying a template for building the container
     i)
         DOCKER_IMG=$OPTARG
         ;;
@@ -34,6 +41,16 @@ BUILDER=${job_prefix}
 SYNC_VENDOR=${SYNC_VENDOR:-false}
 
 TEMPFILE=".rsynctemp"
+
+ENV_ARG=
+if [ -n "$ENV_FILE" ]; then
+    FULL_ENV_FILE=${DOCKER_DIR}/${ENV_FILE}
+    if [ ! -f $FULL_ENV_FILE ]; then
+        echo "Environment file $FULL_ENV_FILE not found"
+        exit 1
+    fi
+    ENV_ARG="--env-file=$FULL_ENV_FILE"
+fi
 
 # Reduce verbosity if an automated build
 BUILD_QUIET=
@@ -97,8 +114,6 @@ _rsync --delete --exclude 'cluster/**/.kubectl' --exclude 'cluster/**/.oc' --exc
 # Run the command
 test -t 1 && USE_TTY="-it"
 
-ENV_ARG=
-[ -e $DOCKER_DIR/docker_env ] && ENV_ARG="--env-file=${DOCKER_DIR}/docker_env"
 docker run --rm -v "${BUILDER}:/root:rw,z" $ENV_ARG --security-opt label:disable ${USE_TTY} -w "/root/go/src/kubevirt.io/kubevirt" ${BUILDER} "$@"
 
 # Copy the whole kubevirt data out to get generated sources and formatting changes
