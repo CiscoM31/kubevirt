@@ -9,13 +9,13 @@ apidocs:
 	hack/dockerized "./hack/generate.sh && ./hack/gen-swagger-doc/gen-swagger-docs.sh v1 html"
 
 client-python:
-	hack/dockerized "./hack/generate.sh && TRAVIS_TAG=${TRAVIS_TAG} ./hack/gen-client-python/generate.sh"
+	hack/dockerized -e travis_env "./hack/generate.sh && ./hack/gen-client-python/generate.sh"
 
 build:
-	hack/dockerized "./hack/check.sh && ./hack/build-go.sh install ${WHAT}" && ./hack/build-copy-artifacts.sh ${WHAT}
+	hack/dockerized -e build_env "./hack/check.sh && ./hack/build-go.sh install ${WHAT}" && ./hack/build-copy-artifacts.sh ${WHAT}
 
 goveralls:
-	SYNC_OUT=false hack/dockerized "./hack/check.sh && ./hack/goveralls.sh"
+	SYNC_OUT=false hack/dockerized -e travis_env "./hack/check.sh && ./hack/goveralls.sh"
 
 test:
 	SYNC_OUT=false hack/dockerized "./hack/check.sh && ./hack/build-go.sh test ${WHAT}"
@@ -53,7 +53,7 @@ verify-build:
 	hack/verify-build.sh
 
 manifests:
-	hack/dockerized -i docker-manifests -c manifests ./hack/build-manifests.sh
+	hack/dockerized -e manifest_env ./hack/build-manifests.sh
 
 .release-functest:
 	make functest > .release-functest 2>&1
