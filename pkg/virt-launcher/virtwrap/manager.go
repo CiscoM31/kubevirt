@@ -28,6 +28,9 @@ package virtwrap
 import (
 	"encoding/xml"
 	"fmt"
+	"io"
+	"net/http"
+	"net/url"
 	"os"
 
 	"github.com/libvirt/libvirt-go"
@@ -68,6 +71,116 @@ func NewLibvirtDomainManager(connection cli.Connection) (DomainManager, error) {
 	}
 
 	return &manager, nil
+}
+
+// Download the image via http
+func (l *LibvirtDomainManager) DownloadHttpFile(filepath string, url string) error {
+
+	// Create the file
+	out, err := os.Create(filepath)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+
+	// Get the data
+	resp, err := http.Get(url)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	// Write the body to file
+	_, err = io.Copy(out, resp.Body)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// Download the disk image from the source volume.
+func (l *LibvirtDomainManager) DownloadImage(vmi *v1.VirtualMachineInstance, disk v1.Disk) error {
+	logger := log.Log.Object(vmi)
+	d := api.Convert_v1_FilesystemVolumeSource_To_api_File(disk.VolumeName, disk.FilePath, nil)
+	dlock := fmt.Sprintf("%s.lock", d)
+	logger.Infof("Target disk file %v does not exist, setting up", d)
+	_, err := os.Create(dlock)
+	if err != nil {
+		logger.Errorf("File check failed for %v, err:%v", dlock, err)
+		os.Remove(dlock)
+		return err
+	}
+
+	if disk.SourceFilePath != "" && disk.SourceVolumeName != "" {
+		s := api.Convert_v1_FilesystemVolumeSource_To_api_File(disk.SourceVolumeName, disk.SourceFilePath, nil)
+		logger.Infof("Disk Source: %v", s)
+		logger.Infof("Disk Destination: %v", d)
+
+		from, err := os.Open(s)
+		if err != nil {
+			logger.Errorf("File open of source %v failed, err: %v", s, err)
+			return err
+		}
+		defer from.Close()
+
+		to, err := os.OpenFile(d, os.O_RDWR|os.O_CREATE, 0666)
+		if err != nil {
+			logger.Errorf("File open of dest %s failed, err: %v", d, err)
+			return err
+		}
+		defer to.Close()
+		_, err = io.Copy(to, from)
+		if err != nil {
+			logger.Errorf("File copy failed for %s, err: %v", d, err)
+			os.Remove(dlock)
+			os.Remove(d)
+			return err
+		}
+	} else if disk.SourceFilePath != "" {
+		_, err := url.ParseRequestURI(disk.SourceFilePath)
+		if err == nil {
+			// This is a http URL
+			logger.Infof("Http Disk Source: %v", disk.SourceFilePath)
+			logger.Infof("Disk Destination: %v", d)
+			err = l.DownloadHttpFile(d, disk.SourceFilePath)
+			if err != nil {
+				logger.Errorf("File copy failed for %s, err: %v", d, err)
+				os.Remove(dlock)
+				os.Remove(d)
+				return err
+			}
+		} else {
+			logger.Errorf("Invalid URL for source file: %v, err: %v", disk.SourceFilePath, err)
+			return err
+		}
+	} else {
+		logger.Infof("No Source file path or volume information for target disk.")
+		return nil
+	}
+	logger.Infof("File setup of %v done", d)
+	return nil
+}
+
+// Setup the disk images in the target location for the VM to use
+func (l *LibvirtDomainManager) SetupDisks(vmi *v1.VirtualMachineInstance) error {
+	logger := log.Log.Object(vmi)
+	logger.Infof("Setup Disks....")
+	for _, disk := range vmi.Spec.Domain.Devices.Disks {
+		if disk.SourceFilePath != "" || disk.SourceVolumeName != "" {
+			d := api.Convert_v1_FilesystemVolumeSource_To_api_File(disk.VolumeName, disk.FilePath, nil)
+			dlock := fmt.Sprintf("%s.lock", d)
+			_, err := os.Stat(dlock)
+			if os.IsNotExist(err) {
+				// lock file doesn't exist, we need to download the image file
+				l.DownloadImage(vmi, disk)
+			} else {
+				logger.Infof("Disk file %v already setup, reusing it.", d)
+				continue
+			}
+		}
+	}
+	return nil
 }
 
 // All local environment setup that needs to occur before VirtualMachineInstance starts
@@ -174,6 +287,9 @@ func (l *LibvirtDomainManager) SyncVMI(vmi *v1.VirtualMachineInstance, useEmulat
 		logger.Error("Conversion failed.")
 		return nil, err
 	}
+
+	// Setup all the disk images
+	l.SetupDisks(vmi)
 
 	// Set defaults which are not coming from the cluster
 	api.SetObjectDefaults_Domain(domain)

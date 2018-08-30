@@ -47,6 +47,7 @@ func NewDeviceController(host string, maxDevices int) *DeviceController {
 		devicePlugins: []GenericDevice{
 			NewGenericDevicePlugin(KVMName, KVMPath, maxDevices),
 			NewGenericDevicePlugin(TunName, TunPath, maxDevices),
+			NewGenericDevicePlugin("vhost-net", "/dev/vhost-net", maxDevices),
 		},
 		host:       host,
 		maxDevices: maxDevices,

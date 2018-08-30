@@ -257,6 +257,10 @@ type Disk struct {
 	DedicatedIOThread *bool `json:"dedicatedIOThread,omitempty"`
 	// File path of the disk image file
 	FilePath string `json:"filePath,omitempty"`
+	// Source Volume Name from which to copy this image
+	SourceVolumeName string `json:"sourceVolumeName,omitempty"`
+	// File path of the source disk image file
+	SourceFilePath string `json:"sourceFilePath,omitempty"`
 }
 
 // Represents the target of a volume to mount.
