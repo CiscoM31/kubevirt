@@ -233,6 +233,10 @@ func Convert_v1_PersistentVolumeClaim_To_api_Disk(name string, filePath string, 
 	return Convert_v1_FilesystemVolumeSource_To_api_Disk(name, filePath, disk, c)
 }
 
+func Convert_v1_FilesystemVolumeSource_To_api_File(volumeName string, filePath string, c *ConverterContext) string {
+	return filepath.Join("/var/run/kubevirt-private", "vmi-disks", volumeName, filePath)
+}
+
 // Convert_v1_FilesystemVolumeSource_To_api_Disk takes a FS source and builds the KVM Disk representation
 func Convert_v1_FilesystemVolumeSource_To_api_Disk(volumeName string, filePath string, disk *Disk, c *ConverterContext) error {
 	if disk.Driver.Type == "" {

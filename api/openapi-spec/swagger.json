@@ -3478,7 +3478,15 @@
      "volumeName": {
       "description": "Name of the volume which is referenced.\nMust match the Name of a Volume.",
       "type": "string"
-     }
+     },
+     "sourceVolumeName": {
+      "description": "Name of the volume from where this image is copied from.\nMust match the Name of a Volume",
+      "type": "string"
+      },
+     "sourceFilePath": {
+      "description": "File path of the source disk image file",
+      "type": "string"
+      }
     }
    },
    "v1.DiskTarget": {

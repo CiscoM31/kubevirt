@@ -396,7 +396,7 @@ func (t *templateService) RenderLaunchManifest(vmi *v1.VirtualMachineInstance) (
 	}
 
 	command := []string{"/usr/bin/virt-launcher",
-		"--qemu-timeout", "5m",
+		"--qemu-timeout", "30m",
 		"--name", domain,
 		"--uid", string(vmi.UID),
 		"--namespace", namespace,
