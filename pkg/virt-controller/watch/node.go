@@ -193,7 +193,7 @@ func (c *NodeController) execute(key string) error {
 			return err
 		}
 
-		vmis = filterStuckVirtualMachinesWithoutPods(vmis, pods)
+		vmis, pods = filterStuckVirtualMachinesWithoutPods(vmis, pods)
 
 		errs := []string{}
 		// Do sequential updates, we don't want to create update storms in situations where something might already be wrong
@@ -216,7 +216,23 @@ func (c *NodeController) execute(key string) error {
 		if len(errs) > 0 {
 			return fmt.Errorf("%v", strings.Join(errs, "; "))
 		}
+
+		deleteOptions := metav1.NewDeleteOptions(0)
+		errs = []string{}
+		for _, p := range pods {
+			logger.V(2).Infof("Deleting pod %s in namespace %s on unresponsive node", p.Name, p.Namespace)
+			// force delete virt-launcher pods on the unresponsive node
+			err := c.clientset.CoreV1().Pods(p.Namespace).Delete(p.Name, deleteOptions)
+			if err != nil {
+				errs = append(errs, fmt.Sprintf("failed to delete pod %s:%v", p.Name, err))
+				logger.Reason(err).Errorf("Failed to delete pod %s in namespace %s", p.Name, p.Namespace)
+			}
+		}
+		if len(errs) > 0 {
+			return fmt.Errorf("%v", strings.Join(errs, "; "))
+		}
 	}
+
 	if nodeExists {
 		c.Queue.AddAfter(key, c.recheckInterval)
 	}
@@ -269,7 +285,7 @@ func (c *NodeController) alivePodsOnNode(nodeName string) ([]*v1.Pod, error) {
 	return pods, nil
 }
 
-func filterStuckVirtualMachinesWithoutPods(vmis []*virtv1.VirtualMachineInstance, pods []*v1.Pod) []*virtv1.VirtualMachineInstance {
+func filterStuckVirtualMachinesWithoutPods(vmis []*virtv1.VirtualMachineInstance, pods []*v1.Pod) ([]*virtv1.VirtualMachineInstance, []*v1.Pod) {
 	podsPerNamespace := map[string]map[string]*v1.Pod{}
 
 	for _, pod := range pods {
@@ -286,8 +302,16 @@ func filterStuckVirtualMachinesWithoutPods(vmis []*virtv1.VirtualMachineInstance
 	}
 
 	filtered := []*virtv1.VirtualMachineInstance{}
+	filteredPods := []*v1.Pod{}
 	for _, vmi := range vmis {
-		if vmi.IsScheduled() || vmi.IsRunning() {
+		if isVMIMangedByVMIReplicaSet(vmi) {
+			filtered = append(filtered, vmi)
+			if podsForVMI, exists := podsPerNamespace[vmi.Namespace]; exists {
+				if p, exists := podsForVMI[string(vmi.UID)]; exists {
+					filteredPods = append(filteredPods, p)
+				}
+			}
+		} else if vmi.IsScheduled() || vmi.IsRunning() {
 			if podsForVMI, exists := podsPerNamespace[vmi.Namespace]; exists {
 				if _, exists := podsForVMI[string(vmi.UID)]; exists {
 					continue
@@ -296,7 +320,62 @@ func filterStuckVirtualMachinesWithoutPods(vmis []*virtv1.VirtualMachineInstance
 			filtered = append(filtered, vmi)
 		}
 	}
-	return filtered
+	return filtered, filteredPods
+}
+
+// Filter VMI and their Pods on unresponsive node
+func filterVMIOnUnresponsiveNode(vmis []*virtv1.VirtualMachineInstance, pods []*v1.Pod) ([]*virtv1.VirtualMachineInstance, []*v1.Pod) {
+	podsPerNamespace := map[string]map[string]*v1.Pod{}
+
+	for _, pod := range pods {
+		podsForVMI, ok := podsPerNamespace[pod.Namespace]
+		if !ok {
+			podsForVMI = map[string]*v1.Pod{}
+		}
+		vmUID := pod.Labels[virtv1.CreatedByLabel]
+		if len(vmUID) == 0 {
+			continue
+		}
+		podsForVMI[vmUID] = pod
+		podsPerNamespace[pod.Namespace] = podsForVMI
+	}
+
+	filtered := []*virtv1.VirtualMachineInstance{}
+	filteredPods := []*v1.Pod{}
+	for _, vmi := range vmis {
+		vmi.GetObjectMeta().GetOwnerReferences()
+		if podsForVMI, exists := podsPerNamespace[vmi.Namespace]; exists {
+			if p, exists := podsForVMI[string(vmi.UID)]; exists {
+				filtered = append(filtered, vmi)
+				filteredPods = append(filteredPods, p)
+			}
+		}
+	}
+	return filtered, filteredPods
+}
+
+func filterPodsOnUnresponsiveNode(pods []*v1.Pod) []*v1.Pod {
+
+	filteredPods := []*v1.Pod{}
+	for _, pod := range pods {
+		if pod.Labels[virtv1.AppLabel] == "virt-launcher" {
+			filteredPods = append(filteredPods, pod)
+		}
+	}
+	return filteredPods
+}
+
+// return true if VMI is managed by  VMI replicaset
+func isVMIMangedByVMIReplicaSet(vmi *virtv1.VirtualMachineInstance) bool {
+	oRef := vmi.GetObjectMeta().GetOwnerReferences()
+
+	for _, r := range oRef {
+		if r.Kind == virtv1.VirtualMachineInstanceReplicaSetGroupVersionKind.Kind {
+			return true
+		}
+	}
+
+	return false
 }
 
 func isNodeUnresponsive(node *v1.Node, timeout time.Duration) (bool, error) {

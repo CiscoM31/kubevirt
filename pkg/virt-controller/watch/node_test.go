@@ -110,7 +110,7 @@ var _ = Describe("Node controller with", func() {
 			podInDifferentNamespace.Namespace = "wrong"
 			vmiWithoutPod := NewRunningVirtualMachine("vmiWithoutPod", node)
 
-			vmis := filterStuckVirtualMachinesWithoutPods([]*virtv1.VirtualMachineInstance{
+			vmis, _ := filterStuckVirtualMachinesWithoutPods([]*virtv1.VirtualMachineInstance{
 				finalVMI,
 				vmiWithPod,
 				vmiWithPodInDifferentNamespace,
