@@ -101,7 +101,7 @@ func CreateISCSIPvc(client kubecli.KubevirtClient, name, class, capacity, ns str
 	return pvc, err
 }
 
-func SetResources(vmi *v1.VirtualMachineInstance, cpu, memory string) {
+func SetResources(vmi *v1.VirtualMachineInstance, cpu, memory string) error {
 	t := int64(30)
 	vmi.Spec.TerminationGracePeriodSeconds = &t
 	cpus := resource.MustParse(cpu)
@@ -111,10 +111,11 @@ func SetResources(vmi *v1.VirtualMachineInstance, cpu, memory string) {
 	vmi.Spec.Domain.OS = &os
 	cores, err := strconv.Atoi(cpu)
 	if err != nil {
-		fmt.Printf("\nError: %v\n", err)
+		return fmt.Errorf("SetResources failed: %v", err)
 	}
 	fmt.Printf("\nCores: %d\n", cores)
 	vmi.Spec.Domain.CPU = &v1.CPU{Cores: uint32(cores), Model: "host-model"}
+	return nil
 }
 
 func AttachDisk(c kubecli.KubevirtClient, vmi *v1.VirtualMachineInstance, diskName, volumeName, class,
