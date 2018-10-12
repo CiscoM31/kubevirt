@@ -119,12 +119,13 @@ func SetResources(vmi *v1.VirtualMachineInstance, cpu, memory string) error {
 }
 
 func AttachDisk(c kubecli.KubevirtClient, vmi *v1.VirtualMachineInstance, diskName, volumeName, class,
-	filepath, sfilepath, capacity string, isCdrom bool) error {
+	filepath, sVolume, sfilepath, capacity string, isCdrom bool) error {
 	disk := v1.Disk{}
 	disk.Name = diskName
 	disk.VolumeName = volumeName
 	disk.FilePath = filepath
 	disk.SourceFilePath = sfilepath
+	disk.SourceVolumeName = sVolume
 
 	if isCdrom == true {
 		readOnly := true
