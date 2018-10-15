@@ -63,6 +63,8 @@ func toAdmissionResponse(causes []metav1.StatusCause) *v1beta1.AdmissionResponse
 		globalMessage = fmt.Sprintf("%s %s", globalMessage, cause.Message)
 	}
 
+	log.Log.Infof("Causes: %v", globalMessage)
+
 	return &v1beta1.AdmissionResponse{
 		Result: &metav1.Status{
 			Message: globalMessage,
