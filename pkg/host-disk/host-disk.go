@@ -49,8 +49,17 @@ func ReplacePVCByHostDisk(vmi *v1.VirtualMachineInstance, clientset kubecli.Kube
 				continue
 			}
 
+			fpath := getPVCDiskImgPath(vmi.Spec.Volumes[i].Name, "")
+
+			for _, d := range vmi.Spec.Domain.Devices.Disks {
+				if d.VolumeName == vmi.Spec.Volumes[i].Name {
+					fpath = getPVCDiskImgPath(vmi.Spec.Volumes[i].Name, d.FilePath)
+					break
+				}
+			}
+
 			volumeSource.HostDisk = &v1.HostDisk{
-				Path:     getPVCDiskImgPath(vmi.Spec.Volumes[i].Name, vmi.Spec.Domain.Devices.Disks[i].FilePath),
+				Path:     fpath,
 				Type:     v1.HostDiskExistsOrCreate,
 				Capacity: pvc.Status.Capacity[k8sv1.ResourceStorage],
 			}
