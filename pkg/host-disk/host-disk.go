@@ -50,17 +50,23 @@ func ReplacePVCByHostDisk(vmi *v1.VirtualMachineInstance, clientset kubecli.Kube
 			}
 
 			fpath := getPVCDiskImgPath(vmi.Spec.Volumes[i].Name, "")
+			dtype := v1.HostDiskExistsOrCreate
 
 			for _, d := range vmi.Spec.Domain.Devices.Disks {
 				if d.VolumeName == vmi.Spec.Volumes[i].Name {
 					fpath = getPVCDiskImgPath(vmi.Spec.Volumes[i].Name, d.FilePath)
+					dtype = v1.HostDiskExists
+					break
+				} else if d.SourceVolumeName == vmi.Spec.Volumes[i].Name {
+					fpath = getPVCDiskImgPath(vmi.Spec.Volumes[i].Name, d.SourceFilePath)
+					dtype = v1.HostDiskExists
 					break
 				}
 			}
 
 			volumeSource.HostDisk = &v1.HostDisk{
 				Path:     fpath,
-				Type:     v1.HostDiskExistsOrCreate,
+				Type:     dtype,
 				Capacity: pvc.Status.Capacity[k8sv1.ResourceStorage],
 			}
 			// PersistenVolumeClaim is replaced by HostDisk
@@ -108,7 +114,8 @@ func CreateHostDisks(vmi *v1.VirtualMachineInstance) error {
 				}
 				size, _ := hostDisk.Capacity.AsInt64()
 				if uint64(size) > availableSpace {
-					return fmt.Errorf("Unable to create %s with size %s - not enough space on the cluster", hostDisk.Path, hostDisk.Capacity.String())
+					return fmt.Errorf("Unable to create %s with size %s, available:%v - not enough space on the cluster",
+						hostDisk.Path, hostDisk.Capacity.String(), availableSpace)
 				}
 				err = createSparseRaw(hostDisk.Path, size)
 				if err != nil {

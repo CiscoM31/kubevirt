@@ -136,19 +136,33 @@ func (l *LibvirtDomainManager) DownloadImage(vmi *v1.VirtualMachineInstance, dis
 		}
 		defer from.Close()
 
+		sInfo, err := os.Stat(s)
+		if err != nil {
+			logger.Errorf("Failed to get source file:%s info, erro:%v", s, err)
+		} else {
+			logger.Infof("Source file %s size: %v", s, sInfo.Size())
+		}
 		to, err := os.OpenFile(d, os.O_RDWR|os.O_CREATE, 0666)
 		if err != nil {
 			logger.Errorf("File open of dest %s failed, err: %v", d, err)
 			return err
 		}
 		defer to.Close()
-		_, err = io.Copy(to, from)
+		written, err := io.Copy(to, from)
 		if err != nil {
 			logger.Errorf("File copy failed for %s, err: %v", d, err)
 			os.Remove(dlock)
 			os.Remove(d)
 			return err
 		}
+		to.Sync()
+		dInfo, err := os.Stat(d)
+		if err != nil {
+			logger.Errorf("Failed to get dest file:%s info, erro:%v, written:%d", d, err, written)
+		} else {
+			logger.Infof("Destination file %s size: %v, written:%v", d, dInfo.Size(), written)
+		}
+
 	} else if disk.SourceFilePath != "" {
 		_, err := url.ParseRequestURI(disk.SourceFilePath)
 		if err == nil {
