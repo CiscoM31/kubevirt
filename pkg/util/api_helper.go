@@ -111,6 +111,14 @@ func CreateISCSIPvc(client kubecli.KubevirtClient, name, class, capacity, ns str
 	return pvc, err
 }
 
+func ListPVs(client kubecli.KubevirtClient) (*k8sv1.PersistentVolumeList, error) {
+	return client.CoreV1().PersistentVolumes().List(metav1.ListOptions{})
+}
+
+func DeletePV(client kubecli.KubevirtClient, name string) error {
+	return client.CoreV1().PersistentVolumes().Delete(name, &metav1.DeleteOptions{})
+}
+
 func UpdatePVCPrivate(client kubecli.KubevirtClient, pvc *k8sv1.PersistentVolumeClaim) (*k8sv1.PersistentVolumeClaim, error) {
 	pvc.Spec.AccessModes = []k8sv1.PersistentVolumeAccessMode{k8sv1.ReadWriteOnce}
 	return client.CoreV1().PersistentVolumeClaims(pvc.Namespace).Update(pvc)
@@ -239,4 +247,8 @@ func GetVMI(c kubecli.KubevirtClient, vminame, ns string) (*v1.VirtualMachineIns
 
 func DeleteVMIRS(c kubecli.KubevirtClient, name, ns string) error {
 	return c.ReplicaSet(ns).Delete(name, &metav1.DeleteOptions{})
+}
+
+func DeletePVC(c kubecli.KubevirtClient, name, ns string) error {
+	return c.CoreV1().PersistentVolumeClaims(ns).Delete(name, &metav1.DeleteOptions{})
 }
