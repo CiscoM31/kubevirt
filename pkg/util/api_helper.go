@@ -190,6 +190,13 @@ func AttachDisk(c kubecli.KubevirtClient, vmi *v1.VirtualMachineInstance, diskNa
 		vol.PersistentVolumeClaim = &k8sv1.PersistentVolumeClaimVolumeSource{
 			ClaimName: pvc.Name,
 		}
+		for _, v := range vmi.Spec.Volumes {
+			// if already in the list, this is probably multiple disks refering
+			// to same source volume
+			if v.Name == vol.Name {
+				return nil
+			}
+		}
 		vmi.Spec.Volumes = append(vmi.Spec.Volumes, vol)
 	}
 
