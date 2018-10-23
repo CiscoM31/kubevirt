@@ -68,6 +68,7 @@ func GetOpenAPIDefinitions(ref common.ReferenceCallback) map[string]common.OpenA
 		"kubevirt.io/kubevirt/pkg/api/v1.Memory":                                    schema_kubevirt_pkg_api_v1_Memory(ref),
 		"kubevirt.io/kubevirt/pkg/api/v1.Network":                                   schema_kubevirt_pkg_api_v1_Network(ref),
 		"kubevirt.io/kubevirt/pkg/api/v1.NetworkSource":                             schema_kubevirt_pkg_api_v1_NetworkSource(ref),
+		"kubevirt.io/kubevirt/pkg/api/v1.OS":                                        schema_kubevirt_pkg_api_v1_OS(ref),
 		"kubevirt.io/kubevirt/pkg/api/v1.PITTimer":                                  schema_kubevirt_pkg_api_v1_PITTimer(ref),
 		"kubevirt.io/kubevirt/pkg/api/v1.PodNetwork":                                schema_kubevirt_pkg_api_v1_PodNetwork(ref),
 		"kubevirt.io/kubevirt/pkg/api/v1.Port":                                      schema_kubevirt_pkg_api_v1_Port(ref),
@@ -488,6 +489,27 @@ func schema_kubevirt_pkg_api_v1_Disk(ref common.ReferenceCallback) common.OpenAP
 							Format:      "",
 						},
 					},
+					"filePath": {
+						SchemaProps: spec.SchemaProps{
+							Description: "File path of the disk image file",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"sourceVolumeName": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Source Volume Name from which to copy this image",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"sourceFilePath": {
+						SchemaProps: spec.SchemaProps{
+							Description: "File path of the source disk image file",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
 				},
 				Required: []string{"name", "volumeName"},
 			},
@@ -561,6 +583,13 @@ func schema_kubevirt_pkg_api_v1_DiskTarget(ref common.ReferenceCallback) common.
 							Format:      "",
 						},
 					},
+					"imageFormat": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Image format",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
 				},
 			},
 		},
@@ -585,9 +614,15 @@ func schema_kubevirt_pkg_api_v1_DomainSpec(ref common.ReferenceCallback) common.
 							Ref:         ref("kubevirt.io/kubevirt/pkg/api/v1.CPU"),
 						},
 					},
-					"memory": {
+					"os": {
 						SchemaProps: spec.SchemaProps{
 							Description: "Memory allow specifying the VMI memory features.",
+							Ref:         ref("kubevirt.io/kubevirt/pkg/api/v1.OS"),
+						},
+					},
+					"memory": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Machine type",
 							Ref:         ref("kubevirt.io/kubevirt/pkg/api/v1.Memory"),
 						},
 					},
@@ -633,7 +668,7 @@ func schema_kubevirt_pkg_api_v1_DomainSpec(ref common.ReferenceCallback) common.
 			},
 		},
 		Dependencies: []string{
-			"kubevirt.io/kubevirt/pkg/api/v1.CPU", "kubevirt.io/kubevirt/pkg/api/v1.Clock", "kubevirt.io/kubevirt/pkg/api/v1.Devices", "kubevirt.io/kubevirt/pkg/api/v1.Features", "kubevirt.io/kubevirt/pkg/api/v1.Firmware", "kubevirt.io/kubevirt/pkg/api/v1.Machine", "kubevirt.io/kubevirt/pkg/api/v1.Memory", "kubevirt.io/kubevirt/pkg/api/v1.ResourceRequirements"},
+			"kubevirt.io/kubevirt/pkg/api/v1.CPU", "kubevirt.io/kubevirt/pkg/api/v1.Clock", "kubevirt.io/kubevirt/pkg/api/v1.Devices", "kubevirt.io/kubevirt/pkg/api/v1.Features", "kubevirt.io/kubevirt/pkg/api/v1.Firmware", "kubevirt.io/kubevirt/pkg/api/v1.Machine", "kubevirt.io/kubevirt/pkg/api/v1.Memory", "kubevirt.io/kubevirt/pkg/api/v1.OS", "kubevirt.io/kubevirt/pkg/api/v1.ResourceRequirements"},
 	}
 }
 
@@ -1195,6 +1230,13 @@ func schema_kubevirt_pkg_api_v1_LunTarget(ref common.ReferenceCallback) common.O
 							Format:      "",
 						},
 					},
+					"imageFormat": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Image format",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
 				},
 			},
 		},
@@ -1311,6 +1353,26 @@ func schema_kubevirt_pkg_api_v1_NetworkSource(ref common.ReferenceCallback) comm
 		},
 		Dependencies: []string{
 			"kubevirt.io/kubevirt/pkg/api/v1.CniNetwork", "kubevirt.io/kubevirt/pkg/api/v1.PodNetwork"},
+	}
+}
+
+func schema_kubevirt_pkg_api_v1_OS(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "OS allow specifying the boot order",
+				Properties: map[string]spec.Schema{
+					"bootorder": {
+						SchemaProps: spec.SchemaProps{
+							Description: "BootOrder specifies the boot order prority.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+				},
+			},
+		},
+		Dependencies: []string{},
 	}
 }
 

@@ -3459,6 +3459,10 @@
       "description": "Attach a volume as a disk to the vmi.",
       "$ref": "#/definitions/v1.DiskTarget"
      },
+     "filePath": {
+      "description": "File path of the disk image file",
+      "type": "string"
+     },
      "floppy": {
       "description": "Attach a volume as a floppy to the vmi.",
       "$ref": "#/definitions/v1.FloppyTarget"
@@ -3475,24 +3479,28 @@
       "description": "Serial provides the ability to specify a serial number for the disk device.\n+optional",
       "type": "string"
      },
-     "volumeName": {
-      "description": "Name of the volume which is referenced.\nMust match the Name of a Volume.",
-      "type": "string"
-     },
-     "sourceVolumeName": {
-      "description": "Name of the volume from where this image is copied from.\nMust match the Name of a Volume",
-      "type": "string"
-      },
      "sourceFilePath": {
       "description": "File path of the source disk image file",
       "type": "string"
-      }
+     },
+     "sourceVolumeName": {
+      "description": "Source Volume Name from which to copy this image",
+      "type": "string"
+     },
+     "volumeName": {
+      "description": "Name of the volume which is referenced.\nMust match the Name of a Volume.",
+      "type": "string"
+     }
     }
    },
    "v1.DiskTarget": {
     "properties": {
      "bus": {
       "description": "Bus indicates the type of disk device to emulate.\nsupported values: virtio, sata, scsi, ide.",
+      "type": "string"
+     },
+     "imageFormat": {
+      "description": "Image format",
       "type": "string"
      },
      "pciAddress": {
@@ -3539,8 +3547,12 @@
       "$ref": "#/definitions/v1.Machine"
      },
      "memory": {
-      "description": "Memory allow specifying the VMI memory features.\n+optional",
+      "description": "Machine type\n+optional",
       "$ref": "#/definitions/v1.Memory"
+     },
+     "os": {
+      "description": "Memory allow specifying the VMI memory features.\n+optional",
+      "$ref": "#/definitions/v1.OS"
      },
      "resources": {
       "description": "Resources describes the Compute Resources required by this vmi.",
@@ -3921,6 +3933,10 @@
       "description": "Bus indicates the type of disk device to emulate.\nsupported values: virtio, sata, scsi, ide.",
       "type": "string"
      },
+     "imageFormat": {
+      "description": "Image format",
+      "type": "string"
+     },
      "readonly": {
       "description": "ReadOnly.\nDefaults to false.",
       "type": "boolean"
@@ -4043,6 +4059,15 @@
       "items": {
        "$ref": "#/definitions/v1.NodeSelectorRequirement"
       }
+     }
+    }
+   },
+   "v1.OS": {
+    "description": "OS allow specifying the boot order",
+    "properties": {
+     "bootorder": {
+      "description": "BootOrder specifies the boot order prority.",
+      "type": "string"
      }
     }
    },

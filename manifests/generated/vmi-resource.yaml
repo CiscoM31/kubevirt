@@ -75,10 +75,14 @@ spec:
                             properties:
                               bus:
                                 type: string
+                              imageFormat:
+                                type: string
                               pciAddress:
                                 type: string
                               readonly:
                                 type: boolean
+                          filePath:
+                            type: string
                           floppy:
                             properties:
                               readonly:
@@ -89,11 +93,17 @@ spec:
                             properties:
                               bus:
                                 type: string
+                              imageFormat:
+                                type: string
                               readonly:
                                 type: boolean
                           name:
                             type: string
                           serial:
+                            type: string
+                          sourceFilePath:
+                            type: string
+                          sourceVolumeName:
                             type: string
                           volumeName:
                             type: string
@@ -218,6 +228,10 @@ spec:
                       properties:
                         pageSize:
                           type: string
+                os:
+                  properties:
+                    bootorder:
+                      type: string
                 resources:
                   properties:
                     limits:

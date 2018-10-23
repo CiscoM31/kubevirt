@@ -46,7 +46,8 @@ func (DomainSpec) SwaggerDoc() map[string]string {
 	return map[string]string{
 		"resources":       "Resources describes the Compute Resources required by this vmi.",
 		"cpu":             "CPU allow specified the detailed CPU topology inside the vmi.\n+optional",
-		"memory":          "Memory allow specifying the VMI memory features.\n+optional",
+		"os":              "Memory allow specifying the VMI memory features.\n+optional",
+		"memory":          "Machine type\n+optional",
 		"machine":         "Machine type.\n+optional",
 		"firmware":        "Firmware.\n+optional",
 		"clock":           "Clock sets the clock and timers of the vmi.\n+optional",
@@ -70,6 +71,13 @@ func (CPU) SwaggerDoc() map[string]string {
 		"cores":                 "Cores specifies the number of cores inside the vmi.\nMust be a value greater or equal 1.",
 		"model":                 "Model specifies the CPU model inside the VMI.\nList of available models https://github.com/libvirt/libvirt/blob/master/src/cpu/cpu_map.xml.\nIt is possible to specify special cases like \"host-passthrough\" to get the same CPU as the node\nand \"host-model\" to get CPU closest to the node one.\nFor more information see https://libvirt.org/formatdomain.html#elementsCPU.\nDefaults to host-model.\n+optional",
 		"dedicatedCpuPlacement": "DedicatedCPUPlacement requests the scheduler to place the VirtualMachineInstance on a node\nwith enough dedicated pCPUs and pin the vCPUs to it.\n+optional",
+	}
+}
+
+func (OS) SwaggerDoc() map[string]string {
+	return map[string]string{
+		"":          "OS allow specifying the boot order",
+		"bootorder": "BootOrder specifies the boot order prority.",
 	}
 }
 
@@ -119,6 +127,9 @@ func (Disk) SwaggerDoc() map[string]string {
 		"bootOrder":         "BootOrder is an integer value > 0, used to determine ordering of boot devices.\nLower values take precedence.\nEach disk or interface that has a boot order must have a unique value.\nDisks without a boot order are not tried if a disk with a boot order exists.\n+optional",
 		"serial":            "Serial provides the ability to specify a serial number for the disk device.\n+optional",
 		"dedicatedIOThread": "dedicatedIOThread indicates this disk should have an exclusive IO Thread.\nEnabling this implies useIOThreads = true.\nDefaults to false.\n+optional",
+		"filePath":          "File path of the disk image file",
+		"sourceVolumeName":  "Source Volume Name from which to copy this image",
+		"sourceFilePath":    "File path of the source disk image file",
 	}
 }
 
@@ -134,16 +145,18 @@ func (DiskDevice) SwaggerDoc() map[string]string {
 
 func (DiskTarget) SwaggerDoc() map[string]string {
 	return map[string]string{
-		"bus":        "Bus indicates the type of disk device to emulate.\nsupported values: virtio, sata, scsi, ide.",
-		"readonly":   "ReadOnly.\nDefaults to false.",
-		"pciAddress": "If specified, the virtual disk will be placed on the guests pci address with the specifed PCI address. For example: 0000:81:01.10\n+optional",
+		"bus":         "Bus indicates the type of disk device to emulate.\nsupported values: virtio, sata, scsi, ide.",
+		"readonly":    "ReadOnly.\nDefaults to false.",
+		"pciAddress":  "If specified, the virtual disk will be placed on the guests pci address with the specifed PCI address. For example: 0000:81:01.10\n+optional",
+		"imageFormat": "Image format",
 	}
 }
 
 func (LunTarget) SwaggerDoc() map[string]string {
 	return map[string]string{
-		"bus":      "Bus indicates the type of disk device to emulate.\nsupported values: virtio, sata, scsi, ide.",
-		"readonly": "ReadOnly.\nDefaults to false.",
+		"bus":         "Bus indicates the type of disk device to emulate.\nsupported values: virtio, sata, scsi, ide.",
+		"readonly":    "ReadOnly.\nDefaults to false.",
+		"imageFormat": "Image format",
 	}
 }
 
