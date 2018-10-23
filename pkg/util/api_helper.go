@@ -15,6 +15,8 @@ import (
 
 	errors2 "errors"
 
+	"strings"
+
 	"kubevirt.io/kubevirt/pkg/api/v1"
 	"kubevirt.io/kubevirt/pkg/kubecli"
 )
@@ -115,6 +117,19 @@ func CreateISCSIPvc(client kubecli.KubevirtClient, name, class, capacity, ns str
 	}
 
 	return pvc, err
+}
+
+func GetPVNamefromPVC(c kubecli.KubevirtClient, pvcName, ns string) (string, error) {
+	pvc, err := c.CoreV1().PersistentVolumeClaims(ns).Get(pvcName, metav1.GetOptions{})
+	if err != nil {
+		return "", err
+	}
+	class := pvc.Spec.StorageClassName
+	pvName := strings.Split(*class, "-class")
+	if len(pvName) <= 0 {
+		return "", fmt.Errorf("failed to split pvc class name")
+	}
+	return pvName[0], nil
 }
 
 func ListPVs(client kubecli.KubevirtClient) (*k8sv1.PersistentVolumeList, error) {
