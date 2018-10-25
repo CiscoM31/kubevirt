@@ -40,11 +40,18 @@ func NewReplicaSetFromVMI(vmi *v1.VirtualMachineInstance, replicas int32) *v1.Vi
 	return rs
 }
 
-func CreateISCSIPv(client kubecli.KubevirtClient, name, class, capacity, target, iqn string, lun int32, volBlockMode bool) (*k8sv1.PersistentVolume, error) {
+func CreateISCSIPv(client kubecli.KubevirtClient, name, class, capacity, target, iqn string, lun int32,
+	readOnly, volBlockMode bool) (*k8sv1.PersistentVolume, error) {
 	quantity, err := resource.ParseQuantity(capacity)
 	if err != nil {
 		return nil, err
 	}
+
+	accessMode := k8sv1.ReadWriteMany
+	if readOnly {
+		accessMode = k8sv1.ReadOnlyMany
+	}
+	fmt.Printf("Access mode: %v", accessMode)
 
 	mode := k8sv1.PersistentVolumeFilesystem
 	if volBlockMode {
@@ -55,7 +62,7 @@ func CreateISCSIPv(client kubecli.KubevirtClient, name, class, capacity, target,
 			Name: name,
 		},
 		Spec: k8sv1.PersistentVolumeSpec{
-			AccessModes: []k8sv1.PersistentVolumeAccessMode{k8sv1.ReadWriteMany},
+			AccessModes: []k8sv1.PersistentVolumeAccessMode{accessMode},
 			Capacity: k8sv1.ResourceList{
 				"storage": quantity,
 			},
@@ -65,7 +72,7 @@ func CreateISCSIPv(client kubecli.KubevirtClient, name, class, capacity, target,
 					TargetPortal: target,
 					IQN:          iqn,
 					Lun:          lun,
-					ReadOnly:     false,
+					ReadOnly:     readOnly,
 				},
 			},
 			StorageClassName: class,
@@ -85,7 +92,7 @@ func UpdatePVToPrivate(client kubecli.KubevirtClient, pv *k8sv1.PersistentVolume
 	return client.CoreV1().PersistentVolumes().Update(pv)
 }
 
-func CreateISCSIPvc(client kubecli.KubevirtClient, name, class, capacity, ns string, volumeBlockMode bool) (*k8sv1.PersistentVolumeClaim, error) {
+func CreateISCSIPvc(client kubecli.KubevirtClient, name, class, capacity, ns string, readOnly, volumeBlockMode bool) (*k8sv1.PersistentVolumeClaim, error) {
 	quantity, err := resource.ParseQuantity(capacity)
 	if err != nil {
 		return nil, err
@@ -95,10 +102,15 @@ func CreateISCSIPvc(client kubecli.KubevirtClient, name, class, capacity, ns str
 		mode = k8sv1.PersistentVolumeBlock
 	}
 
+	accessMode := k8sv1.ReadWriteMany
+	if readOnly {
+		accessMode = k8sv1.ReadOnlyMany
+	}
+
 	pvc := &k8sv1.PersistentVolumeClaim{
 		ObjectMeta: metav1.ObjectMeta{Name: name},
 		Spec: k8sv1.PersistentVolumeClaimSpec{
-			AccessModes: []k8sv1.PersistentVolumeAccessMode{k8sv1.ReadWriteMany},
+			AccessModes: []k8sv1.PersistentVolumeAccessMode{accessMode},
 			Resources: k8sv1.ResourceRequirements{
 				Requests: k8sv1.ResourceList{
 					"storage": quantity,
@@ -170,7 +182,6 @@ func AttachDisk(c kubecli.KubevirtClient, vmi *v1.VirtualMachineInstance, diskNa
 		disk.FilePath = filepath
 		disk.SourceFilePath = sfilepath
 		disk.SourceVolumeName = sVolume
-
 		if isCdrom == true {
 			readOnly := true
 			disk.CDRom = &v1.CDRomTarget{Bus: "sata", ReadOnly: &readOnly}
@@ -187,7 +198,7 @@ func AttachDisk(c kubecli.KubevirtClient, vmi *v1.VirtualMachineInstance, diskNa
 
 	fmt.Printf("\nCreating PVC for %s, class:%v", diskName, class)
 	pvcName := fmt.Sprintf("%s-%s", diskName, "pvc")
-	pvc, err := CreateISCSIPvc(c, pvcName, class, capacity, "default", volumeBlockMode)
+	pvc, err := CreateISCSIPvc(c, pvcName, class, capacity, "default", false, volumeBlockMode)
 	if err != nil {
 		fmt.Printf("\nFailed to create PVC %s %v", pvcName, err)
 		return err
@@ -205,7 +216,20 @@ func AttachDisk(c kubecli.KubevirtClient, vmi *v1.VirtualMachineInstance, diskNa
 		pvcName = fmt.Sprintf("%s-%s", vol.Name, "source-pvc")
 		fmt.Printf("\nCreating source PVC for %s", pvcName)
 		sClass := fmt.Sprintf("%s-class", sVolume)
-		pvc, err = CreateISCSIPvc(c, pvcName, sClass, capacity, "default", volumeBlockMode)
+
+		pV, err := GetPv(c, sVolume)
+		if err != nil {
+			fmt.Printf("PV %s not found for PVC %s configuration", sVolume, pvcName)
+			return err
+		}
+		accessMode := pV.Spec.AccessModes
+		readOnly := false
+		if len(accessMode) != 0 {
+			if accessMode[0] == k8sv1.ReadOnlyMany {
+				readOnly = true
+			}
+		}
+		pvc, err = CreateISCSIPvc(c, pvcName, sClass, capacity, "default", readOnly, volumeBlockMode)
 		if err != nil {
 			fmt.Printf("\nFailed to create PVC %s %v", pvcName, err)
 			return err
@@ -282,4 +306,26 @@ func DeleteVMIRS(c kubecli.KubevirtClient, name, ns string) error {
 
 func DeletePVC(c kubecli.KubevirtClient, name, ns string) error {
 	return c.CoreV1().PersistentVolumeClaims(ns).Delete(name, &metav1.DeleteOptions{})
+}
+
+func GetPv(c kubecli.KubevirtClient, name string) (*k8sv1.PersistentVolume, error) {
+	pv, err := c.CoreV1().PersistentVolumes().Get(name, metav1.GetOptions{})
+	if err != nil || pv == nil {
+		return nil, err
+	}
+	return pv, err
+}
+
+func GetPvDetails(c kubecli.KubevirtClient, name string) (bool, int32, string, error) {
+	pv, err := c.CoreV1().PersistentVolumes().Get(name, metav1.GetOptions{})
+	if err != nil || pv == nil || pv.Spec.ISCSI == nil {
+		return false, 0, "", err
+	}
+	mode := k8sv1.PersistentVolumeFilesystem
+	if pv.Spec.VolumeMode != nil {
+		mode = *pv.Spec.VolumeMode
+	}
+	rs := pv.Spec.Capacity["storage"]
+	storage := (&rs).String()
+	return mode == k8sv1.PersistentVolumeBlock, pv.Spec.ISCSI.Lun, storage, nil
 }
