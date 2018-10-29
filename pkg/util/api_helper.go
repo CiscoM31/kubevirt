@@ -329,3 +329,37 @@ func GetPvDetails(c kubecli.KubevirtClient, name string) (bool, int32, string, e
 	storage := (&rs).String()
 	return mode == k8sv1.PersistentVolumeBlock, pv.Spec.ISCSI.Lun, storage, nil
 }
+
+// Assign affinity and anti affinity labels
+func AddAppAffinityLables(vmi *v1.VirtualMachineInstance, affinityLabel, antiAffinityLabel string) error {
+
+	if affinityLabel == "" && antiAffinityLabel == "" {
+		return nil
+	}
+
+	affLables := k8sv1.Affinity{}
+
+	if affinityLabel != "" {
+		labelSelReq := metav1.LabelSelectorRequirement{Key: "app", Operator: metav1.LabelSelectorOpIn,
+			Values: []string{affinityLabel}}
+		labelSel := metav1.LabelSelector{MatchExpressions: []metav1.LabelSelectorRequirement{labelSelReq}}
+		podTerm := k8sv1.PodAffinityTerm{LabelSelector: &labelSel, TopologyKey: "kubernetes.io/hostname"}
+		podAff := k8sv1.PodAffinity{}
+		podAff.RequiredDuringSchedulingIgnoredDuringExecution = []k8sv1.PodAffinityTerm{podTerm}
+		affLables.PodAffinity = &podAff
+	}
+
+	if antiAffinityLabel != "" {
+		labelSelReq := metav1.LabelSelectorRequirement{Key: "app", Operator: metav1.LabelSelectorOpIn,
+			Values: []string{antiAffinityLabel}}
+		labelSel := metav1.LabelSelector{MatchExpressions: []metav1.LabelSelectorRequirement{labelSelReq}}
+		podTerm := k8sv1.PodAffinityTerm{LabelSelector: &labelSel, TopologyKey: "kubernetes.io/hostname"}
+		podAntiAff := k8sv1.PodAntiAffinity{}
+		podAntiAff.RequiredDuringSchedulingIgnoredDuringExecution = []k8sv1.PodAffinityTerm{podTerm}
+		affLables.PodAntiAffinity = &podAntiAff
+	}
+
+	vmi.Spec.Affinity = &affLables
+
+	return nil
+}
