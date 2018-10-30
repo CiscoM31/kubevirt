@@ -132,6 +132,7 @@ func (l *LibvirtDomainManager) DownloadImage(vmi *v1.VirtualMachineInstance, dis
 		from, err := os.Open(s)
 		if err != nil {
 			logger.Errorf("File open of source %v failed, err: %v", s, err)
+			os.Remove(dlock)
 			return err
 		}
 		defer from.Close()
@@ -145,6 +146,7 @@ func (l *LibvirtDomainManager) DownloadImage(vmi *v1.VirtualMachineInstance, dis
 		to, err := os.OpenFile(d, os.O_RDWR|os.O_CREATE, 0666)
 		if err != nil {
 			logger.Errorf("File open of dest %s failed, err: %v", d, err)
+			os.Remove(dlock)
 			return err
 		}
 		defer to.Close()
