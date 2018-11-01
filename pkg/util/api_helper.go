@@ -363,3 +363,7 @@ func AddAppAffinityLables(vmi *v1.VirtualMachineInstance, affinityLabel, antiAff
 
 	return nil
 }
+
+func ListNodes(client kubecli.KubevirtClient) (*k8sv1.NodeList, error) {
+	return client.CoreV1().Nodes().List(metav1.ListOptions{})
+}
