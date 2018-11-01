@@ -155,7 +155,7 @@ func UpdatePVCPrivate(client kubecli.KubevirtClient, pvc *k8sv1.PersistentVolume
 	return client.CoreV1().PersistentVolumeClaims(pvc.Namespace).Update(pvc)
 }
 
-func SetResources(vmi *v1.VirtualMachineInstance, cpu, memory string) error {
+func SetResources(vmi *v1.VirtualMachineInstance, cpu, memory, cpuModel string) error {
 	t := int64(30)
 	vmi.Spec.TerminationGracePeriodSeconds = &t
 	cpus := resource.MustParse(cpu)
@@ -168,7 +168,7 @@ func SetResources(vmi *v1.VirtualMachineInstance, cpu, memory string) error {
 		return fmt.Errorf("SetResources failed: %v", err)
 	}
 	fmt.Printf("\nCores: %d\n", cores)
-	vmi.Spec.Domain.CPU = &v1.CPU{Cores: uint32(cores), Model: "host-model"}
+	vmi.Spec.Domain.CPU = &v1.CPU{Cores: uint32(cores), Model: cpuModel}
 	return nil
 }
 
