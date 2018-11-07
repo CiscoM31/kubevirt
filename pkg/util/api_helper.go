@@ -330,6 +330,15 @@ func GetPvDetails(c kubecli.KubevirtClient, name string) (bool, int32, string, e
 	return mode == k8sv1.PersistentVolumeBlock, pv.Spec.ISCSI.Lun, storage, nil
 }
 
+// Return PVC reference
+func GetPVC(c kubecli.KubevirtClient, name string) (*k8sv1.PersistentVolumeClaim, error) {
+	pvc, err := c.CoreV1().PersistentVolumeClaims("default").Get(name, metav1.GetOptions{})
+	if err != nil || pvc == nil {
+		return nil, err
+	}
+	return pvc, err
+}
+
 // Assign affinity and anti affinity labels
 func AddAppAffinityLables(vmi *v1.VirtualMachineInstance, affinityLabel, antiAffinityLabel string) error {
 
