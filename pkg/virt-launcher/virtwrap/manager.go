@@ -102,10 +102,15 @@ func (l *LibvirtDomainManager) DownloadHttpFile(filepath string, url string) err
 	}
 	defer resp.Body.Close()
 
-	// Write the body to file
-	_, err = io.Copy(out, resp.Body)
-	if err != nil {
-		return err
+	if resp.StatusCode == http.StatusOK {
+		// Write the body to file
+		_, err = io.Copy(out, resp.Body)
+		if err != nil {
+			return err
+		}
+		out.Sync()
+	} else {
+		return fmt.Errorf("Failed to copy source file %s, err: %v", url, resp.Status)
 	}
 
 	return nil
@@ -201,7 +206,10 @@ func (l *LibvirtDomainManager) SetupDisks(vmi *v1.VirtualMachineInstance) error 
 			_, err := os.Stat(dlock)
 			if os.IsNotExist(err) {
 				// lock file doesn't exist, we need to download the image file
-				l.DownloadImage(vmi, disk)
+				err = l.DownloadImage(vmi, disk)
+				if err != nil {
+					return err
+				}
 			} else {
 				logger.Infof("Disk file %v already setup, reusing it.", d)
 				continue
@@ -534,7 +542,10 @@ func (l *LibvirtDomainManager) SyncVMI(vmi *v1.VirtualMachineInstance, useEmulat
 	}
 
 	// Setup all the disk images
-	l.SetupDisks(vmi)
+	if err := l.SetupDisks(vmi); err != nil {
+		logger.Errorf("Failed to setup Disks: %v", err)
+		return nil, err
+	}
 
 	// Set defaults which are not coming from the cluster
 	api.SetObjectDefaults_Domain(domain)
