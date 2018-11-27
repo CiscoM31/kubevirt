@@ -3459,6 +3459,14 @@
       "description": "Attach a volume as a disk to the vmi.",
       "$ref": "#/definitions/v1.DiskTarget"
      },
+     "exportFilePath": {
+      "description": "Export file path to which the disk file to copy to",
+      "type": "string"
+     },
+     "exportVolumeName": {
+      "description": "Export Volume Name to which the disk needs to be exported to",
+      "type": "string"
+     },
      "filePath": {
       "description": "File path of the disk image file",
       "type": "string"

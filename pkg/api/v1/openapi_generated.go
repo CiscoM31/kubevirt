@@ -510,6 +510,20 @@ func schema_kubevirt_pkg_api_v1_Disk(ref common.ReferenceCallback) common.OpenAP
 							Format:      "",
 						},
 					},
+					"exportVolumeName": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Export Volume Name to which the disk needs to be exported to",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"exportFilePath": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Export file path to which the disk file to copy to",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
 				},
 				Required: []string{"name", "volumeName"},
 			},

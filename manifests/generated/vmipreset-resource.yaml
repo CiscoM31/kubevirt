@@ -80,6 +80,10 @@ spec:
                                 type: string
                               readonly:
                                 type: boolean
+                          exportFilePath:
+                            type: string
+                          exportVolumeName:
+                            type: string
                           filePath:
                             type: string
                           floppy:
