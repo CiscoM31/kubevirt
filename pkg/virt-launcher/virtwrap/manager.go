@@ -32,6 +32,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path"
 	"sync"
 	"time"
 
@@ -196,7 +197,7 @@ func (l *LibvirtDomainManager) DownloadImage(vmi *v1.VirtualMachineInstance, dis
 }
 
 // Setup the disk images in the target location for the VM to use
-func (l *LibvirtDomainManager) SetupDisks(vmi *v1.VirtualMachineInstance) error {
+func (l *LibvirtDomainManager) setupDisks(vmi *v1.VirtualMachineInstance) error {
 	logger := log.Log.Object(vmi)
 	logger.Infof("Setup Disks....")
 	for _, disk := range vmi.Spec.Domain.Devices.Disks {
@@ -212,6 +213,96 @@ func (l *LibvirtDomainManager) SetupDisks(vmi *v1.VirtualMachineInstance) error 
 				}
 			} else {
 				logger.Infof("Disk file %v already setup, reusing it.", d)
+				continue
+			}
+		}
+	}
+	return nil
+}
+
+// Download the disk image from the source volume.
+func (l *LibvirtDomainManager) exportImage(vmi *v1.VirtualMachineInstance, disk v1.Disk) error {
+	logger := log.Log.Object(vmi)
+	s := api.Convert_v1_FilesystemVolumeSource_To_api_File(disk.VolumeName, disk.FilePath, nil)
+	slock := fmt.Sprintf("%s_export.lock", s)
+	logger.Infof("Export Progress disk file %v does not exist, creating", s)
+	_, err := os.Create(slock)
+	if err != nil {
+		logger.Errorf("File check failed for %v, err:%v", slock, err)
+		os.Remove(slock)
+		return err
+	}
+
+	if disk.ExportFilePath != "" && disk.ExportVolumeName != "" {
+		d := api.Convert_v1_FilesystemVolumeSource_To_api_File(disk.ExportVolumeName, disk.ExportFilePath, nil)
+		dir, fName := path.Split(d)
+		d = fmt.Sprintf("%v-%s", time.Now().Unix(), fName)
+		d = path.Join(dir, d)
+		logger.Infof("Disk Export Source: %v", s)
+		logger.Infof("Disk Destination: %v", d)
+
+		from, err := os.Open(s)
+		if err != nil {
+			logger.Errorf("File open of source %v failed, err: %v", s, err)
+			os.Remove(slock)
+			return err
+		}
+		defer from.Close()
+
+		sInfo, err := os.Stat(s)
+		if err != nil {
+			logger.Errorf("Failed to get source file:%s info, erro:%v", s, err)
+		} else {
+			logger.Infof("Source file %s size: %v", s, sInfo.Size())
+		}
+		to, err := os.OpenFile(d, os.O_RDWR|os.O_CREATE, 0666)
+		if err != nil {
+			logger.Errorf("File open of dest %s failed, err: %v", d, err)
+			os.Remove(slock)
+			return err
+		}
+		defer to.Close()
+		written, err := io.Copy(to, from)
+		if err != nil {
+			logger.Errorf("File copy failed for %s, err: %v", d, err)
+			os.Remove(slock)
+			os.Remove(d)
+			return err
+		}
+		to.Sync()
+		dInfo, err := os.Stat(d)
+		if err != nil {
+			logger.Errorf("Failed to get dest file:%s info, erro:%v, written:%d", d, err, written)
+		} else {
+			logger.Infof("Destination file %s size: %v, written:%v", d, dInfo.Size(), written)
+			os.Remove(slock)
+		}
+
+	} else {
+		logger.Infof("No export file path or volume information for disk: %s", s)
+		return nil
+	}
+	logger.Infof("File export of %v done", s)
+	return nil
+}
+
+// Setup the disk images in the target location for the VM to use
+func (l *LibvirtDomainManager) exportDisks(vmi *v1.VirtualMachineInstance) error {
+	logger := log.Log.Object(vmi)
+	logger.Infof("Export Disks if required....")
+	for _, disk := range vmi.Spec.Domain.Devices.Disks {
+		if disk.ExportFilePath != "" && disk.ExportVolumeName != "" {
+			s := api.Convert_v1_FilesystemVolumeSource_To_api_File(disk.VolumeName, disk.FilePath, nil)
+			slock := fmt.Sprintf("%s_export.lock", s)
+			_, err := os.Stat(slock)
+			if os.IsNotExist(err) {
+				// lock file doesn't exist, we need to export the image file
+				err = l.exportImage(vmi, disk)
+				if err != nil {
+					return err
+				}
+			} else {
+				logger.Infof("Export of %s already in progress", s)
 				continue
 			}
 		}
@@ -542,7 +633,7 @@ func (l *LibvirtDomainManager) SyncVMI(vmi *v1.VirtualMachineInstance, useEmulat
 	}
 
 	// Setup all the disk images
-	if err := l.SetupDisks(vmi); err != nil {
+	if err := l.setupDisks(vmi); err != nil {
 		logger.Errorf("Failed to setup Disks: %v", err)
 		return nil, err
 	}
@@ -555,6 +646,12 @@ func (l *LibvirtDomainManager) SyncVMI(vmi *v1.VirtualMachineInstance, useEmulat
 	if err != nil {
 		// We need the domain but it does not exist, so create it
 		if domainerrors.IsNotFound(err) {
+
+			// Export any disk images that were requested before we start
+			if err := l.exportDisks(vmi); err != nil {
+				logger.Errorf("Failed to export Disks: %v", err)
+			}
+
 			newDomain = true
 			domain, err = l.preStartHook(vmi, domain)
 			if err != nil {

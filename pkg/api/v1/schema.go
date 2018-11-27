@@ -273,6 +273,10 @@ type Disk struct {
 	SourceVolumeName string `json:"sourceVolumeName,omitempty"`
 	// File path of the source disk image file
 	SourceFilePath string `json:"sourceFilePath,omitempty"`
+	// Export Volume Name to which the disk needs to be exported to
+	ExportVolumeName string `json:"exportVolumeName,omitempty"`
+	// Export file path to which the disk file to copy to
+	ExportFilePath string `json:"exportFilePath,omitempty"`
 }
 
 // Represents the target of a volume to mount.

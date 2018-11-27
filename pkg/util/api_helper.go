@@ -7,7 +7,6 @@ import (
 	errors2 "errors"
 	"fmt"
 	"strconv"
-	"strings"
 
 	k8sv1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -134,12 +133,7 @@ func GetPVNamefromPVC(c kubecli.KubevirtClient, pvcName, ns string) (string, err
 	if err != nil {
 		return "", err
 	}
-	class := pvc.Spec.StorageClassName
-	pvName := strings.Split(*class, "-class")
-	if len(pvName) <= 0 {
-		return "", fmt.Errorf("failed to split pvc class name")
-	}
-	return pvName[0], nil
+	return pvc.Spec.VolumeName, nil
 }
 
 func ListPVs(client kubecli.KubevirtClient) (*k8sv1.PersistentVolumeList, error) {
@@ -173,7 +167,7 @@ func SetResources(vmi *v1.VirtualMachineInstance, cpu, memory, cpuModel string) 
 }
 
 func AttachDisk(c kubecli.KubevirtClient, vmi *v1.VirtualMachineInstance, diskName, volumeName, class,
-	filepath, sVolume, sfilepath, capacity, format string, isCdrom, volumeBlockMode bool) error {
+	filepath, sVolume, sfilepath, eVolume, efilepath, capacity, format string, isCdrom, volumeBlockMode bool) error {
 	disk := v1.Disk{}
 	disk.Name = diskName
 	disk.VolumeName = volumeName
@@ -182,6 +176,8 @@ func AttachDisk(c kubecli.KubevirtClient, vmi *v1.VirtualMachineInstance, diskNa
 		disk.FilePath = filepath
 		disk.SourceFilePath = sfilepath
 		disk.SourceVolumeName = sVolume
+		disk.ExportVolumeName = eVolume
+		disk.ExportFilePath = efilepath
 		if isCdrom == true {
 			readOnly := true
 			disk.CDRom = &v1.CDRomTarget{Bus: "sata", ReadOnly: &readOnly}
@@ -230,6 +226,44 @@ func AttachDisk(c kubecli.KubevirtClient, vmi *v1.VirtualMachineInstance, diskNa
 			}
 		}
 		pvc, err = CreateISCSIPvc(c, pvcName, sClass, capacity, "default", readOnly, volumeBlockMode)
+		if err != nil {
+			fmt.Printf("\nFailed to create PVC %s %v", pvcName, err)
+			return err
+		}
+
+		vol.PersistentVolumeClaim = &k8sv1.PersistentVolumeClaimVolumeSource{
+			ClaimName: pvc.Name,
+		}
+		for _, v := range vmi.Spec.Volumes {
+			// if already in the list, this is probably multiple disks refering
+			// to same source volume
+			if v.Name == vol.Name {
+				return nil
+			}
+		}
+		vmi.Spec.Volumes = append(vmi.Spec.Volumes, vol)
+	}
+
+	if eVolume != "" {
+		vol = v1.Volume{}
+		vol.Name = fmt.Sprintf("%s", eVolume)
+		pvcName = fmt.Sprintf("%s-%s", vol.Name, "export-pvc")
+		fmt.Printf("\nCreating export PVC for %s", pvcName)
+		eClass := fmt.Sprintf("%s-class", eVolume)
+
+		pV, err := GetPv(c, eVolume)
+		if err != nil {
+			fmt.Printf("PV %s not found for PVC %s configuration", eVolume, pvcName)
+			return err
+		}
+		accessMode := pV.Spec.AccessModes
+		readOnly := false
+		if len(accessMode) != 0 {
+			if accessMode[0] == k8sv1.ReadOnlyMany {
+				readOnly = true
+			}
+		}
+		pvc, err = CreateISCSIPvc(c, pvcName, eClass, capacity, "default", readOnly, volumeBlockMode)
 		if err != nil {
 			fmt.Printf("\nFailed to create PVC %s %v", pvcName, err)
 			return err

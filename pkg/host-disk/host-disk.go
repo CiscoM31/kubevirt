@@ -61,6 +61,10 @@ func ReplacePVCByHostDisk(vmi *v1.VirtualMachineInstance, clientset kubecli.Kube
 					fpath = getPVCDiskImgPath(vmi.Spec.Volumes[i].Name, d.SourceFilePath)
 					dtype = v1.HostDiskExists
 					break
+				} else if d.ExportVolumeName == vmi.Spec.Volumes[i].Name {
+					fpath = getPVCDiskImgPath(vmi.Spec.Volumes[i].Name, d.ExportFilePath)
+					dtype = v1.HostDiskExists
+					break
 				}
 			}
 
