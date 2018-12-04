@@ -3487,6 +3487,10 @@
       "description": "Serial provides the ability to specify a serial number for the disk device.\n+optional",
       "type": "string"
      },
+     "size": {
+      "description": "size if disk needs to be created",
+      "type": "string"
+     },
      "sourceFilePath": {
       "description": "File path of the source disk image file",
       "type": "string"

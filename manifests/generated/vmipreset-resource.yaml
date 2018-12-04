@@ -104,6 +104,8 @@ spec:
                             type: string
                           serial:
                             type: string
+                          size:
+                            type: string
                           sourceFilePath:
                             type: string
                           sourceVolumeName:

@@ -132,6 +132,7 @@ func (Disk) SwaggerDoc() map[string]string {
 		"sourceFilePath":    "File path of the source disk image file",
 		"exportVolumeName":  "Export Volume Name to which the disk needs to be exported to",
 		"exportFilePath":    "Export file path to which the disk file to copy to",
+		"size":              "size if disk needs to be created",
 	}
 }
 

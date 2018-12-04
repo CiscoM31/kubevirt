@@ -524,6 +524,13 @@ func schema_kubevirt_pkg_api_v1_Disk(ref common.ReferenceCallback) common.OpenAP
 							Format:      "",
 						},
 					},
+					"size": {
+						SchemaProps: spec.SchemaProps{
+							Description: "size if disk needs to be created",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
 				},
 				Required: []string{"name", "volumeName"},
 			},
