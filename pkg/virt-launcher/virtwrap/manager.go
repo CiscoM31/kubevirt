@@ -32,6 +32,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path"
 	"sync"
 	"time"
@@ -114,6 +115,29 @@ func (l *LibvirtDomainManager) DownloadHttpFile(filepath string, url string) err
 		return fmt.Errorf("Failed to copy source file %s, err: %v", url, resp.Status)
 	}
 
+	return nil
+}
+
+// setup empty disk image
+func (l *LibvirtDomainManager) setupEmptyDisk(vmi *v1.VirtualMachineInstance, disk v1.Disk) error {
+	filepath := disk.FilePath
+	if disk.FilePath == "" {
+		filepath = fmt.Sprintf("%s.%s", disk.Name, "qcow2")
+	}
+	d := api.Convert_v1_FilesystemVolumeSource_To_api_File(disk.VolumeName, filepath, nil)
+	dir, _ := path.Split(d)
+	if _, err := os.Stat(d); os.IsNotExist(err) {
+		if err := os.MkdirAll(dir, 0777); err != nil {
+			return err
+		}
+		logger := log.Log.Object(vmi)
+		logger.Infof("creating disk:%v of size: %v", d, disk.Size)
+		if err := exec.Command("qemu-img", "create", "-f", "qcow2", d, disk.Size).Run(); err != nil {
+			return err
+		}
+	} else if err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -209,6 +233,20 @@ func (l *LibvirtDomainManager) setupDisks(vmi *v1.VirtualMachineInstance) error 
 				// lock file doesn't exist, we need to download the image file
 				err = l.DownloadImage(vmi, disk)
 				if err != nil {
+					return err
+				}
+			} else {
+				logger.Infof("Disk file %v already setup, reusing it.", d)
+				continue
+			}
+		} else {
+			d := api.Convert_v1_FilesystemVolumeSource_To_api_File(disk.VolumeName, disk.FilePath, nil)
+			_, err := os.Stat(d)
+			if os.IsNotExist(err) {
+				// file doesn't exist, we need to download the image file
+				err = l.setupEmptyDisk(vmi, disk)
+				if err != nil {
+					logger.Infof("Failed to create empty disk: %v", err)
 					return err
 				}
 			} else {

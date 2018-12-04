@@ -277,6 +277,8 @@ type Disk struct {
 	ExportVolumeName string `json:"exportVolumeName,omitempty"`
 	// Export file path to which the disk file to copy to
 	ExportFilePath string `json:"exportFilePath,omitempty"`
+	// size if disk needs to be created
+	Size string `json:"size,omitempty"`
 }
 
 // Represents the target of a volume to mount.

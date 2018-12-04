@@ -172,6 +172,12 @@ func AttachDisk(c kubecli.KubevirtClient, vmi *v1.VirtualMachineInstance, diskNa
 	disk.Name = diskName
 	disk.VolumeName = volumeName
 
+	quantity, err := resource.ParseQuantity(capacity)
+	if err != nil {
+		return err
+	}
+	disk.Size = strconv.FormatInt(quantity.ToDec().ScaledValue(0), 10)
+
 	if !volumeBlockMode {
 		disk.FilePath = filepath
 		disk.SourceFilePath = sfilepath
