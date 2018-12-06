@@ -18,6 +18,15 @@ import (
 	"kubevirt.io/kubevirt/pkg/kubecli"
 )
 
+type DiskParams struct {
+	Name, VolName, Class, FilePath, Bus string
+	Svolume, SfilePath                  string
+	Evolume, EfilePath                  string
+	Capacity, Format                    string
+	IsCdrom                             bool
+	VolumeBlockMode                     bool
+}
+
 func NewReplicaSetFromVMI(vmi *v1.VirtualMachineInstance, replicas int32) *v1.VirtualMachineInstanceReplicaSet {
 	name := "replicaset" + rand.String(5)
 	rs := &v1.VirtualMachineInstanceReplicaSet{
@@ -166,29 +175,33 @@ func SetResources(vmi *v1.VirtualMachineInstance, cpu, memory, cpuModel string) 
 	return nil
 }
 
-func AttachDisk(c kubecli.KubevirtClient, vmi *v1.VirtualMachineInstance, diskName, volumeName, class,
-	filepath, sVolume, sfilepath, eVolume, efilepath, capacity, format string, isCdrom, volumeBlockMode bool) error {
+func AttachDisk(c kubecli.KubevirtClient, vmi *v1.VirtualMachineInstance, diskParams DiskParams) error {
 	disk := v1.Disk{}
-	disk.Name = diskName
-	disk.VolumeName = volumeName
+	disk.Name = diskParams.Name
+	disk.VolumeName = diskParams.VolName
 
-	quantity, err := resource.ParseQuantity(capacity)
+	quantity, err := resource.ParseQuantity(diskParams.Capacity)
 	if err != nil {
 		return err
 	}
 	disk.Size = strconv.FormatInt(quantity.ToDec().ScaledValue(0), 10)
 
-	if !volumeBlockMode {
-		disk.FilePath = filepath
-		disk.SourceFilePath = sfilepath
-		disk.SourceVolumeName = sVolume
-		disk.ExportVolumeName = eVolume
-		disk.ExportFilePath = efilepath
-		if isCdrom == true {
+	dt := "sata"
+	if diskParams.Bus == "virtio" || diskParams.Bus == "scsi" || diskParams.Bus == "ide" {
+		dt = diskParams.Bus
+	}
+
+	if !diskParams.VolumeBlockMode {
+		disk.FilePath = diskParams.FilePath
+		disk.SourceFilePath = diskParams.SfilePath
+		disk.SourceVolumeName = diskParams.Svolume
+		disk.ExportVolumeName = diskParams.Evolume
+		disk.ExportFilePath = diskParams.EfilePath
+		if diskParams.IsCdrom == true {
 			readOnly := true
-			disk.CDRom = &v1.CDRomTarget{Bus: "sata", ReadOnly: &readOnly}
+			disk.CDRom = &v1.CDRomTarget{Bus: dt, ReadOnly: &readOnly}
 		} else {
-			disk.Disk = &v1.DiskTarget{Bus: "sata", ImageFormat: format}
+			disk.Disk = &v1.DiskTarget{Bus: dt, ImageFormat: diskParams.Format}
 		}
 
 	}
@@ -196,11 +209,12 @@ func AttachDisk(c kubecli.KubevirtClient, vmi *v1.VirtualMachineInstance, diskNa
 	vmi.Spec.Domain.Devices.Disks = append(vmi.Spec.Domain.Devices.Disks, disk)
 
 	vol := v1.Volume{}
-	vol.Name = fmt.Sprintf("my-%s", diskName)
+	vol.Name = fmt.Sprintf("my-%s", diskParams.Name)
 
-	fmt.Printf("\nCreating PVC for %s, class:%v", diskName, class)
-	pvcName := fmt.Sprintf("%s-%s", diskName, "pvc")
-	pvc, err := CreateISCSIPvc(c, pvcName, class, capacity, "default", false, volumeBlockMode)
+	fmt.Printf("\nCreating PVC for %s, class:%v", diskParams.Name, diskParams.Class)
+	pvcName := fmt.Sprintf("%s-%s", diskParams.Name, "pvc")
+	pvc, err := CreateISCSIPvc(c, pvcName, diskParams.Class, diskParams.Capacity, "default", false,
+		diskParams.VolumeBlockMode)
 	if err != nil {
 		fmt.Printf("\nFailed to create PVC %s %v", pvcName, err)
 		return err
@@ -212,16 +226,16 @@ func AttachDisk(c kubecli.KubevirtClient, vmi *v1.VirtualMachineInstance, diskNa
 	}
 	vmi.Spec.Volumes = append(vmi.Spec.Volumes, vol)
 
-	if sVolume != "" {
+	if diskParams.Svolume != "" {
 		vol = v1.Volume{}
-		vol.Name = fmt.Sprintf("%s", sVolume)
+		vol.Name = fmt.Sprintf("%s", diskParams.Svolume)
 		pvcName = fmt.Sprintf("%s-%s", vol.Name, "source-pvc")
 		fmt.Printf("\nCreating source PVC for %s", pvcName)
-		sClass := fmt.Sprintf("%s-class", sVolume)
+		sClass := fmt.Sprintf("%s-class", diskParams.Svolume)
 
-		pV, err := GetPv(c, sVolume)
+		pV, err := GetPv(c, diskParams.Svolume)
 		if err != nil {
-			fmt.Printf("PV %s not found for PVC %s configuration", sVolume, pvcName)
+			fmt.Printf("PV %s not found for PVC %s configuration", diskParams.Svolume, pvcName)
 			return err
 		}
 		accessMode := pV.Spec.AccessModes
@@ -231,7 +245,7 @@ func AttachDisk(c kubecli.KubevirtClient, vmi *v1.VirtualMachineInstance, diskNa
 				readOnly = true
 			}
 		}
-		pvc, err = CreateISCSIPvc(c, pvcName, sClass, capacity, "default", readOnly, volumeBlockMode)
+		pvc, err = CreateISCSIPvc(c, pvcName, sClass, diskParams.Capacity, "default", readOnly, diskParams.VolumeBlockMode)
 		if err != nil {
 			fmt.Printf("\nFailed to create PVC %s %v", pvcName, err)
 			return err
@@ -250,16 +264,16 @@ func AttachDisk(c kubecli.KubevirtClient, vmi *v1.VirtualMachineInstance, diskNa
 		vmi.Spec.Volumes = append(vmi.Spec.Volumes, vol)
 	}
 
-	if eVolume != "" {
+	if diskParams.Evolume != "" {
 		vol = v1.Volume{}
-		vol.Name = fmt.Sprintf("%s", eVolume)
+		vol.Name = fmt.Sprintf("%s", diskParams.Evolume)
 		pvcName = fmt.Sprintf("%s-%s", vol.Name, "export-pvc")
 		fmt.Printf("\nCreating export PVC for %s", pvcName)
-		eClass := fmt.Sprintf("%s-class", eVolume)
+		eClass := fmt.Sprintf("%s-class", diskParams.Evolume)
 
-		pV, err := GetPv(c, eVolume)
+		pV, err := GetPv(c, diskParams.Evolume)
 		if err != nil {
-			fmt.Printf("PV %s not found for PVC %s configuration", eVolume, pvcName)
+			fmt.Printf("PV %s not found for PVC %s configuration", diskParams.Evolume, pvcName)
 			return err
 		}
 		accessMode := pV.Spec.AccessModes
@@ -269,7 +283,7 @@ func AttachDisk(c kubecli.KubevirtClient, vmi *v1.VirtualMachineInstance, diskNa
 				readOnly = true
 			}
 		}
-		pvc, err = CreateISCSIPvc(c, pvcName, eClass, capacity, "default", readOnly, volumeBlockMode)
+		pvc, err = CreateISCSIPvc(c, pvcName, eClass, diskParams.Capacity, "default", readOnly, diskParams.VolumeBlockMode)
 		if err != nil {
 			fmt.Printf("\nFailed to create PVC %s %v", pvcName, err)
 			return err
