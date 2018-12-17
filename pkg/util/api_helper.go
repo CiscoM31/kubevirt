@@ -13,6 +13,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/rand"
+	"k8s.io/apimachinery/pkg/fields"
 
 	"kubevirt.io/kubevirt/pkg/api/v1"
 	"kubevirt.io/kubevirt/pkg/kubecli"
@@ -431,6 +432,11 @@ func ListNodes(client kubecli.KubevirtClient) (*k8sv1.NodeList, error) {
 	return client.CoreV1().Nodes().List(metav1.ListOptions{})
 }
 
+// Get Node Info
+func GetNode(client kubecli.KubevirtClient, nodeName string) (*k8sv1.Node, error) {
+	return client.CoreV1().Nodes().Get(nodeName, metav1.GetOptions{})
+}
+
 func getAffinityTerm(key, val string) k8sv1.PodAffinityTerm {
 
 	labelSelReq := metav1.LabelSelectorRequirement{Key: key, Operator: metav1.LabelSelectorOpIn,
@@ -439,4 +445,32 @@ func getAffinityTerm(key, val string) k8sv1.PodAffinityTerm {
 	podTerm := k8sv1.PodAffinityTerm{LabelSelector: &labelSel, TopologyKey: "kubernetes.io/hostname"}
 
 	return podTerm
+}
+
+// drain pods from node and cardon it
+func CordonNode(client kubecli.KubevirtClient, nodeName string, nodeOffline bool) error {
+
+	nodeInfo, err := GetNode(client, nodeName)
+	if err != nil {
+		return err
+	}
+
+	nodeInfo.Spec.Unschedulable = nodeOffline
+	// put node
+	_, err = client.CoreV1().Nodes().Update(nodeInfo)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func GetClusterUUID(c kubecli.KubevirtClient) string {
+
+	nspace, err := c.CoreV1().Namespaces().Get("kube-system", metav1.GetOptions{})
+	if err == nil {
+		return string(nspace.UID)
+	} else {
+		return ""
+	}
 }
