@@ -7,6 +7,8 @@ import (
 	errors2 "errors"
 	"fmt"
 	"strconv"
+	"strings"
+	"time"
 
 	k8sv1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -382,7 +384,7 @@ func GetPvDetails(c kubecli.KubevirtClient, name string) (bool, int32, string, e
 	rs := pv.Spec.Capacity["storage"]
 	storage := (&rs).String()
 	if pv.Spec.ISCSI == nil {
-        return mode == k8sv1.PersistentVolumeBlock, 0, storage, nil
+		return mode == k8sv1.PersistentVolumeBlock, 0, storage, nil
 	}
 
 	return mode == k8sv1.PersistentVolumeBlock, pv.Spec.ISCSI.Lun, storage, nil
@@ -472,4 +474,112 @@ func GetClusterUUID(c kubecli.KubevirtClient) string {
 	} else {
 		return ""
 	}
+}
+
+type ResourceEvent struct {
+	ObjName   string
+	Reason    string
+	Msg       string
+	Component string
+	Type      string
+	FirstSeen time.Time
+	LastSeen  time.Time
+}
+
+type EventFilter struct {
+	kbMsgHint string
+	transMsg  string
+}
+
+// Most of the event messaging generated from Kubernetes/Kubevirt will not make
+// sense for a user. The below table helps in filtering those out and
+// or translate them to better versions of the message
+var filterDb = [...]EventFilter{
+	{"Created virtual machine pod ", "Create of virtual machine has been initiated"},
+	{"Deleted virtual machine pod", "Stop of Virtual Machine initiated"},
+	{"Deleted finished virtual machine", "Virtual machine has been stopped"},
+	{"Signaled Deletion", "Virtual Machine has been stopped"},
+	{"VirtualMachineInstance started", "Virtual Machine started"},
+	{"AttachVolume.Attach", ""},
+	{"Killing container", "Virtual Machine has been stopped"},
+	{"Failed to open", ""},
+	{"Failed to copy", ""},
+	{"Unable to mount volumes", ""},
+}
+
+func filterOutMsg(msg string) (bool, *EventFilter) {
+	for _, m := range filterDb {
+		if strings.Contains(msg, m.kbMsgHint) {
+			return false, &m
+		}
+	}
+	return true, nil
+}
+
+func WatchKbEvents(client kubecli.KubevirtClient, rC chan ResourceEvent, qC chan bool, quitChan chan bool) error {
+	api := client.CoreV1()
+	listOpts := metav1.ListOptions{
+		//LabelSelector: "kubevirt.io=virt-launcher",
+	}
+	events, err := api.Events("").List(listOpts)
+	if err != nil {
+		return err
+	}
+	timeout := int64(0)
+	eventsWatcher, err := api.Events("").Watch(
+		metav1.ListOptions{
+			Watch:           true,
+			ResourceVersion: events.ResourceVersion,
+			TimeoutSeconds:  &timeout})
+	if err != nil {
+		return err
+	}
+	fmt.Printf("Starting to monitor events\n")
+	lastmessage := ""
+	go func() {
+		watcherChan := eventsWatcher.ResultChan()
+		for {
+			select {
+			case <-quitChan:
+				fmt.Printf("\nQuitting Kb event watch service")
+				eventsWatcher.Stop()
+				qC <- true
+				return
+			case event, ok := <-watcherChan:
+				if !ok {
+					eventsWatcher.Stop()
+					fmt.Printf("\nKB Channel closed\n")
+					qC <- false
+					return
+				}
+				e, isEvent := event.Object.(*k8sv1.Event)
+				if !isEvent {
+					continue
+				}
+				if filter, newevent := filterOutMsg(e.Message); !filter {
+					msg := e.Message
+					if newevent.transMsg != "" {
+						msg = newevent.transMsg
+					}
+					rEvent := ResourceEvent{
+						e.InvolvedObject.Name,
+						e.Reason,
+						msg,
+						e.Source.Component,
+						e.Type,
+						e.FirstTimestamp.Time,
+						e.LastTimestamp.Time,
+					}
+					rC <- rEvent
+				} else {
+					if !strings.Contains(e.Message, lastmessage) {
+						fmt.Printf("\n%v", e)
+						lastmessage = e.Message
+					}
+				}
+			}
+		}
+	}()
+
+	return nil
 }
