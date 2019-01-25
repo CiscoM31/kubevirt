@@ -478,6 +478,7 @@ func GetClusterUUID(c kubecli.KubevirtClient) string {
 
 type ResourceEvent struct {
 	ObjName   string
+	ObjUUID   string
 	Reason    string
 	Msg       string
 	Component string
@@ -505,6 +506,22 @@ var filterDb = [...]EventFilter{
 	{"Failed to open", ""},
 	{"Failed to copy", ""},
 	{"Unable to mount volumes", ""},
+	{"initialization failed for volume", ""},
+	{"NodeNotSchedulable", "node is in maintenance mode"},
+	{"NodeSchedulable", "node is in active state"},
+	{"NodeReady", "node is now active"},
+	{"NodeNotReady", "node is now inactive"},
+	{"NodeHasSufficientMemory", "node has enough available resources."},
+	{"NodeHasInSufficientMemory", "node has insufficient memory."},
+	{"status is now: MemoryPressure", "node does not have enough memory available."},
+	{"NodeHasDiskPressure", "node does not have enough space on disk."},
+	{"NodeHasNoDiskPressure", "node has enough available resources."},
+	{"NodeHasSufficientPID", "node has enough available resources."},
+	{"NodeHasInsufficientPID", "node does not have enough process IDs available"},
+	{"has been rebooted", "node has been rebooted"},
+	{"Registered Node", "Node added successfully to the compute cluster."},
+	{"Starting kubelet", "Started node initialization."},
+	{"System OOM encountered", "System is experiencing out of memory condition"},
 }
 
 func filterOutMsg(msg string) (bool, *EventFilter) {
@@ -513,10 +530,34 @@ func filterOutMsg(msg string) (bool, *EventFilter) {
 			return false, &m
 		}
 	}
-	return true, nil
+	return true, &EventFilter{}
 }
 
-func WatchKbEvents(client kubecli.KubevirtClient, rC chan ResourceEvent, qC chan bool, quitChan chan bool) error {
+func sendOlderEvents(rC chan ResourceEvent, oldEventList *k8sv1.EventList) {
+	// send all older events
+	for _, e := range oldEventList.Items {
+		fmt.Printf("\nOld Event: %v", e)
+		if filter, newevent := filterOutMsg(e.Message); !filter {
+			msg := e.Message
+			if newevent.transMsg != "" {
+				msg = newevent.transMsg
+			}
+			rEvent := ResourceEvent{
+				e.InvolvedObject.Name,
+				"",
+				e.Reason,
+				msg,
+				e.Source.Component,
+				e.Type,
+				e.FirstTimestamp.Time,
+				e.LastTimestamp.Time,
+			}
+			rC <- rEvent
+		}
+	}
+}
+
+func WatchKbEvents(client kubecli.KubevirtClient, rC chan ResourceEvent, quitDone chan bool, kbQuit chan bool) error {
 	api := client.CoreV1()
 	listOpts := metav1.ListOptions{
 		//LabelSelector: "kubevirt.io=virt-launcher",
@@ -534,22 +575,28 @@ func WatchKbEvents(client kubecli.KubevirtClient, rC chan ResourceEvent, qC chan
 	if err != nil {
 		return err
 	}
+
+	oldEventList, err := api.Events("").List(listOpts)
+	if err != nil {
+		fmt.Printf("Error getting previous older Events: %v", err)
+	}
 	fmt.Printf("Starting to monitor events\n")
 	lastmessage := ""
 	go func() {
+		sendOlderEvents(rC, oldEventList)
 		watcherChan := eventsWatcher.ResultChan()
 		for {
 			select {
-			case <-quitChan:
+			case <-kbQuit:
 				fmt.Printf("\nQuitting Kb event watch service")
 				eventsWatcher.Stop()
-				qC <- true
+				quitDone <- true
 				return
 			case event, ok := <-watcherChan:
 				if !ok {
 					eventsWatcher.Stop()
 					fmt.Printf("\nKB Channel closed\n")
-					qC <- false
+					quitDone <- false
 					return
 				}
 				e, isEvent := event.Object.(*k8sv1.Event)
@@ -563,6 +610,7 @@ func WatchKbEvents(client kubecli.KubevirtClient, rC chan ResourceEvent, qC chan
 					}
 					rEvent := ResourceEvent{
 						e.InvolvedObject.Name,
+						"",
 						e.Reason,
 						msg,
 						e.Source.Component,
