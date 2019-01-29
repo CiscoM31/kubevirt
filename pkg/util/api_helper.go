@@ -478,6 +478,7 @@ func GetClusterUUID(c kubecli.KubevirtClient) string {
 
 type ResourceEvent struct {
 	ObjName   string
+	ObjType   string
 	ObjUUID   string
 	Reason    string
 	Msg       string
@@ -545,6 +546,7 @@ func sendOlderEvents(rC chan ResourceEvent, oldEventList *k8sv1.EventList) {
 			rEvent := ResourceEvent{
 				e.InvolvedObject.Name,
 				"",
+				"",
 				e.Reason,
 				msg,
 				e.Source.Component,
@@ -610,6 +612,7 @@ func WatchKbEvents(client kubecli.KubevirtClient, rC chan ResourceEvent, quitDon
 					}
 					rEvent := ResourceEvent{
 						e.InvolvedObject.Name,
+						"",
 						"",
 						e.Reason,
 						msg,
