@@ -500,7 +500,7 @@ var filterDb = [...]EventFilter{
 	{"Created virtual machine pod ", "Create of virtual machine has been initiated"},
 	{"Deleted virtual machine pod", "Stop of Virtual Machine initiated"},
 	{"Deleted finished virtual machine", "Virtual machine has been stopped"},
-	{"Signaled Deletion", "Virtual Machine has been stopped"},
+	{"Signaled Deletion", "Virtual Machine stop operation succeeded"},
 	{"VirtualMachineInstance started", "Virtual Machine started"},
 	{"AttachVolume.Attach", ""},
 	{"Killing container", "Virtual Machine has been stopped"},
