@@ -760,6 +760,17 @@ func Convert_v1_VirtualMachine_To_api_Domain(vmi *v1.VirtualMachineInstance, dom
 		},
 	}
 
+	domain.Spec.Devices.Inputs = []Input{
+		{
+			Type: "tablet",
+			Bus:  "usb",
+		},
+		{
+			Type: "mouse",
+			Bus:  "ps2",
+		},
+	}
+
 	if vmi.Spec.Domain.Devices.AutoattachGraphicsDevice == nil || *vmi.Spec.Domain.Devices.AutoattachGraphicsDevice == true {
 		var heads uint = 1
 		var vram uint = 16384
