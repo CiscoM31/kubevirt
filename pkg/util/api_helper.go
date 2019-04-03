@@ -503,6 +503,7 @@ type ResourceEvent struct {
 	Msg       string
 	Component string
 	Type      string
+	UID       string
 	FirstSeen time.Time
 	LastSeen  time.Time
 }
@@ -570,6 +571,7 @@ func sendOlderEvents(rC chan ResourceEvent, oldEventList *k8sv1.EventList) {
 				msg,
 				e.Source.Component,
 				e.Type,
+				string(e.UID),
 				e.FirstTimestamp.Time,
 				e.LastTimestamp.Time,
 			}
@@ -637,6 +639,7 @@ func WatchKbEvents(client kubecli.KubevirtClient, rC chan ResourceEvent, quitDon
 						msg,
 						e.Source.Component,
 						e.Type,
+						string(e.UID),
 						e.FirstTimestamp.Time,
 						e.LastTimestamp.Time,
 					}
