@@ -13,7 +13,7 @@ func SetDefaults_Devices(devices *Devices) {
 		{
 			Type:  "usb",
 			Index: "0",
-			Model: "none",
+			Model: "qemu-xhci",
 		},
 	}
 	// Set default memballoon, "none" means that controller disabled
