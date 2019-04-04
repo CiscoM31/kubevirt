@@ -391,17 +391,17 @@ func GetPv(c kubecli.KubevirtClient, name string) (*k8sv1.PersistentVolume, erro
 	return pv, err
 }
 
-func GetPvDetails(c kubecli.KubevirtClient, name string) (bool, int32, string, error) {
+func GetPvDetails(c kubecli.KubevirtClient, name string) (bool, int32, int64, error) {
 	pv, err := c.CoreV1().PersistentVolumes().Get(name, metav1.GetOptions{})
 	if err != nil || pv == nil {
-		return false, 0, "", err
+		return false, 0, 0, err
 	}
 	mode := k8sv1.PersistentVolumeFilesystem
 	if pv.Spec.VolumeMode != nil {
 		mode = *pv.Spec.VolumeMode
 	}
 	rs := pv.Spec.Capacity["storage"]
-	storage := (&rs).String()
+	storage, _ := (&rs).AsInt64()
 	if pv.Spec.ISCSI == nil {
 		return mode == k8sv1.PersistentVolumeBlock, 0, storage, nil
 	}
