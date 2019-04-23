@@ -25,6 +25,7 @@ type DiskParams struct {
 	Svolume, SfilePath                  string
 	Evolume, EfilePath                  string
 	Capacity, Format                    string
+	VolumeHandle                        string
 	IsCdrom                             bool
 	VolumeBlockMode                     bool
 	HxVolName                           string
@@ -51,6 +52,56 @@ func NewReplicaSetFromVMI(vmi *v1.VirtualMachineInstance, replicas int32) *v1.Vi
 		},
 	}
 	return rs
+}
+
+// Create a CSI PV based on an existing volume handle. Should
+// be used only for a case where the disks are being recovered from a
+// lost Kubernetes install. The volume Handle from previous creation
+// will enable us to recover this disk from StorFS
+func CreateCSIPv(client kubecli.KubevirtClient, name string, params DiskParams,
+	readOnly bool) (*k8sv1.PersistentVolume, error) {
+	quantity, err := resource.ParseQuantity(params.Capacity)
+	if err != nil {
+		return nil, err
+	}
+
+	accessMode := k8sv1.ReadWriteMany
+	if readOnly {
+		accessMode = k8sv1.ReadOnlyMany
+	}
+
+	mode := k8sv1.PersistentVolumeFilesystem
+	if params.VolumeBlockMode {
+		mode = k8sv1.PersistentVolumeBlock
+	}
+	pv := &k8sv1.PersistentVolume{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: name,
+		},
+		Spec: k8sv1.PersistentVolumeSpec{
+			AccessModes: []k8sv1.PersistentVolumeAccessMode{accessMode},
+			Capacity: k8sv1.ResourceList{
+				"storage": quantity,
+			},
+			PersistentVolumeReclaimPolicy: k8sv1.PersistentVolumeReclaimRetain,
+			StorageClassName:              params.Class,
+			VolumeMode:                    &mode,
+		},
+	}
+	pv.Annotations = make(map[string]string, 0)
+	pv.Annotations["pv.kubernetes.io/provisioned-by"] = "csi-hxcsi"
+	csi := k8sv1.CSIPersistentVolumeSource{}
+	csi.Driver = "csi-hxcsi"
+	csi.FSType = "ext4"
+	csi.VolumeHandle = params.VolumeHandle
+
+	pv.Spec.PersistentVolumeSource.CSI = &csi
+
+	pv1, err := client.CoreV1().PersistentVolumes().Create(pv)
+	if errors.IsAlreadyExists(err) {
+		return pv1, nil
+	}
+	return pv1, err
 }
 
 func CreateISCSIPv(client kubecli.KubevirtClient, name, class, capacity, target, iqn string, lun int32,
@@ -105,7 +156,7 @@ func UpdatePVToPrivate(client kubecli.KubevirtClient, pv *k8sv1.PersistentVolume
 	return client.CoreV1().PersistentVolumes().Update(pv)
 }
 
-func CreateISCSIPvc(client kubecli.KubevirtClient, name, class, capacity, ns string, readOnly, volumeBlockMode bool,
+func CreateISCSIPvc(client kubecli.KubevirtClient, name, vName, class, capacity, ns string, readOnly, volumeBlockMode bool,
 	annot map[string]string) (*k8sv1.PersistentVolumeClaim, error) {
 	quantity, err := resource.ParseQuantity(capacity)
 	if err != nil {
@@ -135,6 +186,9 @@ func CreateISCSIPvc(client kubecli.KubevirtClient, name, class, capacity, ns str
 		},
 	}
 
+	if vName != "" {
+		pvc.Spec.VolumeName = vName
+	}
 	_, err = client.CoreV1().PersistentVolumeClaims(ns).Create(pvc)
 	if errors.IsAlreadyExists(err) {
 		return pvc, nil
@@ -223,13 +277,38 @@ func AttachDisk(c kubecli.KubevirtClient, vmi *v1.VirtualMachineInstance, diskPa
 	var pvcName string
 	var pvc *k8sv1.PersistentVolumeClaim
 	if diskParams.HxVolName == "" {
-		fmt.Printf("\nCreating PVC for %s, class:%v", diskParams.Name, diskParams.Class)
-		pvcName = fmt.Sprintf("%s-%s", diskParams.Name, "pvc")
-		pvc, err = CreateISCSIPvc(c, pvcName, diskParams.Class, diskParams.Capacity, "default", false,
-			diskParams.VolumeBlockMode, map[string]string{pvcCreatedByVM: "yes"})
-		if err != nil {
-			fmt.Printf("\nFailed to create PVC %s %v", pvcName, err)
-			return err
+		if diskParams.VolumeHandle == "" {
+			fmt.Printf("\nCreating PVC for %s, class:%v", diskParams.Name, diskParams.Class)
+			pvcName = fmt.Sprintf("%s-%s", diskParams.Name, "pvc")
+			pvc, err = CreateISCSIPvc(c, pvcName, "", diskParams.Class, diskParams.Capacity, "default", false,
+				diskParams.VolumeBlockMode, map[string]string{pvcCreatedByVM: "yes"})
+			if err != nil {
+				fmt.Printf("\nFailed to create PVC %s %v", pvcName, err)
+				return err
+			}
+		} else {
+			// we have a VolumeHandle from user. This is a case where a disk is being created
+			// with a volumeHandle that was saved from previous creation. We will
+			// create a PV using that volumeHandle and tie the PVC to this PV
+			pvcName = fmt.Sprintf("%s-%s", diskParams.Name, "pvc")
+			pvc, err = GetPVC(c, pvcName)
+			if err != nil || pvc == nil {
+				pvName := fmt.Sprintf("%s-%s", diskParams.Name, "pv")
+				_, err = CreateCSIPv(c, pvName, diskParams, false)
+				fmt.Printf("Creating CSI PV for %s", diskParams.Name)
+				if err != nil {
+					fmt.Printf("Failed to create CSI PV for %s, err: %v", diskParams.Name, err)
+					return err
+				}
+				fmt.Printf("\nCreating PVC for %s, class:%v", diskParams.Name, diskParams.Class)
+				pvcName = fmt.Sprintf("%s-%s", diskParams.Name, "pvc")
+				pvc, err = CreateISCSIPvc(c, pvcName, pvName, diskParams.Class, diskParams.Capacity, "default", false,
+					diskParams.VolumeBlockMode, map[string]string{pvcCreatedByVM: "yes"})
+				if err != nil {
+					fmt.Printf("\nFailed to create PVC %s %v", pvcName, err)
+					return err
+				}
+			}
 		}
 		updatePVCPrivate(c, pvc)
 	} else {
@@ -264,7 +343,7 @@ func AttachDisk(c kubecli.KubevirtClient, vmi *v1.VirtualMachineInstance, diskPa
 				readOnly = true
 			}
 		}
-		pvc, err = CreateISCSIPvc(c, pvcName, sClass, diskParams.Capacity, "default", readOnly,
+		pvc, err = CreateISCSIPvc(c, pvcName, "", sClass, diskParams.Capacity, "default", readOnly,
 			diskParams.VolumeBlockMode, map[string]string{pvcCreatedByVM: "yes"})
 		if err != nil {
 			fmt.Printf("\nFailed to create PVC %s %v", pvcName, err)
@@ -303,7 +382,7 @@ func AttachDisk(c kubecli.KubevirtClient, vmi *v1.VirtualMachineInstance, diskPa
 				readOnly = true
 			}
 		}
-		pvc, err = CreateISCSIPvc(c, pvcName, eClass, diskParams.Capacity, "default", readOnly,
+		pvc, err = CreateISCSIPvc(c, pvcName, "", eClass, diskParams.Capacity, "default", readOnly,
 			diskParams.VolumeBlockMode, map[string]string{pvcCreatedByVM: "yes"})
 		if err != nil {
 			fmt.Printf("\nFailed to create PVC %s %v", pvcName, err)
