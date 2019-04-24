@@ -92,7 +92,9 @@ func CreateCSIPv(client kubecli.KubevirtClient, name string, params DiskParams,
 	pv.Annotations["pv.kubernetes.io/provisioned-by"] = "csi-hxcsi"
 	csi := k8sv1.CSIPersistentVolumeSource{}
 	csi.Driver = "csi-hxcsi"
-	csi.FSType = "ext4"
+	if !params.VolumeBlockMode {
+		csi.FSType = "ext4"
+	}
 	csi.VolumeHandle = params.VolumeHandle
 
 	pv.Spec.PersistentVolumeSource.CSI = &csi
@@ -186,9 +188,7 @@ func CreateISCSIPvc(client kubecli.KubevirtClient, name, vName, class, capacity,
 		},
 	}
 
-	if vName != "" {
-		pvc.Spec.VolumeName = vName
-	}
+	pvc.Spec.VolumeName = vName
 	_, err = client.CoreV1().PersistentVolumeClaims(ns).Create(pvc)
 	if errors.IsAlreadyExists(err) {
 		return pvc, nil
@@ -277,9 +277,9 @@ func AttachDisk(c kubecli.KubevirtClient, vmi *v1.VirtualMachineInstance, diskPa
 	var pvcName string
 	var pvc *k8sv1.PersistentVolumeClaim
 	if diskParams.HxVolName == "" {
+		pvcName = fmt.Sprintf("%s-%s", diskParams.Name, "pvc")
 		if diskParams.VolumeHandle == "" {
 			fmt.Printf("\nCreating PVC for %s, class:%v", diskParams.Name, diskParams.Class)
-			pvcName = fmt.Sprintf("%s-%s", diskParams.Name, "pvc")
 			pvc, err = CreateISCSIPvc(c, pvcName, "", diskParams.Class, diskParams.Capacity, "default", false,
 				diskParams.VolumeBlockMode, map[string]string{pvcCreatedByVM: "yes"})
 			if err != nil {
@@ -290,7 +290,6 @@ func AttachDisk(c kubecli.KubevirtClient, vmi *v1.VirtualMachineInstance, diskPa
 			// we have a VolumeHandle from user. This is a case where a disk is being created
 			// with a volumeHandle that was saved from previous creation. We will
 			// create a PV using that volumeHandle and tie the PVC to this PV
-			pvcName = fmt.Sprintf("%s-%s", diskParams.Name, "pvc")
 			pvc, err = GetPVC(c, pvcName)
 			if err != nil || pvc == nil {
 				pvName := fmt.Sprintf("%s-%s", diskParams.Name, "pv")
@@ -301,7 +300,6 @@ func AttachDisk(c kubecli.KubevirtClient, vmi *v1.VirtualMachineInstance, diskPa
 					return err
 				}
 				fmt.Printf("\nCreating PVC for %s, class:%v", diskParams.Name, diskParams.Class)
-				pvcName = fmt.Sprintf("%s-%s", diskParams.Name, "pvc")
 				pvc, err = CreateISCSIPvc(c, pvcName, pvName, diskParams.Class, diskParams.Capacity, "default", false,
 					diskParams.VolumeBlockMode, map[string]string{pvcCreatedByVM: "yes"})
 				if err != nil {
