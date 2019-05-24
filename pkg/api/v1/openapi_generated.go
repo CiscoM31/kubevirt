@@ -278,13 +278,6 @@ func GetOpenAPIDefinitions(ref common.ReferenceCallback) map[string]common.OpenA
 								Format:      "int32",
 							},
 						},
-						"filePath": {
-							SchemaProps: spec.SchemaProps{
-								Description: "File path of the disk image file",
-								Type:        []string{"string"},
-								Format:      "",
-							},
-						},
 					},
 					Required: []string{"name", "volumeName"},
 				},
@@ -345,13 +338,6 @@ func GetOpenAPIDefinitions(ref common.ReferenceCallback) map[string]common.OpenA
 								Format:      "",
 							},
 						},
-						"imageFormat": {
-							SchemaProps: spec.SchemaProps{
-								Description: "Image format",
-								Type:        []string{"string"},
-								Format:      "",
-							},
-						},
 					},
 				},
 			},
@@ -371,12 +357,6 @@ func GetOpenAPIDefinitions(ref common.ReferenceCallback) map[string]common.OpenA
 							SchemaProps: spec.SchemaProps{
 								Description: "CPU allow specified the detailed CPU topology inside the vm.",
 								Ref:         ref("kubevirt.io/kubevirt/pkg/api/v1.CPU"),
-							},
-						},
-						"os": {
-							SchemaProps: spec.SchemaProps{
-								Description: "Machine type",
-								Ref:         ref("kubevirt.io/kubevirt/pkg/api/v1.OS"),
 							},
 						},
 						"machine": {
@@ -414,7 +394,7 @@ func GetOpenAPIDefinitions(ref common.ReferenceCallback) map[string]common.OpenA
 				},
 			},
 			Dependencies: []string{
-				"kubevirt.io/kubevirt/pkg/api/v1.CPU", "kubevirt.io/kubevirt/pkg/api/v1.Clock", "kubevirt.io/kubevirt/pkg/api/v1.Devices", "kubevirt.io/kubevirt/pkg/api/v1.Features", "kubevirt.io/kubevirt/pkg/api/v1.Firmware", "kubevirt.io/kubevirt/pkg/api/v1.Machine", "kubevirt.io/kubevirt/pkg/api/v1.OS", "kubevirt.io/kubevirt/pkg/api/v1.ResourceRequirements"},
+				"kubevirt.io/kubevirt/pkg/api/v1.CPU", "kubevirt.io/kubevirt/pkg/api/v1.Clock", "kubevirt.io/kubevirt/pkg/api/v1.Devices", "kubevirt.io/kubevirt/pkg/api/v1.Features", "kubevirt.io/kubevirt/pkg/api/v1.Firmware", "kubevirt.io/kubevirt/pkg/api/v1.Machine", "kubevirt.io/kubevirt/pkg/api/v1.ResourceRequirements"},
 		},
 		"kubevirt.io/kubevirt/pkg/api/v1.EmptyDiskSource": {
 			Schema: spec.Schema{
@@ -866,23 +846,6 @@ func GetOpenAPIDefinitions(ref common.ReferenceCallback) map[string]common.OpenA
 			},
 			Dependencies: []string{
 				"kubevirt.io/kubevirt/pkg/api/v1.PodNetwork"},
-		},
-		"kubevirt.io/kubevirt/pkg/api/v1.OS": {
-			Schema: spec.Schema{
-				SchemaProps: spec.SchemaProps{
-					Description: "OS allow specifying the boot order",
-					Properties: map[string]spec.Schema{
-						"bootorder": {
-							SchemaProps: spec.SchemaProps{
-								Description: "BootOrder specifies the boot order prority.",
-								Type:        []string{"string"},
-								Format:      "",
-							},
-						},
-					},
-				},
-			},
-			Dependencies: []string{},
 		},
 		"kubevirt.io/kubevirt/pkg/api/v1.OfflineVirtualMachine": {
 			Schema: spec.Schema{

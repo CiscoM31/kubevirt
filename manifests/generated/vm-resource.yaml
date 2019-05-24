@@ -102,15 +102,9 @@ spec:
                                   to emulate. supported values: virtio, sata, scsi,
                                   ide'
                                 type: string
-                              imageFormat:
-                                description: Image format
-                                type: string
                               readonly:
                                 description: ReadOnly Defaults to false
                                 type: boolean
-                          filePath:
-                            description: File path of the disk image file
-                            type: string
                           floppy:
                             properties:
                               readonly:
@@ -278,12 +272,6 @@ spec:
                       type: string
                   required:
                   - type
-                os:
-                  description: OS allow specifying the boot order
-                  properties:
-                    bootorder:
-                      description: BootOrder specifies the boot order prority.
-                      type: string
                 resources:
                   properties:
                     limits:

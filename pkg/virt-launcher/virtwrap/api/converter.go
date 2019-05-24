@@ -20,11 +20,9 @@
 package api
 
 import (
-	"encoding/csv"
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 
 	k8sv1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -48,14 +46,11 @@ type ConverterContext struct {
 
 func Convert_v1_Disk_To_api_Disk(diskDevice *v1.Disk, disk *Disk, devicePerBus map[string]int) error {
 
-	imageFormat := ""
-
 	if diskDevice.Disk != nil {
 		disk.Device = "disk"
 		disk.Target.Bus = diskDevice.Disk.Bus
 		disk.Target.Device = makeDeviceName(diskDevice.Disk.Bus, devicePerBus)
 		disk.ReadOnly = toApiReadOnly(diskDevice.Disk.ReadOnly)
-		imageFormat = diskDevice.Disk.ImageFormat
 	} else if diskDevice.LUN != nil {
 		disk.Device = "lun"
 		disk.Target.Bus = diskDevice.LUN.Bus
@@ -80,7 +75,6 @@ func Convert_v1_Disk_To_api_Disk(diskDevice *v1.Disk, disk *Disk, devicePerBus m
 	}
 	disk.Driver = &DiskDriver{
 		Name: "qemu",
-		Type: imageFormat,
 	}
 	disk.Alias = &Alias{Name: diskDevice.Name}
 	if diskDevice.BootOrder != nil {
@@ -130,7 +124,7 @@ func toApiReadOnly(src bool) *ReadOnly {
 	return nil
 }
 
-func Convert_v1_Volume_To_api_Disk(source *v1.Volume, filePath string, disk *Disk, c *ConverterContext) error {
+func Convert_v1_Volume_To_api_Disk(source *v1.Volume, disk *Disk, c *ConverterContext) error {
 
 	if source.RegistryDisk != nil {
 		return Convert_v1_RegistryDiskSource_To_api_Disk(source.Name, source.RegistryDisk, disk, c)
@@ -141,7 +135,7 @@ func Convert_v1_Volume_To_api_Disk(source *v1.Volume, filePath string, disk *Dis
 	}
 
 	if source.PersistentVolumeClaim != nil {
-		return Covert_v1_FilesystemVolumeSource_To_api_Disk(source.Name, filePath, disk, c)
+		return Covert_v1_FilesystemVolumeSource_To_api_Disk(source.Name, disk, c)
 	}
 
 	if source.Ephemeral != nil {
@@ -154,23 +148,15 @@ func Convert_v1_Volume_To_api_Disk(source *v1.Volume, filePath string, disk *Dis
 	return fmt.Errorf("disk %s references an unsupported source", disk.Alias.Name)
 }
 
-func Covert_v1_FilesystemVolumeSource_To_api_Disk(volumeName string, filePath string, disk *Disk, c *ConverterContext) error {
+func Covert_v1_FilesystemVolumeSource_To_api_Disk(volumeName string, disk *Disk, c *ConverterContext) error {
 
 	disk.Type = "file"
-	if disk.Driver.Type == "" {
-		disk.Driver.Type = "raw"
-	}
-
-	diskPath := filePath
-	if diskPath == "" {
-		diskPath = "disk.img"
-	}
-
+	disk.Driver.Type = "raw"
 	disk.Source.File = filepath.Join(
 		"/var/run/kubevirt-private",
 		"vm-disks",
 		volumeName,
-		diskPath)
+		"disk.img")
 	return nil
 }
 
@@ -219,7 +205,7 @@ func Convert_v1_EphemeralVolumeSource_To_api_Disk(volumeName string, source *v1.
 	disk.BackingStore = &BackingStore{}
 
 	backingDisk := &Disk{Driver: &DiskDriver{}}
-	err := Covert_v1_FilesystemVolumeSource_To_api_Disk(volumeName, "", backingDisk, c)
+	err := Covert_v1_FilesystemVolumeSource_To_api_Disk(volumeName, backingDisk, c)
 	if err != nil {
 		return err
 	}
@@ -324,20 +310,6 @@ func Convert_v1_Machine_To_api_OSType(source *v1.Machine, ost *OSType, c *Conver
 	return nil
 }
 
-func Convert_v1_OS_to_api(source *v1.OS, os *OS, c *ConverterContext) error {
-
-	devListReader := csv.NewReader(strings.NewReader(source.BootOrder))
-	devList, err := devListReader.Read()
-	if err != nil {
-		return err
-	}
-	for _, bootDev := range devList {
-		os.BootOrder = append(os.BootOrder, Boot{bootDev})
-	}
-
-	return nil
-}
-
 func Convert_v1_FeatureHyperv_To_api_FeatureHyperv(source *v1.FeatureHyperv, hyperv *FeatureHyperv, c *ConverterContext) error {
 	if source.Spinlocks != nil {
 		hyperv.Spinlocks = &FeatureSpinlocks{
@@ -421,7 +393,7 @@ func Convert_v1_VirtualMachine_To_api_Domain(vm *v1.VirtualMachine, domain *Doma
 		if volume == nil {
 			return fmt.Errorf("No matching volume with name %s found", disk.VolumeName)
 		}
-		err = Convert_v1_Volume_To_api_Disk(volume, disk.FilePath, &newDisk, c)
+		err = Convert_v1_Volume_To_api_Disk(volume, &newDisk, c)
 		if err != nil {
 			return err
 		}
@@ -469,13 +441,6 @@ func Convert_v1_VirtualMachine_To_api_Domain(vm *v1.VirtualMachine, domain *Doma
 		domain.Spec.VCPU = &VCPU{
 			Placement: "static",
 			CPUs:      vm.Spec.Domain.CPU.Cores,
-		}
-	}
-
-	if vm.Spec.Domain.OS != nil && vm.Spec.Domain.OS.BootOrder != "" {
-		err = Convert_v1_OS_to_api(vm.Spec.Domain.OS, &domain.Spec.OS, c)
-		if err != nil {
-			return err
 		}
 	}
 

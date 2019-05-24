@@ -58,9 +58,6 @@ type DomainSpec struct {
 	CPU *CPU `json:"cpu,omitempty"`
 	// Machine type
 	// +optional
-	OS *OS `json:"os,omitempty"`
-	// Machine type
-	// +optional
 	Machine Machine `json:"machine,omitempty"`
 	// Firmware
 	// +optional
@@ -95,14 +92,6 @@ type CPU struct {
 	// Cores specifies the number of cores inside the vm.
 	// Must be a value greater or equal 1.
 	Cores uint32 `json:"cores,omitempty"`
-}
-
-// OS allow specifying the boot order
-// ---
-// +k8s:openapi-gen=true
-type OS struct {
-	// BootOrder specifies the boot order prority.
-	BootOrder string `json:"bootorder,omitempty"`
 }
 
 // ---
@@ -147,8 +136,6 @@ type Disk struct {
 	// Disks without a boot order are not tried if a disk with a boot order exists.
 	// +optional
 	BootOrder *uint `json:"bootOrder,omitempty"`
-	// File path of the disk image file
-	FilePath string `json:"filePath,omitempty"`
 }
 
 // Represents the target of a volume to mount.
@@ -175,8 +162,6 @@ type DiskTarget struct {
 	// ReadOnly
 	// Defaults to false
 	ReadOnly bool `json:"readonly,omitempty"`
-	// Image format
-	ImageFormat string `json:"imageFormat,omitempty"`
 }
 
 // ---

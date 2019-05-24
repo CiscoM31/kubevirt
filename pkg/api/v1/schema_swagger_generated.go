@@ -15,7 +15,6 @@ func (DomainSpec) SwaggerDoc() map[string]string {
 	return map[string]string{
 		"resources": "Resources describes the Compute Resources required by this vm.",
 		"cpu":       "CPU allow specified the detailed CPU topology inside the vm.\n+optional",
-		"os":        "Machine type\n+optional",
 		"machine":   "Machine type\n+optional",
 		"firmware":  "Firmware\n+optional",
 		"clock":     "Clock sets the clock and timers of the vm.\n+optional",
@@ -35,13 +34,6 @@ func (CPU) SwaggerDoc() map[string]string {
 	return map[string]string{
 		"":      "CPU allow specifying the CPU topology",
 		"cores": "Cores specifies the number of cores inside the vm.\nMust be a value greater or equal 1.",
-	}
-}
-
-func (OS) SwaggerDoc() map[string]string {
-	return map[string]string{
-		"":          "OS allow specifying the boot order",
-		"bootorder": "BootOrder specifies the boot order prority.",
 	}
 }
 
@@ -70,7 +62,6 @@ func (Disk) SwaggerDoc() map[string]string {
 		"name":       "Name is the device name",
 		"volumeName": "Name of the volume which is referenced\nMust match the Name of a Volume.",
 		"bootOrder":  "BootOrder is an integer value > 0, used to determine ordering of boot devices.\nLower values take precedence.\nDisks without a boot order are not tried if a disk with a boot order exists.\n+optional",
-		"filePath":   "File path of the disk image file",
 	}
 }
 
@@ -86,9 +77,8 @@ func (DiskDevice) SwaggerDoc() map[string]string {
 
 func (DiskTarget) SwaggerDoc() map[string]string {
 	return map[string]string{
-		"bus":         "Bus indicates the type of disk device to emulate.\nsupported values: virtio, sata, scsi, ide",
-		"readonly":    "ReadOnly\nDefaults to false",
-		"imageFormat": "Image format",
+		"bus":      "Bus indicates the type of disk device to emulate.\nsupported values: virtio, sata, scsi, ide",
+		"readonly": "ReadOnly\nDefaults to false",
 	}
 }
 

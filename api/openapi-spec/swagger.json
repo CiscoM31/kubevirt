@@ -3324,10 +3324,6 @@
       "description": "Attach a volume as a disk to the vm",
       "$ref": "#/definitions/v1.DiskTarget"
      },
-     "filePath": {
-      "description": "File path of the disk image file",
-      "type": "string"
-     },
      "floppy": {
       "description": "Attach a volume as a floppy to the vm",
       "$ref": "#/definitions/v1.FloppyTarget"
@@ -3350,10 +3346,6 @@
     "properties": {
      "bus": {
       "description": "Bus indicates the type of disk device to emulate.\nsupported values: virtio, sata, scsi, ide",
-      "type": "string"
-     },
-     "imageFormat": {
-      "description": "Image format",
       "type": "string"
      },
      "readonly": {
@@ -3390,10 +3382,6 @@
      "machine": {
       "description": "Machine type\n+optional",
       "$ref": "#/definitions/v1.Machine"
-     },
-     "os": {
-      "description": "Machine type\n+optional",
-      "$ref": "#/definitions/v1.OS"
      },
      "resources": {
       "description": "Resources describes the Compute Resources required by this vm.",
@@ -3814,15 +3802,6 @@
       "items": {
        "$ref": "#/definitions/v1.NodeSelectorRequirement"
       }
-     }
-    }
-   },
-   "v1.OS": {
-    "description": "OS allow specifying the boot order",
-    "properties": {
-     "bootorder": {
-      "description": "BootOrder specifies the boot order prority.",
-      "type": "string"
      }
     }
    },
