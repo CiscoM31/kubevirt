@@ -23,15 +23,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"reflect"
+	"strings"
 
 	"github.com/ghodss/yaml"
+	"github.com/onsi/gomega"
 	"github.com/onsi/gomega/types"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/client-go/rest"
-
-	"strings"
-
-	"github.com/onsi/gomega"
 	"k8s.io/client-go/tools/record"
 
 	rest2 "kubevirt.io/kubevirt/pkg/rest"
@@ -183,6 +181,18 @@ func (matcher *haveStatusCodeMatcher) NegatedFailureMessage(actual interface{}) 
 	return fmt.Sprintf("Expected status code \n\t%#v\nnot to be\n\t%#v", matcher.statusCode, matcher.expected)
 }
 
+// In case we don't care about emitted events, we simply consume all of them and return.
+func IgnoreEvents(recorder *record.FakeRecorder) {
+loop:
+	for {
+		select {
+		case <-recorder.Events:
+		default:
+			break loop
+		}
+	}
+}
+
 func ExpectEvent(recorder *record.FakeRecorder, reason string) {
 	gomega.Expect(recorder.Events).To(gomega.Receive(gomega.ContainSubstring(reason)))
 }
@@ -213,4 +223,12 @@ func ExpectEvents(recorder *record.FakeRecorder, reasons ...string) {
 			gomega.Expect(recorder.Events).To(gomega.Receive())
 		}
 	}
+}
+
+func SatisfyAnyRegexp(regexps []string) types.GomegaMatcher {
+	matchers := []types.GomegaMatcher{}
+	for _, regexp := range regexps {
+		matchers = append(matchers, gomega.MatchRegexp(regexp))
+	}
+	return gomega.SatisfyAny(matchers...)
 }

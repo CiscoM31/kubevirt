@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 #
 # This file is part of the KubeVirt project
 #
@@ -14,7 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-# Copyright 2017 Red Hat, Inc.
+# Copyright 2018 Red Hat, Inc.
 #
 
 set -ex
@@ -25,28 +25,59 @@ source hack/config.sh
 
 echo "Deploying ..."
 
-# Deploy the right manifests for the right target
-if [[ -z $TARGET ]] || [[ $TARGET =~ .*-dev ]]; then
-    _kubectl create -f ${MANIFESTS_OUT_DIR}/dev -R $i
-elif [[ $TARGET =~ .*-release ]] || [[ $TARGET =~ windows.* ]]; then
-    for manifest in ${MANIFESTS_OUT_DIR}/release/*; do
-        if [[ $manifest =~ .*demo.* ]]; then
-            continue
-        fi
-        _kubectl create -f $manifest
-    done
-fi
+# Create the installation namespace if it does not exist already
+_kubectl apply -f - <<EOF
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ${namespace}
+EOF
 
-# Deploy additional infra for testing
-_kubectl create -f ${MANIFESTS_OUT_DIR}/testing -R $i
+# Deploy infra for testing first
+_kubectl create -f ${MANIFESTS_OUT_DIR}/testing
 
-if [[ "$KUBEVIRT_PROVIDER" =~ os-3.9.0.* ]]; then
-    _kubectl adm policy add-scc-to-user privileged -z kubevirt-controller -n ${namespace}
-    _kubectl adm policy add-scc-to-user privileged -z kubevirt-testing -n ${namespace}
-    _kubectl adm policy add-scc-to-user privileged -z kubevirt-privileged -n ${namespace}
-    _kubectl adm policy add-scc-to-user privileged -z kubevirt-apiserver -n ${namespace}
+# Deploy CDI with operator.
+_kubectl apply -f - <<EOF
+---
+apiVersion: cdi.kubevirt.io/v1alpha1
+kind: CDI
+metadata:
+  name: cdi
+EOF
+
+# Deploy kubevirt operator
+_kubectl apply -f ${MANIFESTS_OUT_DIR}/release/kubevirt-operator.yaml
+
+if [[ "$KUBEVIRT_PROVIDER" =~ os-* ]] || [[ "$KUBEVIRT_PROVIDER" =~ okd-* ]]; then
+    _kubectl create -f ${MANIFESTS_OUT_DIR}/testing/ocp
+
+    _kubectl adm policy add-scc-to-user privileged -z kubevirt-operator -n ${namespace}
+
     # Helpful for development. Allows admin to access everything KubeVirt creates in the web console
     _kubectl adm policy add-scc-to-user privileged admin
 fi
+
+# Ensure the KubeVirt CRD is created
+count=0
+until _kubectl get crd kubevirts.kubevirt.io; do
+    ((count++)) && ((count == 30)) && echo "KubeVirt CRD not found" && exit 1
+    echo "waiting for KubeVirt CRD"
+    sleep 1
+done
+
+# Deploy KubeVirt
+_kubectl create -n ${namespace} -f ${MANIFESTS_OUT_DIR}/release/kubevirt-cr.yaml
+
+# Ensure the KubeVirt CR is created
+count=0
+until _kubectl -n kubevirt get kv kubevirt; do
+    ((count++)) && ((count == 30)) && echo "KubeVirt CR not found" && exit 1
+    echo "waiting for KubeVirt CR"
+    sleep 1
+done
+
+# wait until KubeVirt is ready
+_kubectl wait -n kubevirt kv kubevirt --for condition=Ready --timeout 180s || (echo "KubeVirt not ready in time" && exit 1)
 
 echo "Done"

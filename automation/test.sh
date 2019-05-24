@@ -29,72 +29,224 @@
 set -ex
 
 export WORKSPACE="${WORKSPACE:-$PWD}"
+readonly ARTIFACTS_PATH="${ARTIFACTS-$WORKSPACE/exported-artifacts}"
+readonly TEMPLATES_SERVER="https://templates.ovirt.org/kubevirt/"
 
-if [[ $TARGET =~ openshift-.* ]]; then
-  if [[ $TARGET =~ .*-crio-.* ]]; then
-    export KUBEVIRT_PROVIDER="os-3.9.0-crio"
-  else
-    export KUBEVIRT_PROVIDER="os-3.9.0"
-  fi
-elif [[ $TARGET =~ .*-1.9.3-.* ]]; then
-  export KUBEVIRT_PROVIDER="k8s-1.9.3"
+if [[ $TARGET =~ windows.* ]]; then
+  export KUBEVIRT_PROVIDER="k8s-1.11.0"
 else
-  export KUBEVIRT_PROVIDER="k8s-1.10.3"
+  export KUBEVIRT_PROVIDER=$TARGET
+fi
+
+if [ ! -d "cluster/$KUBEVIRT_PROVIDER" ]; then
+  echo "The cluster provider $KUBEVIRT_PROVIDER does not exist"
+  exit 1
+fi
+
+if [[ $TARGET =~ os-.* ]]; then
+  # when testing on slow CI system cleanup sometimes takes very long.
+  # openshift clusters are more memory demanding. If the cleanup
+  # of old vms does not go fast enough they run out of memory.
+  # To still allow continuing with the tests, give more memory in CI.
+  export KUBEVIRT_MEMORY_SIZE=6144M
 fi
 
 export KUBEVIRT_NUM_NODES=2
-export NFS_WINDOWS_DIR=${NFS_WINDOWS_DIR:-/home/nfs/images/windows2016}
+export RHEL_NFS_DIR=${RHEL_NFS_DIR:-/var/lib/stdci/shared/kubevirt-images/rhel7}
+export RHEL_LOCK_PATH=${RHEL_LOCK_PATH:-/var/lib/stdci/shared/download_rhel_image.lock}
+export WINDOWS_NFS_DIR=${WINDOWS_NFS_DIR:-/var/lib/stdci/shared/kubevirt-images/windows2016}
+export WINDOWS_LOCK_PATH=${WINDOWS_LOCK_PATH:-/var/lib/stdci/shared/download_windows_image.lock}
+
+wait_for_download_lock() {
+  local max_lock_attempts=60
+  local lock_wait_interval=60
+
+  for ((i = 0; i < $max_lock_attempts; i++)); do
+      if (set -o noclobber; > $1) 2> /dev/null; then
+          echo "Acquired lock: $1"
+          return
+      fi
+      sleep $lock_wait_interval
+  done
+  echo "Timed out waiting for lock: $1" >&2
+  exit 1
+}
+
+safe_download() (
+    # Download files into shared locations using a lock.
+    # The lock will be released as soon as this subprocess will exit
+    local lockfile="${1:?Lockfile was not specified}"
+    local download_from="${2:?Download from was not specified}"
+    local download_to="${3:?Download to was not specified}"
+    local timeout_sec="${4:-3600}"
+
+    touch "$lockfile"
+    exec {fd}< "$lockfile"
+    flock -e  -w "$timeout_sec" "$fd" || {
+        echo "ERROR: Timed out after $timeout_sec seconds waiting for lock" >&2
+        exit 1
+    }
+
+    local remote_sha1_url="${download_from}.sha1"
+    local local_sha1_file="${download_to}.sha1"
+    local remote_sha1
+    local retry=3
+    # Remote file includes only sha1 w/o filename suffix
+    for i in $(seq 1 $retry);
+    do
+      remote_sha1="$(curl -s "${remote_sha1_url}")"
+      if [[ "$remote_sha1" != "" ]]; then
+        break
+      fi
+    done
+
+    if [[ "$(cat "$local_sha1_file")" != "$remote_sha1" ]]; then
+        echo "${download_to} is not up to date, corrupted or doesn't exist."
+        echo "Downloading file from: ${remote_sha1_url}"
+        curl "$download_from" --output "$download_to"
+        sha1sum "$download_to" | cut -d " " -f1 > "$local_sha1_file"
+        [[ "$(cat "$local_sha1_file")" == "$remote_sha1" ]] || {
+            echo "${download_to} is corrupted"
+            return 1
+        }
+    else
+        echo "${download_to} is up to date"
+    fi
+)
+
+if [[ $TARGET =~ os-.* ]] || [[ $TARGET =~ okd-.* ]]; then
+    # Create images directory
+    if [[ ! -d $RHEL_NFS_DIR ]]; then
+        mkdir -p $RHEL_NFS_DIR
+    fi
+
+    # Download RHEL image
+    rhel_image_url="${TEMPLATES_SERVER}/rhel7.img"
+    rhel_image="$RHEL_NFS_DIR/disk.img"
+    safe_download "$RHEL_LOCK_PATH" "$rhel_image_url" "$rhel_image" || exit 1
+fi
+
+if [[ $TARGET =~ windows.* ]]; then
+  # Create images directory
+  if [[ ! -d $WINDOWS_NFS_DIR ]]; then
+    mkdir -p $WINDOWS_NFS_DIR
+  fi
+
+  # Download Windows image
+  win_image_url="${TEMPLATES_SERVER}/win01.img"
+  win_image="$WINDOWS_NFS_DIR/disk.img"
+  safe_download "$WINDOWS_LOCK_PATH" "$win_image_url" "$win_image" || exit 1
+fi
 
 kubectl() { cluster/kubectl.sh "$@"; }
 
-export NAMESPACE="${NAMESPACE:-kube-system}"
+export NAMESPACE="${NAMESPACE:-kubevirt}"
 
 # Make sure that the VM is properly shut down on exit
-trap '{ make cluster-down; }' EXIT
+trap '{ make cluster-down; }' EXIT SIGINT SIGTERM SIGSTOP
+
+
+# Check if we are on a pull request in jenkins.
+export KUBEVIRT_CACHE_FROM=${ghprbTargetBranch}
+if [ -n "${KUBEVIRT_CACHE_FROM}" ]; then
+    make pull-cache
+fi
 
 make cluster-down
+
+# Create .bazelrc to use remote cache
+cat >.bazelrc <<EOF
+startup --host_jvm_args=-Dbazel.DigestFunction=sha256
+build --remote_local_fallback
+build --remote_http_cache=http://bazel-cache.kubevirt-prow.svc.cluster.local:8080/kubevirt.io/kubevirt
+EOF
+
+# build all images with the basic repeat logic
+# probably because load on the node, possible situation when the bazel
+# fails to download artifacts, to avoid job fails because of it,
+# we repeat the build images action
+set +e
+for i in $(seq 1 3);
+do
+  make bazel-build-images
+done
+set -e
+make bazel-build-images
+
 make cluster-up
 
 # Wait for nodes to become ready
-while [ -n "$(kubectl get nodes --no-headers | grep -v Ready)" ]; do
-   echo "Waiting for all nodes to become ready ..."
-   kubectl get nodes --no-headers | >&2 grep -v Ready || true
-   sleep 10
+set +e
+kubectl get nodes --no-headers
+kubectl_rc=$?
+while [ $kubectl_rc -ne 0 ] || [ -n "$(kubectl get nodes --no-headers | grep NotReady)" ]; do
+    echo "Waiting for all nodes to become ready ..."
+    kubectl get nodes --no-headers
+    kubectl_rc=$?
+    sleep 10
 done
+set -e
+
 echo "Nodes are ready:"
 kubectl get nodes
 
-make cluster-sync
+make cluster-build
 
-# Wait until kubevirt pods are running
-while [ -n "$(kubectl get pods -n ${NAMESPACE} --no-headers | grep -v Running)" ]; do
+# I do not have good indication that OKD API server ready to serve requests, so I will just
+# repeat cluster-deploy until it succeeds
+until make cluster-deploy; do
+    sleep 1
+done
+
+hack/dockerized bazel shutdown
+
+# OpenShift is running important containers under default namespace
+namespaces=(kubevirt default)
+if [[ $NAMESPACE != "kubevirt" ]]; then
+  namespaces+=($NAMESPACE)
+fi
+
+timeout=300
+sample=30
+
+for i in ${namespaces[@]}; do
+  # Wait until kubevirt pods are running
+  current_time=0
+  while [ -n "$(kubectl get pods -n $i --no-headers | grep -v Running)" ]; do
     echo "Waiting for kubevirt pods to enter the Running state ..."
-    kubectl get pods -n ${NAMESPACE} --no-headers | >&2 grep -v Running || true
-    sleep 10
-done
+    kubectl get pods -n $i --no-headers | >&2 grep -v Running || true
+    sleep $sample
 
-# Make sure all containers except virt-controller are ready
-while [ -n "$(kubectl get pods -n ${NAMESPACE} -o'custom-columns=status:status.containerStatuses[*].ready,metadata:metadata.name' --no-headers | awk '!/virt-controller/ && /false/')" ]; do
+    current_time=$((current_time + sample))
+    if [ $current_time -gt $timeout ]; then
+      exit 1
+    fi
+  done
+
+  # Make sure all containers are ready
+  current_time=0
+  while [ -n "$(kubectl get pods -n $i -o'custom-columns=status:status.containerStatuses[*].ready' --no-headers | grep false)" ]; do
     echo "Waiting for KubeVirt containers to become ready ..."
-    kubectl get pods -n ${NAMESPACE} -o'custom-columns=status:status.containerStatuses[*].ready,metadata:metadata.name' --no-headers | awk '!/virt-controller/ && /false/' || true
-    sleep 10
+    kubectl get pods -n $i -o'custom-columns=status:status.containerStatuses[*].ready' --no-headers | grep false || true
+    sleep $sample
+
+    current_time=$((current_time + sample))
+    if [ $current_time -gt $timeout ]; then
+      exit 1
+    fi
+  done
+  kubectl get pods -n $i
 done
 
-# Make sure that at least one virt-controller container is ready
-while [ "$(kubectl get pods -n ${NAMESPACE} -o'custom-columns=status:status.containerStatuses[*].ready,metadata:metadata.name' --no-headers | awk '/virt-controller/ && /true/' | wc -l)" -lt "1" ]; do
-    echo "Waiting for KubeVirt virt-controller container to become ready ..."
-    kubectl get pods -n ${NAMESPACE} -o'custom-columns=status:status.containerStatuses[*].ready,metadata:metadata.name' --no-headers | awk '/virt-controller/ && /true/' | wc -l
-    sleep 10
-done
-
-kubectl get pods -n ${NAMESPACE}
 kubectl version
 
-ginko_params="--ginkgo.noColor --junit-output=$WORKSPACE/junit.xml"
+mkdir -p "$ARTIFACTS_PATH"
 
-# Prepare PV for windows testing
-if [[ -d $NFS_WINDOWS_DIR ]] && [[ $TARGET =~ windows.* ]]; then
-    kubectl create -f - <<EOF
+ginko_params="--ginkgo.noColor --junit-output=$ARTIFACTS_PATH/junit.functest.xml"
+
+# Prepare PV for Windows testing
+if [[ $TARGET =~ windows.* ]]; then
+  kubectl create -f - <<EOF
 ---
 apiVersion: v1
 kind: PersistentVolume
@@ -110,9 +262,42 @@ spec:
   nfs:
     server: "nfs"
     path: /
+  storageClassName: windows
 EOF
-ginko_params="$ginko_params --ginkgo.focus=Windows"
+  # Run only Windows tests
+  ginko_params="$ginko_params --ginkgo.focus=Windows"
+elif [[ $TARGET =~ multus.* ]]; then
+  ginko_params="$ginko_params --ginkgo.focus=Multus|Networking|VMIlifecycle|Expose"
+elif [[ $TARGET =~ genie.* ]]; then
+  ginko_params="$ginko_params --ginkgo.focus=Genie|Networking|VMIlifecycle|Expose"
+else
+  ginko_params="$ginko_params --ginkgo.skip=Multus|Genie"
 fi
+
+# Prepare RHEL PV for Template testing
+if [[ $TARGET =~ os-.* ]]; then
+  ginko_params="$ginko_params|Networkpolicy"
+
+  kubectl create -f - <<EOF
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: disk-rhel
+  labels:
+    kubevirt.io/test: "rhel"
+spec:
+  capacity:
+    storage: 15Gi
+  accessModes:
+    - ReadWriteOnce
+  nfs:
+    server: "nfs"
+    path: /
+  storageClassName: rhel
+EOF
+fi
+
 
 # Run functional tests
 FUNC_TEST_ARGS=$ginko_params make functest

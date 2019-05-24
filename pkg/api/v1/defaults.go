@@ -1,11 +1,7 @@
 package v1
 
 import (
-	"strings"
-
 	"github.com/pborman/uuid"
-	"k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/types"
 )
 
@@ -111,13 +107,7 @@ func SetDefaults_Firmware(obj *Firmware) {
 	}
 }
 
-func SetDefaults_VirtualMachine(obj *VirtualMachine) {
-	// FIXME we need proper validation and configurable defaulting instead of this
-	if _, exists := obj.Spec.Domain.Resources.Requests[v1.ResourceMemory]; !exists {
-		obj.Spec.Domain.Resources.Requests = v1.ResourceList{
-			v1.ResourceMemory: resource.MustParse("8192Ki"),
-		}
-	}
+func SetDefaults_VirtualMachineInstance(obj *VirtualMachineInstance) {
 	if obj.Spec.Domain.Firmware == nil {
 		obj.Spec.Domain.Firmware = &Firmware{}
 	}
@@ -125,15 +115,16 @@ func SetDefaults_VirtualMachine(obj *VirtualMachine) {
 	if obj.Spec.Domain.Features == nil {
 		obj.Spec.Domain.Features = &Features{}
 	}
-	if obj.Spec.Domain.Machine.Type == "" {
-		obj.Spec.Domain.Machine.Type = "q35"
-	}
-	setDefaults_DiskFromMachineType(obj)
-	setDefaults_NetworkInterface(obj)
+
+	setDefaults_Disk(obj)
+	SetDefaults_NetworkInterface(obj)
 }
 
-func setDefaults_DiskFromMachineType(obj *VirtualMachine) {
-	bus := diskBusFromMachine(obj.Spec.Domain.Machine.Type)
+func setDefaults_Disk(obj *VirtualMachineInstance) {
+	// Setting SATA as the default bus since it is typically supported out of the box by
+	// guest operating systems (we support only q35 and therefore IDE is not supported)
+	// TODO: consider making this OS-specific (VIRTIO for linux, SATA for others)
+	bus := "sata"
 
 	for i := range obj.Spec.Domain.Devices.Disks {
 		disk := &obj.Spec.Domain.Devices.Disks[i].DiskDevice
@@ -152,12 +143,14 @@ func setDefaults_DiskFromMachineType(obj *VirtualMachine) {
 	}
 }
 
-func setDefaults_NetworkInterface(obj *VirtualMachine) {
-	networks := obj.Spec.Networks
+func SetDefaults_NetworkInterface(obj *VirtualMachineInstance) {
+	autoAttach := obj.Spec.Domain.Devices.AutoattachPodInterface
+	if autoAttach != nil && *autoAttach == false {
+		return
+	}
 
-	//TODO: Currently, we support only one interface associated to a network
-	//      This should be improved when we will start supporting multimple interfaces and networks
-	if len(networks) == 0 || networks[0].Pod == nil {
+	// Override only when nothing is specified
+	if len(obj.Spec.Networks) == 0 {
 		obj.Spec.Domain.Devices.Interfaces = []Interface{*DefaultNetworkInterface()}
 		obj.Spec.Networks = []Network{*DefaultPodNetwork()}
 	}
@@ -173,6 +166,16 @@ func DefaultNetworkInterface() *Interface {
 	return iface
 }
 
+func DefaultSlirpNetworkInterface() *Interface {
+	iface := &Interface{
+		Name: "default",
+		InterfaceBindingMethod: InterfaceBindingMethod{
+			Slirp: &InterfaceSlirp{},
+		},
+	}
+	return iface
+}
+
 func DefaultPodNetwork() *Network {
 	defaultNet := &Network{
 		Name: "default",
@@ -181,16 +184,6 @@ func DefaultPodNetwork() *Network {
 		},
 	}
 	return defaultNet
-}
-
-func diskBusFromMachine(machine string) string {
-	// catches: "q35", "pc-q35-*"
-	// see /path/to/qemu-kvm -machine help
-	if strings.HasPrefix(machine, "pc-q35") || strings.HasPrefix(machine, "q35") {
-		return "sata"
-	}
-	// safe fallback for x86_64, but very slow
-	return "ide"
 }
 
 func t(v bool) *bool {

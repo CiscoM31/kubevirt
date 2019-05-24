@@ -20,26 +20,24 @@
 package endpoints
 
 import (
-	. "github.com/onsi/ginkgo"
-	. "github.com/onsi/gomega"
-
-	"net/http"
-
 	"encoding/json"
 	"io/ioutil"
+	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
 
-	"github.com/emicklei/go-restful"
+	restful "github.com/emicklei/go-restful"
 	"github.com/ghodss/yaml"
+	. "github.com/onsi/ginkgo"
+	. "github.com/onsi/gomega"
 	"golang.org/x/net/context"
 
 	"kubevirt.io/kubevirt/pkg/rest"
 )
 
 func newValidJSONPostRequest() *http.Request {
-	request, _ := http.NewRequest("POST", "/apis/kubevirt.io/v1alpha1/namespaces/default/virtualmachines", nil)
+	request, _ := http.NewRequest("POST", "/apis/kubevirt.io/v1alpha3/namespaces/default/virtualmachineinstances", nil)
 	request.Body = marshalToJSON(payload{Name: "test", Email: "test@test.com"})
 	request.Header.Set("Content-Type", rest.MIME_JSON)
 	return request
@@ -62,7 +60,7 @@ var _ = Describe("Post", func() {
 		handler = http.Handler(restful.NewContainer().Add(ws))
 
 		target := MakeGoRestfulWrapper(NewHandlerBuilder().Post((*payload)(nil)).Endpoint(testPostEndpoint).Build(ctx))
-		ws.Route(ws.POST("/apis/kubevirt.io/v1alpha1/namespaces/{namespace}/virtualmachines").To(target))
+		ws.Route(ws.POST("/apis/kubevirt.io/v1alpha3/namespaces/{namespace}/virtualmachineinstances").To(target))
 
 		request = newValidJSONPostRequest()
 		recorder = httptest.NewRecorder()

@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  *
- * Copyright 2017 Red Hat, Inc.
+ * Copyright 2017, 2018 Red Hat, Inc.
  *
  */
 
@@ -27,7 +27,7 @@ import (
 )
 
 var exampleXML = `<domain type="kvm" xmlns:qemu="http://libvirt.org/schemas/domain/qemu/1.0">
-  <name>mynamespace_testvm</name>
+  <name>mynamespace_testvmi</name>
   <memory unit="MB">9</memory>
   <os>
     <type arch="x86_64" machine="q35">hvm</type>
@@ -40,27 +40,41 @@ var exampleXML = `<domain type="kvm" xmlns:qemu="http://libvirt.org/schemas/doma
     <baseBoard></baseBoard>
   </sysinfo>
   <devices>
+    <controller type="raw" index="0" model="none"></controller>
     <video>
       <model type="vga" heads="1" vram="16384"></model>
     </video>
+    <memballoon model="none"></memballoon>
     <disk device="disk" type="network">
       <source protocol="iscsi" name="iqn.2013-07.com.example:iscsi-nopool/2">
         <host name="example.com" port="3260"></host>
       </source>
       <target dev="vda"></target>
       <driver name="qemu" type="raw"></driver>
-      <alias name="mydisk"></alias>
+      <alias name="ua-mydisk"></alias>
     </disk>
     <disk device="disk" type="file">
-      <source file="/var/run/libvirt/cloud-init-dir/mynamespace/testvm/noCloud.iso"></source>
+      <source file="/var/run/libvirt/cloud-init-dir/mynamespace/testvmi/noCloud.iso"></source>
       <target dev="vdb"></target>
       <driver name="qemu" type="raw"></driver>
-      <alias name="mydisk1"></alias>
+      <alias name="ua-mydisk1"></alias>
     </disk>
+    <disk device="disk" type="block">
+      <source dev="/dev/testdev"></source>
+      <target dev="vdc"></target>
+      <driver name="qemu" type="raw"></driver>
+      <alias name="ua-mydisk2"></alias>
+    </disk>
+    <input type="tablet" bus="virtio">
+      <alias name="ua-tablet0"></alias>
+    </input>
     <console type="pty"></console>
     <watchdog model="i6300esb" action="poweroff">
-      <alias name="mywatchdog"></alias>
+      <alias name="ua-mywatchdog"></alias>
     </watchdog>
+    <rng model="virtio">
+      <backend model="random">/dev/urandom</backend>
+    </rng>
   </devices>
   <metadata>
     <kubevirt xmlns="http://kubevirt.io">
@@ -72,16 +86,21 @@ var exampleXML = `<domain type="kvm" xmlns:qemu="http://libvirt.org/schemas/doma
   </metadata>
   <features>
     <acpi></acpi>
+    <smm></smm>
   </features>
-  <cpu>
+  <cpu mode="custom">
+    <model>Conroe</model>
+    <feature name="pcid" policy="require"></feature>
+    <feature name="monitor" policy="disable"></feature>
     <topology sockets="1" cores="2" threads="1"></topology>
   </cpu>
   <vcpu placement="static">2</vcpu>
+  <iothreads>2</iothreads>
 </domain>`
 
 var _ = Describe("Schema", func() {
 	//The example domain should stay in sync to the xml above
-	var exampleDomain = NewMinimalDomainWithNS("mynamespace", "testvm")
+	var exampleDomain = NewMinimalDomainWithNS("mynamespace", "testvmi")
 	SetObjectDefaults_Domain(exampleDomain)
 	exampleDomain.Spec.Devices.Disks = []Disk{
 		{Type: "network",
@@ -101,11 +120,33 @@ var _ = Describe("Schema", func() {
 			Driver: &DiskDriver{Name: "qemu",
 				Type: "raw"},
 			Source: DiskSource{
-				File: "/var/run/libvirt/cloud-init-dir/mynamespace/testvm/noCloud.iso",
+				File: "/var/run/libvirt/cloud-init-dir/mynamespace/testvmi/noCloud.iso",
 			},
 			Target: DiskTarget{Device: "vdb"},
 			Alias: &Alias{
 				Name: "mydisk1",
+			},
+		},
+		{Type: "block",
+			Device: "disk",
+			Driver: &DiskDriver{Name: "qemu",
+				Type: "raw"},
+			Source: DiskSource{
+				Dev: "/dev/testdev",
+			},
+			Target: DiskTarget{Device: "vdc"},
+			Alias: &Alias{
+				Name: "mydisk2",
+			},
+		},
+	}
+
+	exampleDomain.Spec.Devices.Inputs = []Input{
+		{
+			Type: "tablet",
+			Bus:  "virtio",
+			Alias: &Alias{
+				Name: "tablet0",
 			},
 		},
 	}
@@ -125,8 +166,20 @@ var _ = Describe("Schema", func() {
 			Name: "mywatchdog",
 		},
 	}
+	exampleDomain.Spec.Devices.Rng = &Rng{
+		Model:   "virtio",
+		Backend: &RngBackend{Source: "/dev/urandom", Model: "random"},
+	}
+	exampleDomain.Spec.Devices.Controllers = []Controller{
+		{
+			Type:  "raw",
+			Model: "none",
+			Index: "0",
+		},
+	}
 	exampleDomain.Spec.Features = &Features{
 		ACPI: &FeatureEnabled{},
+		SMM:  &FeatureEnabled{},
 	}
 	exampleDomain.Spec.SysInfo = &SysInfo{
 		Type: "smbios",
@@ -143,12 +196,26 @@ var _ = Describe("Schema", func() {
 		Placement: "static",
 		CPUs:      2,
 	}
+	exampleDomain.Spec.CPU.Mode = "custom"
+	exampleDomain.Spec.CPU.Model = "Conroe"
+	exampleDomain.Spec.CPU.Features = []CPUFeature{
+		{
+			Name:   "pcid",
+			Policy: "require",
+		},
+		{
+			Name:   "monitor",
+			Policy: "disable",
+		},
+	}
 	exampleDomain.Spec.Metadata.KubeVirt.UID = "f4686d2c-6e8d-4335-b8fd-81bee22f4814"
+	exampleDomain.Spec.Metadata.KubeVirt.GracePeriod = &GracePeriodMetadata{}
 	exampleDomain.Spec.Metadata.KubeVirt.GracePeriod.DeletionGracePeriodSeconds = 5
+	exampleDomain.Spec.IOThreads = &IOThreads{IOThreads: 2}
 
 	Context("With schema", func() {
 		It("Generate expected libvirt xml", func() {
-			domain := NewMinimalDomainSpec("mynamespace_testvm")
+			domain := NewMinimalDomainSpec("mynamespace_testvmi")
 			buf, err := xml.Marshal(domain)
 			Expect(err).To(BeNil())
 
@@ -175,6 +242,42 @@ var _ = Describe("Schema", func() {
 			Expect(err).To(BeNil())
 			Expect(string(buf)).To(Equal(exampleXML))
 		})
+	})
+	Context("With cpu pinning", func() {
+		var testXML = `<cputune>
+<vcpupin vcpu="0" cpuset="1"/>
+<vcpupin vcpu="1" cpuset="5"/>
+<iothreadpin iothread="0" cpuset="1"/>
+<iothreadpin iothread="1" cpuset="5"/>
+</cputune>`
+		var exampleCpuTune = CPUTune{
+			VCPUPin: []CPUTuneVCPUPin{
+				CPUTuneVCPUPin{
+					VCPU:   0,
+					CPUSet: "1",
+				},
+				CPUTuneVCPUPin{
+					VCPU:   1,
+					CPUSet: "5",
+				},
+			},
+			IOThreadPin: []CPUTuneIOThreadPin{
+				CPUTuneIOThreadPin{
+					IOThread: 0,
+					CPUSet:   "1",
+				},
+				CPUTuneIOThreadPin{
+					IOThread: 1,
+					CPUSet:   "5",
+				},
+			},
+		}
 
+		It("Unmarshal into struct", func() {
+			newCpuTune := CPUTune{}
+			err := xml.Unmarshal([]byte(testXML), &newCpuTune)
+			Expect(err).To(BeNil())
+			Expect(newCpuTune).To(Equal(exampleCpuTune))
+		})
 	})
 })

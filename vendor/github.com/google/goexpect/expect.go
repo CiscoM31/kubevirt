@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"os/exec"
 	"regexp"
 	"strconv"
@@ -17,10 +18,6 @@ import (
 	"sync"
 	"syscall"
 	"time"
-
-	stdlog "log"
-
-	log "github.com/golang/glog"
 
 	"golang.org/x/crypto/ssh"
 	"google.golang.org/grpc/codes"
@@ -47,7 +44,7 @@ func NewStatus(code codes.Code, msg string) *Status {
 	return &Status{code, msg}
 }
 
-// NewStatusf returns a Status with the providead code and a formatted message.
+// NewStatusf returns a Status with the provided code and a formatted message.
 func NewStatusf(code codes.Code, format string, a ...interface{}) *Status {
 	return NewStatus(code, fmt.Sprintf(fmt.Sprintf(format, a...)))
 }
@@ -77,6 +74,15 @@ func CheckDuration(d time.Duration) Option {
 	}
 }
 
+// SendTimeout set timeout for Send commands
+func SendTimeout(timeout time.Duration) Option {
+	return func(e *GExpect) Option {
+		prev := e.sendTimeout
+		e.sendTimeout = timeout
+		return SendTimeout(prev)
+	}
+}
+
 // Verbose enables/disables verbose logging of matches and sends.
 func Verbose(v bool) Option {
 	return func(e *GExpect) Option {
@@ -95,6 +101,17 @@ func VerboseWriter(w io.Writer) Option {
 	}
 }
 
+// Tee duplicates all of the spawned process's output to the given writer and
+// closes the writer when complete. Writes occur from another thread, so
+// synchronization may be necessary.
+func Tee(w io.WriteCloser) Option {
+	return func(e *GExpect) Option {
+		prev := e.teeWriter
+		e.teeWriter = w
+		return Tee(prev)
+	}
+}
+
 // NoCheck turns off the Expect alive checks.
 func NoCheck() Option {
 	return changeChk(func(*GExpect) bool {
@@ -105,8 +122,8 @@ func NoCheck() Option {
 // DebugCheck adds logging to the check function.
 // The check function for the spawners are called at creation/timeouts and I/O so can
 // be usable for printing current state during debugging.
-func DebugCheck(l *stdlog.Logger) Option {
-	lg := log.Infof
+func DebugCheck(l *log.Logger) Option {
+	lg := log.Printf
 	if l != nil {
 		lg = l.Printf
 	}
@@ -139,6 +156,35 @@ func changeChk(f func(*GExpect) bool) Option {
 		e.chk = f
 		e.chkMu.Unlock()
 		return changeChk(prev)
+	}
+}
+
+// SetEnv sets the environmental variables of the spawned process.
+func SetEnv(env []string) Option {
+	return func(e *GExpect) Option {
+		prev := e.cmd.Env
+		e.cmd.Env = env
+		return SetEnv(prev)
+	}
+}
+
+// SetSysProcAttr sets the SysProcAttr syscall values for the spawned process. 
+// Because this modifies cmd, it will only work with the process spawners 
+// and not effect the GExpect option method.
+func SetSysProcAttr(args *syscall.SysProcAttr) Option {
+	return func(e *GExpect) Option {
+		prev := e.cmd.SysProcAttr
+		e.cmd.SysProcAttr = args
+		return SetSysProcAttr(prev)
+	}
+}
+
+// PartialMatch enables/disables the returning of unmatched buffer so that consecutive expect call works.
+func PartialMatch(v bool) Option {
+	return func(e *GExpect) Option {
+		prev := e.partialMatch
+		e.partialMatch = v
+		return PartialMatch(prev)
 	}
 }
 
@@ -379,7 +425,7 @@ func Next() func() (Tag, *Status) {
 // LogContinue logs the message and returns the Continue Tag and status.
 func LogContinue(msg string, s *Status) func() (Tag, *Status) {
 	return func() (Tag, *Status) {
-		log.Info(msg)
+		log.Print(msg)
 		return ContinueTag, s
 	}
 }
@@ -512,12 +558,18 @@ type GExpect struct {
 	cls func(*GExpect) error
 	// timeout contains the default timeout for a spawned command.
 	timeout time.Duration
+	// sendTimeout contains the default timeout for a send command.
+	sendTimeout time.Duration
 	// chkDuration contains the duration between checks for new incoming data.
 	chkDuration time.Duration
 	// verbose enables verbose logging.
 	verbose bool
 	// verboseWriter if set specifies where to write verbose information.
 	verboseWriter io.Writer
+	// teeWriter receives a duplicate of the spawned process's output when set.
+	teeWriter io.WriteCloser
+	// PartialMatch enables the returning of unmatched buffer so that consecutive expect call works.
+	partialMatch bool
 
 	// mu protects the output buffer. It must be held for any operations on out.
 	mu  sync.Mutex
@@ -663,17 +715,25 @@ func (e *GExpect) ExpectSwitchCase(cs []Caser, timeout time.Duration) (string, [
 					for n, bytesRead, err := 0, 0, error(nil); bytesRead < len(vStr); bytesRead += n {
 						n, err = e.verboseWriter.Write([]byte(vStr)[n:])
 						if err != nil {
-							log.Warningf("Write to Verbose Writer failed: %v", err)
+							log.Printf("Write to Verbose Writer failed: %v", err)
 							break
 						}
 					}
 				} else {
-					log.Infof("Match for RE: %q found: %q Buffer: %q", rs[i].String(), match, tbuf.String())
+					log.Printf("Match for RE: %q found: %q Buffer: %q", rs[i].String(), match, tbuf.String())
 				}
 			}
 
-			// Clear the buffer directly after match.
-			o := tbuf.String()
+			tbufString := tbuf.String()
+			o := tbufString
+
+			if e.partialMatch {
+				// Return the part of the buffer that is not matched by the regular expression so that the next expect call will be able to match it.
+				matchIndex := rs[i].FindStringIndex(tbufString)
+				o = tbufString[0:matchIndex[1]]
+				e.returnUnmatchedSuffix(tbufString[matchIndex[1]:])
+			} 
+
 			tbuf.Reset()
 
 			st := c.String()
@@ -820,11 +880,13 @@ func SpawnFake(b []Batcher, timeout time.Duration, opt ...Option) (*GExpect, <-c
 	if err != nil {
 		return nil, nil, err
 	}
+	// The Tee option should only affect the output not the batcher
+	srv.teeWriter = nil
 
 	go func() {
 		res, err := srv.ExpectBatch(b, timeout)
 		if err != nil {
-			log.Warningf("ExpectBatch(%v,%v) failed: %v, out: %v", b, timeout, err, res)
+			log.Printf("ExpectBatch(%v,%v) failed: %v, out: %v", b, timeout, err, res)
 		}
 		close(done)
 	}()
@@ -833,6 +895,7 @@ func SpawnFake(b []Batcher, timeout time.Duration, opt ...Option) (*GExpect, <-c
 		In:  rw,
 		Out: wr,
 		Close: func() error {
+			srv.Close()
 			return rw.Close()
 		},
 		Check: func() bool { return true },
@@ -843,9 +906,10 @@ func SpawnFake(b []Batcher, timeout time.Duration, opt ...Option) (*GExpect, <-c
 	}, timeout, opt...)
 }
 
-// Spawn starts a new process and collects the output. The error channel returns the result of the
-// command Spawned when it finishes.
-func Spawn(command string, timeout time.Duration, opts ...Option) (*GExpect, <-chan error, error) {
+// SpawnWithArgs starts a new process and collects the output. The error
+// channel returns the result of the command Spawned when it finishes.
+// Arguments may contain spaces.
+func SpawnWithArgs(command []string, timeout time.Duration, opts ...Option) (*GExpect, <-chan error, error) {
 	pty, err := term.OpenPTY()
 	if err != nil {
 		return nil, nil, err
@@ -858,8 +922,7 @@ func Spawn(command string, timeout time.Duration, opts ...Option) (*GExpect, <-c
 		timeout = DefaultTimeout
 	}
 	// Get the command up and running
-	args := strings.Fields(command)
-	cmd := exec.Command(args[0], args[1:]...)
+	cmd := exec.Command(command[0], command[1:]...)
 	// This ties the commands Stdin,Stdout & Stderr to the virtual terminal we created
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = pty.Slave, pty.Slave, pty.Slave
 	// New process needs to be the process leader and control of a tty
@@ -895,6 +958,13 @@ func Spawn(command string, timeout time.Duration, opts ...Option) (*GExpect, <-c
 	go e.runcmd(res)
 	// Wait until command started
 	return e, res, <-res
+}
+
+// Spawn starts a new process and collects the output. The error channel
+// returns the result of the command Spawned when it finishes. Arguments may
+// not contain spaces.
+func Spawn(command string, timeout time.Duration, opts ...Option) (*GExpect, <-chan error, error) {
+	return SpawnWithArgs(strings.Fields(command), timeout, opts...)
 }
 
 // SpawnSSH starts an interactive SSH session,ties it to a PTY and collects the output. The returned channel sends the
@@ -990,11 +1060,11 @@ func (e *GExpect) waitForSession(r chan error, wait func() error, sIn io.WriteCl
 				return
 			case sstr, ok := <-e.snd:
 				if !ok {
-					log.Infof("Send channel closed")
+					log.Printf("Send channel closed")
 					return
 				}
 				if _, err := sIn.Write([]byte(sstr)); err != nil || !e.check() {
-					log.Infof("Write failed: %v", err)
+					log.Printf("Write failed: %v", err)
 					return
 				}
 			}
@@ -1006,12 +1076,22 @@ func (e *GExpect) waitForSession(r chan error, wait func() error, sIn io.WriteCl
 		for {
 			nr, err := out.Read(buf)
 			if err != nil || !e.check() {
+				if e.teeWriter != nil {
+					e.teeWriter.Close()
+				}
 				if err == io.EOF {
-					log.V(2).Infof("read closing down: %v", err)
+					if e.verbose {
+						log.Printf("read closing down: %v", err)
+					}
 					return
 				}
 				return
 			}
+			// Tee output to writer
+			if e.teeWriter != nil {
+				e.teeWriter.Write(buf[:nr])
+			}
+			// Add to buffer
 			e.mu.Lock()
 			e.out.Write(buf[:nr])
 			e.mu.Unlock()
@@ -1046,26 +1126,41 @@ func (e *GExpect) Read(p []byte) (nr int, err error) {
 	return e.out.Read(p)
 }
 
+func (e *GExpect) returnUnmatchedSuffix(p string) {
+    e.mu.Lock()
+    defer e.mu.Unlock()
+    newBuffer := bytes.NewBufferString(p)
+    newBuffer.WriteString(e.out.String())
+    e.out = *newBuffer
+}
+
 // Send sends a string to spawned process.
 func (e *GExpect) Send(in string) error {
 	if !e.check() {
 		return errors.New("expect: Process not running")
 	}
-	e.snd <- in
+
+	if e.sendTimeout == 0 {
+		e.snd <- in
+	} else {
+		select {
+		case <-time.After(e.sendTimeout):
+			return fmt.Errorf("send to spawned process command reached the timeout %v", e.sendTimeout)
+		case e.snd <- in:
+		}
+	}
+
 	if e.verbose {
 		if e.verboseWriter != nil {
 			vStr := fmt.Sprintln(term.Blue("Sent:").String() + fmt.Sprintf(" %q", in))
-			for n, bytesRead, err := 0, 0, error(nil); bytesRead < len(vStr); bytesRead += n {
-				n, err = e.verboseWriter.Write([]byte(vStr)[n:])
-				if err != nil {
-					log.Warningf("Write to Verbose Writer failed: %v", err)
-					break
-				}
-				return nil
+			_, err := e.verboseWriter.Write([]byte(vStr))
+			if err != nil {
+				log.Printf("Write to Verbose Writer failed: %v", err)
 			}
 		}
-		log.Info("Sent: %q", in)
+		log.Printf("Sent: %q", in)
 	}
+
 	return nil
 }
 
@@ -1125,12 +1220,21 @@ func (e *GExpect) read(done chan struct{}, ptySync *sync.WaitGroup) {
 	buf := make([]byte, bufferSize)
 	for {
 		nr, err := e.pty.Master.Read(buf)
-		if err != nil || !e.check() {
+		if err != nil && !e.check() {
+			if e.teeWriter != nil {
+				e.teeWriter.Close()
+			}
 			if err == io.EOF {
-				log.V(2).Infof("read closing down: %v", err)
+				if e.verbose {
+					log.Printf("read closing down: %v", err)
+				}
 				return
 			}
 			return
+		}
+		// Tee output to writer
+		if e.teeWriter != nil {
+			e.teeWriter.Write(buf[:nr])
 		}
 		// Add to buffer
 		e.mu.Lock()
@@ -1156,7 +1260,7 @@ func (e *GExpect) send(done chan struct{}, ptySync *sync.WaitGroup) {
 				return
 			}
 			if _, err := e.pty.Master.Write([]byte(sstr)); err != nil || !e.check() {
-				log.Infof("send failed: %v", err)
+				log.Printf("send failed: %v", err)
 				break
 			}
 		}

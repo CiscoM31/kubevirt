@@ -22,24 +22,26 @@
 package network
 
 import (
-	"bufio"
-	"bytes"
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
+
 	"io/ioutil"
 	"net"
 	"os"
-	"regexp"
-	"strings"
 
+	"github.com/coreos/go-iptables/iptables"
+
+	lmf "github.com/subgraph/libmacouflage"
 	"github.com/vishvananda/netlink"
 
+	v1 "kubevirt.io/kubevirt/pkg/api/v1"
 	"kubevirt.io/kubevirt/pkg/log"
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/api"
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/network/dhcp"
-
-	lmf "github.com/subgraph/libmacouflage"
 )
+
+const randomMacGenerationAttempts = 10
 
 type VIF struct {
 	Name    string
@@ -48,6 +50,18 @@ type VIF struct {
 	Gateway net.IP
 	Routes  *[]netlink.Route
 	Mtu     uint16
+}
+
+func (vif VIF) String() string {
+	return fmt.Sprintf(
+		"VIF: { Name: %s, IP: %s, Mask: %s, MAC: %s, Gateway: %s, MTU: %d}",
+		vif.Name,
+		vif.IP.IP,
+		vif.IP.Mask,
+		vif.MAC,
+		vif.Gateway,
+		vif.Mtu,
+	)
 }
 
 type NetworkHandler interface {
@@ -59,10 +73,16 @@ type NetworkHandler interface {
 	LinkSetDown(link netlink.Link) error
 	LinkSetUp(link netlink.Link) error
 	LinkAdd(link netlink.Link) error
+	LinkSetLearningOff(link netlink.Link) error
 	ParseAddr(s string) (*netlink.Addr, error)
+	GetHostAndGwAddressesFromCIDR(s string) (string, string, error)
 	SetRandomMac(iface string) (net.HardwareAddr, error)
+	GenerateRandomMac() (net.HardwareAddr, error)
 	GetMacDetails(iface string) (net.HardwareAddr, error)
-	StartDHCP(nic *VIF, serverAddr *netlink.Addr)
+	LinkSetMaster(link netlink.Link, master *netlink.Bridge) error
+	StartDHCP(nic *VIF, serverAddr *netlink.Addr, bridgeInterfaceName string, dhcpOptions *v1.DHCPOptions)
+	IptablesNewChain(table, chain string) error
+	IptablesAppendRule(table, chain string, rulespec ...string) error
 }
 
 type NetworkUtilsHandler struct{}
@@ -90,11 +110,61 @@ func (h *NetworkUtilsHandler) LinkSetUp(link netlink.Link) error {
 func (h *NetworkUtilsHandler) LinkAdd(link netlink.Link) error {
 	return netlink.LinkAdd(link)
 }
+func (h *NetworkUtilsHandler) LinkSetLearningOff(link netlink.Link) error {
+	return netlink.LinkSetLearning(link, false)
+}
 func (h *NetworkUtilsHandler) ParseAddr(s string) (*netlink.Addr, error) {
 	return netlink.ParseAddr(s)
 }
 func (h *NetworkUtilsHandler) AddrAdd(link netlink.Link, addr *netlink.Addr) error {
 	return netlink.AddrAdd(link, addr)
+}
+func (h *NetworkUtilsHandler) LinkSetMaster(link netlink.Link, master *netlink.Bridge) error {
+	return netlink.LinkSetMaster(link, master)
+}
+func (h *NetworkUtilsHandler) IptablesNewChain(table, chain string) error {
+	iptablesObject, err := iptables.New()
+	if err != nil {
+		return err
+	}
+
+	return iptablesObject.NewChain(table, chain)
+}
+func (h *NetworkUtilsHandler) IptablesAppendRule(table, chain string, rulespec ...string) error {
+	iptablesObject, err := iptables.New()
+	if err != nil {
+		return err
+	}
+
+	return iptablesObject.Append(table, chain, rulespec...)
+}
+func (h *NetworkUtilsHandler) GetHostAndGwAddressesFromCIDR(s string) (string, string, error) {
+	ip, ipnet, err := net.ParseCIDR(s)
+	if err != nil {
+		return "", "", err
+	}
+
+	subnet, _ := ipnet.Mask.Size()
+	var ips []string
+	for ip := ip.Mask(ipnet.Mask); ipnet.Contains(ip); inc(ip) {
+		ips = append(ips, fmt.Sprintf("%s/%d", ip.String(), subnet))
+
+		if len(ips) == 4 {
+			// remove network address and broadcast address
+			return ips[1], ips[2], nil
+		}
+	}
+
+	return "", "", fmt.Errorf("less than 4 addresses on network")
+}
+
+func inc(ip net.IP) {
+	for j := len(ip) - 1; j >= 0; j-- {
+		ip[j]++
+		if ip[j] > 0 {
+			break
+		}
+	}
 }
 
 // GetMacDetails from an interface
@@ -107,7 +177,7 @@ func (h *NetworkUtilsHandler) GetMacDetails(iface string) (net.HardwareAddr, err
 	return currentMac, nil
 }
 
-// SetRandomMac changes the MAC address for a agiven interface to a randomly generated, preserving the vendor prefix
+// SetRandomMac changes the MAC address for a given interface to a randomly generated, preserving the vendor prefix
 func (h *NetworkUtilsHandler) SetRandomMac(iface string) (net.HardwareAddr, error) {
 	var mac net.HardwareAddr
 
@@ -116,24 +186,35 @@ func (h *NetworkUtilsHandler) SetRandomMac(iface string) (net.HardwareAddr, erro
 		return nil, err
 	}
 
-	changed, err := lmf.SpoofMacSameVendor(iface, false)
-	if err != nil {
-		log.Log.Reason(err).Errorf("failed to spoof MAC for an interface: %s", iface)
-		return nil, err
-	}
+	changed := false
 
-	if changed {
-		mac, err = Handler.GetMacDetails(iface)
+	for i := 0; i < randomMacGenerationAttempts; i++ {
+		changed, err = lmf.SpoofMacSameVendor(iface, false)
 		if err != nil {
+			log.Log.Reason(err).Errorf("failed to spoof MAC for an interface: %s", iface)
 			return nil, err
 		}
-		log.Log.Reason(err).Errorf("updated MAC for interface: %s - %s", iface, mac)
+
+		if changed {
+			mac, err = Handler.GetMacDetails(iface)
+			if err != nil {
+				return nil, err
+			}
+			log.Log.Infof("updated MAC for %s interface: old: %s -> new: %s", iface, currentMac, mac)
+			break
+		}
+	}
+	if !changed {
+		err := fmt.Errorf("failed to spoof MAC for an interface %s after %d attempts", iface, randomMacGenerationAttempts)
+		log.Log.Reason(err)
+		return nil, err
 	}
 	return currentMac, nil
 }
 
-func (h *NetworkUtilsHandler) StartDHCP(nic *VIF, serverAddr *netlink.Addr) {
-	nameservers, searchDomains, err := getResolvConfDetailsFromPod()
+func (h *NetworkUtilsHandler) StartDHCP(nic *VIF, serverAddr *netlink.Addr, bridgeInterfaceName string, dhcpOptions *v1.DHCPOptions) {
+	log.Log.V(4).Infof("StartDHCP network Nic: %+v", nic)
+	nameservers, searchDomains, err := api.GetResolvConfDetailsFromPod()
 	if err != nil {
 		log.Log.Errorf("Failed to get DNS servers from resolv.conf: %v", err)
 		panic(err)
@@ -146,18 +227,31 @@ func (h *NetworkUtilsHandler) StartDHCP(nic *VIF, serverAddr *netlink.Addr) {
 			nic.MAC,
 			nic.IP.IP,
 			nic.IP.Mask,
-			api.DefaultBridgeName,
+			bridgeInterfaceName,
 			serverAddr.IP,
 			nic.Gateway,
 			nameservers,
 			nic.Routes,
 			searchDomains,
 			nic.Mtu,
+			dhcpOptions,
 		); err != nil {
 			log.Log.Errorf("failed to run DHCP: %v", err)
 			panic(err)
 		}
 	}()
+}
+
+// Generate a random mac for interface
+// Avoid MAC address starting with reserved value 0xFE (https://github.com/kubevirt/kubevirt/issues/1494)
+func (h *NetworkUtilsHandler) GenerateRandomMac() (net.HardwareAddr, error) {
+	prefix := []byte{0x02, 0x00, 0x00} // local unicast prefix
+	suffix := make([]byte, 3)
+	_, err := rand.Read(suffix)
+	if err != nil {
+		return nil, err
+	}
+	return net.HardwareAddr(append(prefix, suffix...)), nil
 }
 
 // Allow mocking for tests
@@ -170,32 +264,36 @@ func initHandler() {
 	}
 }
 
-func setCachedInterface(ifconf *api.Interface) error {
-	buf, err := json.MarshalIndent(&ifconf, "", "  ")
+func writeToCachedFile(inter interface{}, fileName, name string) error {
+	buf, err := json.MarshalIndent(&inter, "", "  ")
 	if err != nil {
-		return fmt.Errorf("error marshaling interface cache: %v", err)
+		return fmt.Errorf("error marshaling cached object: %v", err)
 	}
-	err = ioutil.WriteFile(interfaceCacheFile, buf, 0644)
+	err = ioutil.WriteFile(getInterfaceCacheFile(fileName, name), buf, 0644)
 	if err != nil {
-		return fmt.Errorf("error writing interface cache %v", err)
+		return fmt.Errorf("error writing cached object: %v", err)
 	}
 	return nil
 }
 
-func getCachedInterface() (*api.Interface, error) {
-	buf, err := ioutil.ReadFile(interfaceCacheFile)
+func readFromCachedFile(name, fileName string, inter interface{}) (bool, error) {
+	buf, err := ioutil.ReadFile(getInterfaceCacheFile(fileName, name))
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil, nil
+			return false, nil
 		}
-		return nil, err
+		return false, err
 	}
-	ifconf := api.Interface{}
-	err = json.Unmarshal(buf, &ifconf)
+
+	err = json.Unmarshal(buf, &inter)
 	if err != nil {
-		return nil, fmt.Errorf("error unmarshaling interface: %v", err)
+		return false, fmt.Errorf("error unmarshaling cached object: %v", err)
 	}
-	return &ifconf, nil
+	return true, nil
+}
+
+func getInterfaceCacheFile(filePath, name string) string {
+	return fmt.Sprintf(filePath, name)
 }
 
 // filter out irrelevant routes
@@ -219,85 +317,4 @@ func filterPodNetworkRoutes(routes []netlink.Route, nic *VIF) (filteredRoutes []
 // only used by unit test suite
 func setInterfaceCacheFile(path string) {
 	interfaceCacheFile = path
-}
-
-// returns nameservers [][]byte, searchdomains []string, error
-func getResolvConfDetailsFromPod() ([][]byte, []string, error) {
-	b, err := ioutil.ReadFile(resolvConf)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	nameservers, err := ParseNameservers(string(b))
-	if err != nil {
-		return nil, nil, err
-	}
-
-	searchDomains, err := ParseSearchDomains(string(b))
-	if err != nil {
-		return nil, nil, err
-	}
-
-	log.Log.Reason(err).Infof("Found nameservers in %s: %s", resolvConf, bytes.Join(nameservers, []byte{' '}))
-	log.Log.Reason(err).Infof("Found search domains in %s: %s", resolvConf, strings.Join(searchDomains, " "))
-
-	return nameservers, searchDomains, err
-}
-
-func ParseNameservers(content string) ([][]byte, error) {
-	var nameservers [][]byte
-
-	re, err := regexp.Compile("([0-9]{1,3}.?){4}")
-	if err != nil {
-		return nameservers, err
-	}
-
-	scanner := bufio.NewScanner(strings.NewReader(content))
-
-	for scanner.Scan() {
-		line := scanner.Text()
-		if strings.HasPrefix(line, nameserverPrefix) {
-			nameserver := re.FindString(line)
-			if nameserver != "" {
-				nameservers = append(nameservers, net.ParseIP(nameserver).To4())
-			}
-		}
-	}
-
-	if err = scanner.Err(); err != nil {
-		return nameservers, err
-	}
-
-	// apply a default DNS if none found from pod
-	if len(nameservers) == 0 {
-		nameservers = append(nameservers, net.ParseIP(defaultDNS).To4())
-	}
-
-	return nameservers, nil
-}
-
-func ParseSearchDomains(content string) ([]string, error) {
-	var searchDomains []string
-
-	scanner := bufio.NewScanner(strings.NewReader(content))
-
-	for scanner.Scan() {
-		line := scanner.Text()
-		if strings.HasPrefix(line, domainSearchPrefix) {
-			doms := strings.Fields(strings.TrimPrefix(line, domainSearchPrefix))
-			for _, dom := range doms {
-				searchDomains = append(searchDomains, dom)
-			}
-		}
-	}
-
-	if err := scanner.Err(); err != nil {
-		return nil, err
-	}
-
-	if len(searchDomains) == 0 {
-		searchDomains = append(searchDomains, defaultSearchDomain)
-	}
-
-	return searchDomains, nil
 }

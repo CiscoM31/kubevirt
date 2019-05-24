@@ -30,7 +30,7 @@ import (
 	"kubevirt.io/kubevirt/tests"
 )
 
-var _ = Describe("User Access", func() {
+var _ = Describe("[rfe_id:500][crit:high][vendor:cnv-qe@redhat.com][level:component]User Access", func() {
 
 	flag.Parse()
 
@@ -39,45 +39,8 @@ var _ = Describe("User Access", func() {
 	})
 
 	Describe("With default kubevirt service accounts", func() {
-		It("should verify only admin role has access only to kubevirt-config", func() {
-			tests.SkipIfNoKubectl()
-
-			verbs := []string{"get", "update", "patch"}
-
-			namespace := tests.NamespaceTestDefault
-			resourceNamespace := tests.KubeVirtInstallNamespace
-
-			saNames := []string{tests.ViewServiceAccountName, tests.EditServiceAccountName, tests.AdminServiceAccountName}
-
-			for _, saName := range saNames {
-				// Verifies targeted access to only the kubevirt config
-				By(fmt.Sprintf("verifying expected permissions for sa %s for resource configmaps/kubevirt-config", saName))
-				for _, verb := range verbs {
-					expectedRes := "no"
-					if saName == tests.AdminServiceAccountName {
-						expectedRes = "yes"
-					}
-					resource := "configmaps/kubevirt-config"
-					as := fmt.Sprintf("system:serviceaccount:%s:%s", namespace, saName)
-					result, err := tests.RunKubectlCommand("auth", "can-i", "-n", resourceNamespace, "--as", as, verb, resource)
-					Expect(err).ToNot(HaveOccurred())
-					Expect(result).To(ContainSubstring(expectedRes))
-				}
-
-				By(fmt.Sprintf("verifying expected permissions for sa %s for resource configmaps/kubevirt-madethisup", saName))
-				for _, verb := range verbs {
-					expectedRes := "no"
-					resource := "configmaps/kubevirt-imadethisup"
-					as := fmt.Sprintf("system:serviceaccount:%s:%s", namespace, saName)
-					result, err := tests.RunKubectlCommand("auth", "can-i", "-n", resourceNamespace, "--as", as, verb, resource)
-					Expect(err).ToNot(HaveOccurred())
-					Expect(result).To(ContainSubstring(expectedRes))
-				}
-			}
-		})
-
 		table.DescribeTable("should verify permissions are correct for view, edit, and admin", func(resource string) {
-			tests.SkipIfNoKubectl()
+			tests.SkipIfNoCmd("kubectl")
 
 			view := tests.ViewServiceAccountName
 			edit := tests.EditServiceAccountName
@@ -135,24 +98,21 @@ var _ = Describe("User Access", func() {
 				By(fmt.Sprintf("verifying VIEW sa for verb %s", verb))
 				expectedRes, _ := viewVerbs[verb]
 				as := fmt.Sprintf("system:serviceaccount:%s:%s", namespace, view)
-				result, err := tests.RunKubectlCommand("auth", "can-i", "--as", as, verb, resource)
-				Expect(err).ToNot(HaveOccurred())
+				result, _, _ := tests.RunCommand("kubectl", "auth", "can-i", "--as", as, verb, resource)
 				Expect(result).To(ContainSubstring(expectedRes))
 
 				// EDIT
 				By(fmt.Sprintf("verifying EDIT sa for verb %s", verb))
 				expectedRes, _ = editVerbs[verb]
 				as = fmt.Sprintf("system:serviceaccount:%s:%s", namespace, edit)
-				result, err = tests.RunKubectlCommand("auth", "can-i", "--as", as, verb, resource)
-				Expect(err).ToNot(HaveOccurred())
+				result, _, _ = tests.RunCommand("kubectl", "auth", "can-i", "--as", as, verb, resource)
 				Expect(result).To(ContainSubstring(expectedRes))
 
 				// ADMIN
 				By(fmt.Sprintf("verifying ADMIN sa for verb %s", verb))
 				expectedRes, _ = adminVerbs[verb]
 				as = fmt.Sprintf("system:serviceaccount:%s:%s", namespace, admin)
-				result, err = tests.RunKubectlCommand("auth", "can-i", "--as", as, verb, resource)
-				Expect(err).ToNot(HaveOccurred())
+				result, _, _ = tests.RunCommand("kubectl", "auth", "can-i", "--as", as, verb, resource)
 				Expect(result).To(ContainSubstring(expectedRes))
 
 				// DEFAULT - the default should always return 'no' for ever verb.
@@ -160,15 +120,14 @@ var _ = Describe("User Access", func() {
 				By(fmt.Sprintf("verifying DEFAULT sa for verb %s", verb))
 				expectedRes = "no"
 				as = fmt.Sprintf("system:serviceaccount:%s:default", namespace)
-				result, err = tests.RunKubectlCommand("auth", "can-i", "--as", as, verb, resource)
-				Expect(err).ToNot(HaveOccurred())
+				result, _, _ = tests.RunCommand("kubectl", "auth", "can-i", "--as", as, verb, resource)
 				Expect(result).To(ContainSubstring(expectedRes))
 			}
 		},
-			table.Entry("given a vm", "virtualmachines"),
-			table.Entry("given an ovm", "offlinevirtualmachines"),
-			table.Entry("given a vm preset", "virtualmachinepresets"),
-			table.Entry("given a vm replica set", "virtualmachinereplicasets"),
+			table.Entry("[test_id:526]given a vmi", "virtualmachineinstances"),
+			table.Entry("[test_id:527]given an vm", "virtualmachines"),
+			table.Entry("[test_id:528]given a vmi preset", "virtualmachineinstancepresets"),
+			table.Entry("[test_id:529][crit:low]given a vmi replica set", "virtualmachineinstancereplicasets"),
 		)
 	})
 })

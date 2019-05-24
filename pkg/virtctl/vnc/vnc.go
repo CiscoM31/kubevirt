@@ -26,6 +26,9 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
+	"runtime"
+	"time"
 
 	"github.com/golang/glog"
 	"github.com/spf13/cobra"
@@ -35,12 +38,30 @@ import (
 	"kubevirt.io/kubevirt/pkg/virtctl/templates"
 )
 
-const FLAG = "vnc"
+const (
+	LISTEN_TIMEOUT = 60 * time.Second
+	FLAG           = "vnc"
+
+	//#### Tiger VNC ####
+	//# https://github.com/TigerVNC/tigervnc/releases
+	// Compatible with multiple Tiger VNC versions
+	TIGER_VNC_PATTERN = `/Applications/TigerVNC Viewer*.app/Contents/MacOS/TigerVNC Viewer`
+
+	//#### Chicken VNC ####
+	//# https://sourceforge.net/projects/chicken/
+	CHICKEN_VNC = "/Applications/Chicken.app/Contents/MacOS/Chicken"
+
+	//####  Real VNC ####
+	//# https://www.realvnc.com/en/connect/download/viewer/macos/
+	REAL_VNC = "/Applications/VNC Viewer.app/Contents/MacOS/vncviewer"
+
+	REMOTE_VIEWER = "remote-viewer"
+)
 
 func NewCommand(clientConfig clientcmd.ClientConfig) *cobra.Command {
 	cmd := &cobra.Command{
-		Use:     "vnc (vm)",
-		Short:   "Open a vnc connection to a virtual machine.",
+		Use:     "vnc (VMI)",
+		Short:   "Open a vnc connection to a virtual machine instance.",
 		Example: usage(),
 		Args:    cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -62,12 +83,31 @@ func (o *VNC) Run(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	vm := args[0]
+	vmi := args[0]
 
 	virtCli, err := kubecli.GetKubevirtClientFromClientConfig(o.clientConfig)
 	if err != nil {
 		return err
 	}
+
+	// setup connection with VM
+	vnc, err := virtCli.VirtualMachineInstance(namespace).VNC(vmi)
+	if err != nil {
+		return fmt.Errorf("Can't access VMI %s: %s", vmi, err.Error())
+	}
+
+	lnAddr, err := net.ResolveTCPAddr("tcp", "127.0.0.1:0")
+	if err != nil {
+		return fmt.Errorf("Can't resolve the address: %s", err.Error())
+	}
+
+	// The local tcp server is used to proxy the podExec websock connection to remote-viewer
+	ln, err := net.ListenTCP("tcp", lnAddr)
+	if err != nil {
+		return fmt.Errorf("Can't listen on unix socket: %s", err.Error())
+	}
+	// End of pre-flight checks. Everything looks good, we can start
+	// the goroutines and let the data flow
 
 	//                                       -> pipeInWriter  -> pipeInReader
 	// remote-viewer -> unix sock connection
@@ -76,60 +116,130 @@ func (o *VNC) Run(cmd *cobra.Command, args []string) error {
 	pipeOutReader, pipeOutWriter := io.Pipe()
 
 	k8ResChan := make(chan error)
+	listenResChan := make(chan error)
 	viewResChan := make(chan error)
 	stopChan := make(chan struct{}, 1)
+	doneChan := make(chan struct{}, 1)
 	writeStop := make(chan error)
 	readStop := make(chan error)
 
-	// The local tcp server is used to proxy the podExec websock connection to remote-viewer
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		return fmt.Errorf("Can't listen on unix socket: %s", err.Error())
-	}
-
-	port := ln.Addr().(*net.TCPAddr).Port
-
-	// setup connection with VM
 	go func() {
-		err := virtCli.VM(namespace).VNC(vm, pipeInReader, pipeOutWriter)
-		k8ResChan <- err
+		// transfer data from/to the VM
+		k8ResChan <- vnc.Stream(kubecli.StreamOptions{
+			In:  pipeInReader,
+			Out: pipeOutWriter,
+		})
 	}()
 
-	// execute remote viewer
+	// wait for remote-viewer to connect to our local proxy server
 	go func() {
-		cmnd := exec.Command("remote-viewer", fmt.Sprintf("vnc://127.0.0.1:%d", port))
-		err := cmnd.Run()
+		start := time.Now()
+		glog.Infof("connection timeout: %v", LISTEN_TIMEOUT)
+		// exit early if spawning remote-viewer fails
+		ln.SetDeadline(time.Now().Add(LISTEN_TIMEOUT))
+
+		fd, err := ln.Accept()
 		if err != nil {
-			glog.Errorf("remote-viewer execution encountered an error: %v", err)
+			glog.V(2).Infof("Failed to accept unix sock connection. %s", err.Error())
+			listenResChan <- err
+		}
+		defer fd.Close()
+
+		glog.V(2).Infof("remote-viewer connected in %v", time.Now().Sub(start))
+
+		// write to FD <- pipeOutReader
+		go func() {
+			_, err := io.Copy(fd, pipeOutReader)
+			readStop <- err
+		}()
+
+		// read from FD -> pipeInWriter
+		go func() {
+			_, err := io.Copy(pipeInWriter, fd)
+			writeStop <- err
+		}()
+
+		// don't terminate until remote-viewer is done
+		<-doneChan
+		listenResChan <- err
+	}()
+
+	// execute VNC
+	go func() {
+		defer close(doneChan)
+		port := ln.Addr().(*net.TCPAddr).Port
+		args := []string{}
+
+		vncBin := ""
+		osType := runtime.GOOS
+		switch osType {
+		case "darwin":
+			if matches, err := filepath.Glob(TIGER_VNC_PATTERN); err == nil && len(matches) > 0 {
+				// Always use the latest version
+				vncBin = matches[len(matches)-1]
+				args = tigerVncArgs(port)
+			} else if err == filepath.ErrBadPattern {
+				viewResChan <- err
+				return
+			} else if _, err := os.Stat(CHICKEN_VNC); err == nil {
+				vncBin = CHICKEN_VNC
+				args = chickenVncArgs(port)
+			} else if !os.IsNotExist(err) {
+				viewResChan <- err
+				return
+			} else if _, err := os.Stat(REAL_VNC); err == nil {
+				vncBin = REAL_VNC
+				args = realVncArgs(port)
+			} else if !os.IsNotExist(err) {
+				viewResChan <- err
+				return
+			} else if _, err := exec.LookPath(REMOTE_VIEWER); err == nil {
+				// fall back to user supplied script/binary in path
+				vncBin = REMOTE_VIEWER
+				args = remoteViewerArgs(port)
+			} else if !os.IsNotExist(err) {
+				viewResChan <- err
+				return
+			}
+		case "linux", "windows":
+			_, err := exec.LookPath(REMOTE_VIEWER)
+			if exec.ErrNotFound == err {
+				viewResChan <- fmt.Errorf("could not find the remote-viewer binary in $PATH")
+				return
+			} else if err != nil {
+				viewResChan <- err
+				return
+			}
+			vncBin = REMOTE_VIEWER
+			args = remoteViewerArgs(port)
+		default:
+			viewResChan <- fmt.Errorf("virtctl does not support VNC on %v", osType)
+			return
+		}
+
+		if vncBin == "" {
+			glog.Errorf("No supported VNC app found in %s", osType)
+			err = fmt.Errorf("No supported VNC app found in %s", osType)
+		} else {
+			if glog.V(4) {
+				glog.Infof("Executing commandline: '%s %v'", vncBin, args)
+			}
+			cmnd := exec.Command(vncBin, args...)
+			output, err := cmnd.CombinedOutput()
+			if err != nil {
+				glog.Errorf("%s execution failed: %v, output: %v", vncBin, err, string(output))
+			} else {
+				glog.V(2).Infof("remote-viewer output: %v", string(output))
+			}
 		}
 		viewResChan <- err
 	}()
 
-	// wait for remote-viewer to connect to our local proxy server
-	fd, err := ln.Accept()
-	if err != nil {
-		return fmt.Errorf("Failed to accept unix sock connection. %s", err.Error())
-	}
-	defer fd.Close()
-
-	glog.V(2).Infof("remote-viewer connected")
 	go func() {
+		defer close(stopChan)
 		interrupt := make(chan os.Signal, 1)
 		signal.Notify(interrupt, os.Interrupt)
 		<-interrupt
-		close(stopChan)
-	}()
-
-	// write to FD <- pipeOutReader
-	go func() {
-		_, err := io.Copy(fd, pipeOutReader)
-		readStop <- err
-	}()
-
-	// read from FD -> pipeInWriter
-	go func() {
-		_, err := io.Copy(pipeInWriter, fd)
-		writeStop <- err
 	}()
 
 	select {
@@ -138,6 +248,7 @@ func (o *VNC) Run(cmd *cobra.Command, args []string) error {
 	case err = <-writeStop:
 	case err = <-k8ResChan:
 	case err = <-viewResChan:
+	case err = <-listenResChan:
 	}
 
 	if err != nil {
@@ -146,8 +257,40 @@ func (o *VNC) Run(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+func tigerVncArgs(port int) (args []string) {
+	args = append(args, fmt.Sprintf("127.0.0.1:%d", port))
+	if glog.V(4) {
+		args = append(args, "Log=*:stderr:100")
+	}
+	return
+}
+
+func chickenVncArgs(port int) (args []string) {
+	args = append(args, fmt.Sprintf("127.0.0.1:%d", port))
+	return
+}
+
+func realVncArgs(port int) (args []string) {
+	args = append(args, fmt.Sprintf("127.0.0.1:%d", port))
+	args = append(args, "-WarnUnencrypted=0")
+	args = append(args, "-Shared=0")
+	args = append(args, "-ShareFiles=0")
+	if glog.V(4) {
+		args = append(args, "-log=*:stderr:100")
+	}
+	return
+}
+
+func remoteViewerArgs(port int) (args []string) {
+	args = append(args, fmt.Sprintf("vnc://127.0.0.1:%d", port))
+	if glog.V(4) {
+		args = append(args, "--debug")
+	}
+	return
+}
+
 func usage() string {
-	usage := "# Connect to testvm via remote-viewer:\n"
-	usage += "./virtctl vnc testvm"
+	usage := "  # Connect to 'testvmi' via remote-viewer:\n"
+	usage += "  virtctl vnc testvmi"
 	return usage
 }

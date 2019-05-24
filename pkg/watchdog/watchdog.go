@@ -27,7 +27,7 @@ import (
 	"strings"
 	"time"
 
-	"kubevirt.io/kubevirt/pkg/api/v1"
+	v1 "kubevirt.io/kubevirt/pkg/api/v1"
 	diskutils "kubevirt.io/kubevirt/pkg/ephemeral-disk-utils"
 	"kubevirt.io/kubevirt/pkg/log"
 	"kubevirt.io/kubevirt/pkg/precond"
@@ -43,17 +43,37 @@ func WatchdogFileFromNamespaceName(baseDir string, namespace string, name string
 	return filepath.Join(baseDir, "watchdog-files", watchdogFile)
 }
 
-func WatchdogFileRemove(baseDir string, vm *v1.VirtualMachine) error {
-	namespace := precond.MustNotBeEmpty(vm.GetObjectMeta().GetNamespace())
-	domain := precond.MustNotBeEmpty(vm.GetObjectMeta().GetName())
+// attempts to retrieve vmi uid from watchdog file if it exists
+func WatchdogFileGetUid(baseDir string, vmi *v1.VirtualMachineInstance) string {
+	namespace := precond.MustNotBeEmpty(vmi.GetObjectMeta().GetNamespace())
+	domain := precond.MustNotBeEmpty(vmi.GetObjectMeta().GetName())
+
+	filePath := WatchdogFileFromNamespaceName(baseDir, namespace, domain)
+
+	b, err := ioutil.ReadFile(filePath)
+	if err != nil {
+		return ""
+	}
+
+	return string(b)
+}
+
+func WatchdogFileRemove(baseDir string, vmi *v1.VirtualMachineInstance) error {
+	namespace := precond.MustNotBeEmpty(vmi.GetObjectMeta().GetNamespace())
+	domain := precond.MustNotBeEmpty(vmi.GetObjectMeta().GetName())
 
 	file := WatchdogFileFromNamespaceName(baseDir, namespace, domain)
 
+	log.Log.V(3).Infof("Remove watchdog file %s", file)
 	return diskutils.RemoveFile(file)
 }
 
-func WatchdogFileUpdate(watchdogFile string) error {
+func WatchdogFileUpdate(watchdogFile string, uid string) error {
 	f, err := os.Create(watchdogFile)
+	if err != nil {
+		return err
+	}
+	_, err = f.WriteString(uid)
 	if err != nil {
 		return err
 	}
@@ -62,9 +82,9 @@ func WatchdogFileUpdate(watchdogFile string) error {
 	return nil
 }
 
-func WatchdogFileExists(baseDir string, vm *v1.VirtualMachine) (bool, error) {
-	namespace := precond.MustNotBeEmpty(vm.GetObjectMeta().GetNamespace())
-	domain := precond.MustNotBeEmpty(vm.GetObjectMeta().GetName())
+func WatchdogFileExists(baseDir string, vmi *v1.VirtualMachineInstance) (bool, error) {
+	namespace := precond.MustNotBeEmpty(vmi.GetObjectMeta().GetNamespace())
+	domain := precond.MustNotBeEmpty(vmi.GetObjectMeta().GetName())
 
 	filePath := WatchdogFileFromNamespaceName(baseDir, namespace, domain)
 	exists, err := diskutils.FileExists(filePath)
@@ -76,9 +96,9 @@ func WatchdogFileExists(baseDir string, vm *v1.VirtualMachine) (bool, error) {
 	return exists, nil
 }
 
-func WatchdogFileIsExpired(timeoutSeconds int, baseDir string, vm *v1.VirtualMachine) (bool, error) {
-	namespace := precond.MustNotBeEmpty(vm.GetObjectMeta().GetNamespace())
-	domain := precond.MustNotBeEmpty(vm.GetObjectMeta().GetName())
+func WatchdogFileIsExpired(timeoutSeconds int, baseDir string, vmi *v1.VirtualMachineInstance) (bool, error) {
+	namespace := precond.MustNotBeEmpty(vmi.GetObjectMeta().GetNamespace())
+	domain := precond.MustNotBeEmpty(vmi.GetObjectMeta().GetName())
 
 	filePath := WatchdogFileFromNamespaceName(baseDir, namespace, domain)
 

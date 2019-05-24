@@ -3,7 +3,7 @@ package api
 import (
 	"reflect"
 
-	"github.com/google/gofuzz"
+	fuzz "github.com/google/gofuzz"
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
 )
@@ -75,7 +75,9 @@ var _ = Describe("Generated deepcopy functions", func() {
 			&GraphicsListen{},
 			&Address{},
 			&Ballooning{},
-			&RandomGenerator{},
+			&Rng{},
+			&RngBackend{},
+			&RngRate{},
 			&Watchdog{},
 			&SecretUsage{},
 			&SecretSpec{},

@@ -22,9 +22,12 @@ package dhcp
 import (
 	"net"
 
+	"github.com/krolaw/dhcp4"
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
 	"github.com/vishvananda/netlink"
+
+	v1 "kubevirt.io/kubevirt/pkg/api/v1"
 )
 
 var _ = Describe("DHCP", func() {
@@ -55,8 +58,13 @@ var _ = Describe("DHCP", func() {
 			Expect(dhcpRoutes).To(Equal(expected))
 		})
 
+		It("should not panic", func() {
+			dhcpRoutes := formClasslessRoutes(nil)
+			Expect(dhcpRoutes).To(Equal([]byte{}))
+		})
+
 		It("should build OpenShift routes correctly", func() {
-			expected := []byte{0, 10, 129, 0, 1, 14, 10, 128, 0, 0, 0, 0, 4, 224, 0, 0, 0, 0}
+			expected := []byte{14, 10, 128, 0, 0, 0, 0, 4, 224, 0, 0, 0, 0, 0, 10, 129, 0, 1}
 			gatewayRoute := netlink.Route{Gw: net.IPv4(10, 129, 0, 1)}
 			staticRoute1 := netlink.Route{
 				Dst: &net.IPNet{
@@ -76,7 +84,7 @@ var _ = Describe("DHCP", func() {
 		})
 
 		It("should build Calico routes correctly", func() {
-			expected := []byte{0, 169, 254, 1, 1, 32, 169, 254, 1, 1, 0, 0, 0, 0}
+			expected := []byte{32, 169, 254, 1, 1, 0, 0, 0, 0, 0, 169, 254, 1, 1}
 			gatewayRoute := netlink.Route{Gw: net.IPv4(169, 254, 1, 1)}
 			staticRoute1 := netlink.Route{
 				Dst: &net.IPNet{
@@ -121,6 +129,20 @@ var _ = Describe("DHCP", func() {
 			_, err := convertSearchDomainsToBytes(searchDomains)
 			Expect(err).NotTo(BeNil())
 			Expect(err.Error()).To(HavePrefix(errorSearchDomainTooLong))
+		})
+	})
+
+	Context("function getDomainName", func() {
+		It("should return the longest search domain entry", func() {
+			searchDomains := []string{
+				"pix3ob5ymm5jbsjessf0o4e84uvij588rz23iz0o.com",
+				"3wg5xngig6vzfqjww4kocnky3c9dqjpwkewzlwpf.com",
+				"t4lanpt7z4ix58nvxl4d.com",
+				"14wg5xngig6vzfqjww4kocnky3c9dqjpwkewzlwpf.com",
+				"4wg5xngig6vzfqjww4kocnky3c9dqjpwkewzlwpf.com",
+			}
+			domain := getDomainName(searchDomains)
+			Expect(domain).To(Equal("14wg5xngig6vzfqjww4kocnky3c9dqjpwkewzlwpf.com"))
 		})
 	})
 
@@ -175,6 +197,52 @@ var _ = Describe("DHCP", func() {
 
 		It("should accept a partial search domain", func() {
 			Expect(isValidSearchDomain("local")).To(BeTrue())
+		})
+	})
+
+	Context("Options returned by prepareDHCPOptions", func() {
+		It("should contain the domain name option", func() {
+			searchDomains := []string{
+				"pix3ob5ymm5jbsjessf0o4e84uvij588rz23iz0o.com",
+				"3wg5xngig6vzfqjww4kocnky3c9dqjpwkewzlwpf.com",
+				"t4lanpt7z4ix58nvxl4d.com",
+				"14wg5xngig6vzfqjww4kocnky3c9dqjpwkewzlwpf.com",
+				"4wg5xngig6vzfqjww4kocnky3c9dqjpwkewzlwpf.com",
+			}
+			ip := net.ParseIP("192.168.2.1")
+			options, err := prepareDHCPOptions(ip.DefaultMask(), ip, nil, nil, searchDomains, 1500, "myhost", nil)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(options[dhcp4.OptionDomainName]).To(Equal([]byte("14wg5xngig6vzfqjww4kocnky3c9dqjpwkewzlwpf.com")))
+		})
+
+		It("should contain custom options", func() {
+			searchDomains := []string{
+				"pix3ob5ymm5jbsjessf0o4e84uvij588rz23iz0o.com",
+				"3wg5xngig6vzfqjww4kocnky3c9dqjpwkewzlwpf.com",
+				"t4lanpt7z4ix58nvxl4d.com",
+				"14wg5xngig6vzfqjww4kocnky3c9dqjpwkewzlwpf.com",
+				"4wg5xngig6vzfqjww4kocnky3c9dqjpwkewzlwpf.com",
+			}
+			ip := net.ParseIP("192.168.2.1")
+
+			dhcpOptions := &v1.DHCPOptions{
+				BootFileName:   "config",
+				TFTPServerName: "tftp.kubevirt.io",
+				NTPServers: []string{
+					"192.168.2.2", "192.168.2.3",
+				},
+				PrivateOptions: []v1.DHCPPrivateOptions{v1.DHCPPrivateOptions{Option: 240, Value: "private.options.kubevirt.io"}},
+			}
+
+			options, err := prepareDHCPOptions(ip.DefaultMask(), ip, nil, nil, searchDomains, 1500, "myhost", dhcpOptions)
+
+			Expect(err).ToNot(HaveOccurred())
+			Expect(options[dhcp4.OptionBootFileName]).To(Equal([]byte("config")))
+			Expect(options[dhcp4.OptionTFTPServerName]).To(Equal([]byte("tftp.kubevirt.io")))
+			Expect(options[dhcp4.OptionNetworkTimeProtocolServers]).To(Equal([]byte{
+				192, 168, 2, 2, 192, 168, 2, 3,
+			}))
+			Expect(options[240]).To(Equal([]byte("private.options.kubevirt.io")))
 		})
 	})
 })

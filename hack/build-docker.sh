@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 #
 # This file is part of the KubeVirt project
 #
@@ -22,30 +22,27 @@ set -e
 source hack/common.sh
 source hack/config.sh
 
-if [ -z "$1" ]; then
-    target="build"
-else
-    target=$1
-    shift
-fi
-
 if [ $# -eq 0 ]; then
     args=$docker_images
+    build_tests="true"
 else
     args=$@
 fi
 
-for arg in $args; do
-    BIN_NAME=$(basename $arg)
-    if [ "${target}" = "build" ]; then
-        (
-            cd ${CMD_OUT_DIR}/${BIN_NAME}/
-            docker $target -t ${docker_prefix}/${BIN_NAME}:${docker_tag} --label ${job_prefix} --label ${BIN_NAME} .
-        )
-    elif [ "${target}" = "push" ]; then
-        (
-            cd ${CMD_OUT_DIR}/${BIN_NAME}/
-            docker $target ${docker_prefix}/${BIN_NAME}:${docker_tag}
-        )
+if [ "${target}" = "push-cache" ]; then
+    docker push kubevirt/builder-cache:${KUBEVIRT_UPDATE_CACHE_FROM}
+fi
+
+if [ "${target}" = "pull-cache" ]; then
+    docker pull kubevirt/builder-cache:${KUBEVIRT_CACHE_FROM}
+fi
+
+if [[ "${build_tests}" == "true" ]]; then
+    if [[ "${target}" == "build" ]]; then
+        build_func_tests_container
     fi
-done
+    if [[ "${target}" == "push" ]]; then
+        cd ${TESTS_OUT_DIR}
+        docker $target ${docker_prefix}/tests:${docker_tag}
+    fi
+fi

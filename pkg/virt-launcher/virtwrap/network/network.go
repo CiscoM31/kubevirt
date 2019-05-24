@@ -28,40 +28,39 @@ package network
 import (
 	"fmt"
 
-	"kubevirt.io/kubevirt/pkg/api/v1"
+	v1 "kubevirt.io/kubevirt/pkg/api/v1"
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/api"
 )
 
-const (
-	podInterface        = "eth0"
-	defaultDNS          = "8.8.8.8"
-	resolvConf          = "/etc/resolv.conf"
-	defaultSearchDomain = "cluster.local"
-	domainSearchPrefix  = "search"
-	nameserverPrefix    = "nameserver"
-)
+const podInterface = "eth0"
 
-var interfaceCacheFile = "/var/run/kubevirt-private/interface-cache.json"
+var interfaceCacheFile = "/var/run/kubevirt-private/interface-cache-%s.json"
+var qemuArgCacheFile = "/var/run/kubevirt-private/qemu-arg-%s.json"
 var NetworkInterfaceFactory = getNetworkClass
 
+var podInterfaceName = podInterface
+
 type NetworkInterface interface {
-	Plug(iface *v1.Interface, network *v1.Network, domain *api.Domain) error
+	Plug(vmi *v1.VirtualMachineInstance, iface *v1.Interface, network *v1.Network, domain *api.Domain, podInterfaceName string) error
 	Unplug()
 }
 
-func SetupNetworkInterfaces(vm *v1.VirtualMachine, domain *api.Domain) error {
+func SetupNetworkInterfaces(vmi *v1.VirtualMachineInstance, domain *api.Domain) error {
 	// prepare networks map
 	networks := map[string]*v1.Network{}
-	for _, network := range vm.Spec.Networks {
+	cniNetworks := map[string]int{}
+	for _, network := range vmi.Spec.Networks {
 		networks[network.Name] = network.DeepCopy()
+		if networks[network.Name].Multus != nil && !networks[network.Name].Multus.Default {
+			// multus pod interfaces start from 1
+			cniNetworks[network.Name] = len(cniNetworks) + 1
+		} else if networks[network.Name].Genie != nil {
+			// genie pod interfaces start from 0
+			cniNetworks[network.Name] = len(cniNetworks)
+		}
 	}
 
-	if len(networks) == 0 {
-		return fmt.Errorf("no networks were specified on a vm spec")
-	}
-
-	for _, iface := range vm.Spec.Domain.Devices.Interfaces {
-
+	for _, iface := range vmi.Spec.Domain.Devices.Interfaces {
 		network, ok := networks[iface.Name]
 		if !ok {
 			return fmt.Errorf("failed to find a network %s", iface.Name)
@@ -71,7 +70,17 @@ func SetupNetworkInterfaces(vm *v1.VirtualMachine, domain *api.Domain) error {
 			return err
 		}
 
-		err = vif.Plug(&iface, network, domain)
+		if networks[iface.Name].Multus != nil && !networks[iface.Name].Multus.Default {
+			// multus pod interfaces named netX
+			podInterfaceName = fmt.Sprintf("net%d", cniNetworks[iface.Name])
+		} else if networks[iface.Name].Genie != nil {
+			// genie pod interfaces named ethX
+			podInterfaceName = fmt.Sprintf("eth%d", cniNetworks[iface.Name])
+		} else {
+			podInterfaceName = podInterface
+		}
+
+		err = vif.Plug(vmi, &iface, network, domain, podInterfaceName)
 		if err != nil {
 			return err
 		}
@@ -81,8 +90,8 @@ func SetupNetworkInterfaces(vm *v1.VirtualMachine, domain *api.Domain) error {
 
 // a factory to get suitable network interface
 func getNetworkClass(network *v1.Network) (NetworkInterface, error) {
-	if network.Pod != nil {
+	if network.Pod != nil || network.Multus != nil || network.Genie != nil {
 		return new(PodInterface), nil
 	}
-	return nil, fmt.Errorf("Not implemented")
+	return nil, fmt.Errorf("Network not implemented")
 }

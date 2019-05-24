@@ -22,6 +22,7 @@ package network
 import (
 	"encoding/xml"
 	"errors"
+	"fmt"
 	"io/ioutil"
 	"net"
 	"os"
@@ -32,7 +33,7 @@ import (
 	"github.com/vishvananda/netlink"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	"kubevirt.io/kubevirt/pkg/api/v1"
+	v1 "kubevirt.io/kubevirt/pkg/api/v1"
 	"kubevirt.io/kubevirt/pkg/log"
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/api"
 )
@@ -52,18 +53,25 @@ var _ = Describe("Pod Network", func() {
 	var testNic *VIF
 	var interfaceXml []byte
 	var tmpDir string
+	var masqueradeTestNic *VIF
+	var masqueradeDummyName string
+	var masqueradeDummy *netlink.Dummy
+	var masqueradeGwStr string
+	var masqueradeGwAddr *netlink.Addr
+	var masqueradeVmStr string
+	var masqueradeVmAddr *netlink.Addr
 	log.Log.SetIOWriter(GinkgoWriter)
 
 	BeforeEach(func() {
 		tmpDir, _ := ioutil.TempDir("", "networktest")
-		setInterfaceCacheFile(tmpDir + "/cache.json")
+		setInterfaceCacheFile(tmpDir + "/cache-%s.json")
 
 		ctrl = gomock.NewController(GinkgoT())
 		mockNetwork = NewMockNetworkHandler(ctrl)
 		Handler = mockNetwork
 		testMac := "12:34:56:78:9A:BC"
 		updateTestMac := "AF:B3:1F:78:2A:CA"
-		dummy = &netlink.Dummy{LinkAttrs: netlink.LinkAttrs{Index: 1}}
+		dummy = &netlink.Dummy{LinkAttrs: netlink.LinkAttrs{Index: 1, MTU: 1410}}
 		address := &net.IPNet{IP: net.IPv4(10, 35, 0, 6), Mask: net.CIDRMask(24, 32)}
 		gw := net.IPv4(10, 35, 0, 1)
 		fakeMac, _ = net.ParseMAC(testMac)
@@ -80,20 +88,34 @@ var _ = Describe("Pod Network", func() {
 			},
 		}
 
-		bridgeAddr, _ = netlink.ParseAddr(bridgeFakeIP)
+		bridgeAddr, _ = netlink.ParseAddr(fmt.Sprintf(bridgeFakeIP, 0))
 		testNic = &VIF{Name: podInterface,
 			IP:      fakeAddr,
 			MAC:     fakeMac,
+			Mtu:     1410,
 			Gateway: gw}
-		interfaceXml = []byte(`<Interface type="bridge"><source bridge="br1"></source><model type="virtio"></model><mac address="12:34:56:78:9a:bc"></mac></Interface>`)
+		interfaceXml = []byte(`<Interface type="bridge"><source bridge="k6t-eth0"></source><model type="virtio"></model><mac address="12:34:56:78:9a:bc"></mac><mtu size="1410"></mtu><alias name="ua-default"></alias></Interface>`)
+
+		masqueradeGwStr = "10.0.2.1/30"
+		masqueradeGwAddr, _ = netlink.ParseAddr(masqueradeGwStr)
+		masqueradeVmStr = "10.0.2.2/30"
+		masqueradeVmAddr, _ = netlink.ParseAddr(masqueradeVmStr)
+		masqueradeDummyName = fmt.Sprintf("%s-nic", api.DefaultBridgeName)
+		masqueradeDummy = &netlink.Dummy{LinkAttrs: netlink.LinkAttrs{Name: masqueradeDummyName}}
+		masqueradeTestNic = &VIF{Name: podInterface,
+			IP:      *masqueradeVmAddr,
+			MAC:     fakeMac,
+			Mtu:     1410,
+			Gateway: masqueradeGwAddr.IP.To4()}
 	})
 
 	AfterEach(func() {
 		os.RemoveAll(tmpDir)
 	})
 
-	TestPodInterfaceIPBinding := func(vm *v1.VirtualMachine, domain *api.Domain) {
+	TestPodInterfaceIPBinding := func(vm *v1.VirtualMachineInstance, domain *api.Domain) {
 
+		//For Bridge tests
 		mockNetwork.EXPECT().LinkByName(podInterface).Return(dummy, nil)
 		mockNetwork.EXPECT().AddrList(dummy, netlink.FAMILY_V4).Return(addrList, nil)
 		mockNetwork.EXPECT().RouteList(dummy, netlink.FAMILY_V4).Return(routeList, nil)
@@ -102,12 +124,28 @@ var _ = Describe("Pod Network", func() {
 		mockNetwork.EXPECT().LinkSetDown(dummy).Return(nil)
 		mockNetwork.EXPECT().SetRandomMac(podInterface).Return(updateFakeMac, nil)
 		mockNetwork.EXPECT().LinkSetUp(dummy).Return(nil)
+		mockNetwork.EXPECT().LinkSetLearningOff(dummy).Return(nil)
 		mockNetwork.EXPECT().LinkAdd(bridgeTest).Return(nil)
 		mockNetwork.EXPECT().LinkByName(api.DefaultBridgeName).Return(bridgeTest, nil)
 		mockNetwork.EXPECT().LinkSetUp(bridgeTest).Return(nil)
-		mockNetwork.EXPECT().ParseAddr(bridgeFakeIP).Return(bridgeAddr, nil)
+		mockNetwork.EXPECT().ParseAddr(fmt.Sprintf(bridgeFakeIP, 0)).Return(bridgeAddr, nil)
+		mockNetwork.EXPECT().LinkSetMaster(dummy, bridgeTest).Return(nil)
 		mockNetwork.EXPECT().AddrAdd(bridgeTest, bridgeAddr).Return(nil)
-		mockNetwork.EXPECT().StartDHCP(testNic, bridgeAddr)
+		mockNetwork.EXPECT().StartDHCP(testNic, bridgeAddr, api.DefaultBridgeName, nil)
+
+		// For masquerade tests
+		mockNetwork.EXPECT().ParseAddr(masqueradeGwStr).Return(masqueradeGwAddr, nil)
+		mockNetwork.EXPECT().ParseAddr(masqueradeVmStr).Return(masqueradeVmAddr, nil)
+		mockNetwork.EXPECT().LinkAdd(masqueradeDummy).Return(nil)
+		mockNetwork.EXPECT().LinkByName(masqueradeDummyName).Return(masqueradeDummy, nil)
+		mockNetwork.EXPECT().LinkSetUp(masqueradeDummy).Return(nil)
+		mockNetwork.EXPECT().GenerateRandomMac().Return(fakeMac, nil)
+		mockNetwork.EXPECT().LinkSetMaster(masqueradeDummy, bridgeTest).Return(nil)
+		mockNetwork.EXPECT().AddrAdd(bridgeTest, masqueradeGwAddr).Return(nil)
+		mockNetwork.EXPECT().StartDHCP(masqueradeTestNic, masqueradeGwAddr, api.DefaultBridgeName, nil)
+		mockNetwork.EXPECT().GetHostAndGwAddressesFromCIDR(api.DefaultVMCIDR).Return("10.0.2.1/30", "10.0.2.2/30", nil)
+		mockNetwork.EXPECT().IptablesNewChain("nat", gomock.Any()).Return(nil).AnyTimes()
+		mockNetwork.EXPECT().IptablesAppendRule("nat", gomock.Any(), gomock.Any()).Return(nil).AnyTimes()
 
 		err := SetupPodNetwork(vm, domain)
 		Expect(err).To(BeNil())
@@ -127,31 +165,66 @@ var _ = Describe("Pod Network", func() {
 		Expect(err).To(BeNil())
 	}
 
+	TestRunPlug := func(driver BindMechanism) {
+		err := driver.discoverPodNetworkInterface()
+		Expect(err).ToNot(HaveOccurred())
+
+		err = driver.preparePodNetworkInterfaces()
+		Expect(err).ToNot(HaveOccurred())
+
+		err = driver.decorateConfig()
+		Expect(err).ToNot(HaveOccurred())
+	}
+
 	Context("on successful setup", func() {
 		It("should define a new VIF bind to a bridge", func() {
 
-			domain := NewDomainWithPodNetwork()
-			vm := newVM("testnamespace", "testVmName")
+			domain := NewDomainWithBridgeInterface()
+			vm := newVMIBridgeInterface("testnamespace", "testVmName")
 
 			api.SetObjectDefaults_Domain(domain)
 			TestPodInterfaceIPBinding(vm, domain)
 		})
 		It("should panic if pod networking fails to setup", func() {
 			testNetworkPanic := func() {
-				domain := NewDomainWithPodNetwork()
-				vm := newVM("testnamespace", "testVmName")
+				domain := NewDomainWithBridgeInterface()
+				vm := newVMIBridgeInterface("testnamespace", "testVmName")
 
 				api.SetObjectDefaults_Domain(domain)
 
 				mockNetwork.EXPECT().LinkByName(podInterface).Return(dummy, nil)
+				mockNetwork.EXPECT().LinkSetDown(dummy).Return(nil)
+				mockNetwork.EXPECT().SetRandomMac(podInterface).Return(updateFakeMac, nil)
 				mockNetwork.EXPECT().AddrList(dummy, netlink.FAMILY_V4).Return(addrList, nil)
+				mockNetwork.EXPECT().LinkAdd(bridgeTest).Return(nil)
+				mockNetwork.EXPECT().LinkByName(api.DefaultBridgeName).Return(bridgeTest, nil)
+				mockNetwork.EXPECT().LinkSetUp(bridgeTest).Return(nil)
+				mockNetwork.EXPECT().LinkSetUp(dummy).Return(nil)
+				mockNetwork.EXPECT().ParseAddr(fmt.Sprintf(bridgeFakeIP, 0)).Return(bridgeAddr, nil)
+				mockNetwork.EXPECT().AddrAdd(bridgeTest, bridgeAddr).Return(nil)
 				mockNetwork.EXPECT().RouteList(dummy, netlink.FAMILY_V4).Return(routeList, nil)
 				mockNetwork.EXPECT().GetMacDetails(podInterface).Return(fakeMac, nil)
+				mockNetwork.EXPECT().LinkSetMaster(dummy, bridgeTest).Return(nil)
 				mockNetwork.EXPECT().AddrDel(dummy, &fakeAddr).Return(errors.New("device is busy"))
 
 				SetupPodNetwork(vm, domain)
 			}
 			Expect(testNetworkPanic).To(Panic())
+		})
+		It("should return an error if the MTU is out or range", func() {
+			dummy = &netlink.Dummy{LinkAttrs: netlink.LinkAttrs{Index: 1, MTU: 65536}}
+
+			domain := NewDomainWithBridgeInterface()
+			vm := newVMIBridgeInterface("testnamespace", "testVmName")
+
+			api.SetObjectDefaults_Domain(domain)
+
+			mockNetwork.EXPECT().LinkByName(podInterface).Return(dummy, nil)
+			mockNetwork.EXPECT().AddrList(dummy, netlink.FAMILY_V4).Return(addrList, nil)
+			mockNetwork.EXPECT().GetMacDetails(podInterface).Return(fakeMac, nil)
+
+			err := SetupPodNetwork(vm, domain)
+			Expect(err).To(HaveOccurred())
 		})
 		Context("func filterPodNetworkRoutes()", func() {
 			defRoute := netlink.Route{
@@ -173,20 +246,227 @@ var _ = Describe("Pod Network", func() {
 				Expect(filterPodNetworkRoutes(staticRouteList, testNic)).To(Equal(expectedRouteList))
 			})
 		})
+		Context("func findInterfaceByName()", func() {
+			It("should fail on empty interface list", func() {
+				_, err := findInterfaceByName([]api.Interface{}, "default")
+				Expect(err).To(HaveOccurred())
+			})
+			It("should fail when interface is missing", func() {
+				interfaces := []api.Interface{
+					api.Interface{
+						Type: "not-bridge",
+						Source: api.InterfaceSource{
+							Bridge: api.DefaultBridgeName,
+						},
+						Alias: &api.Alias{
+							Name: "iface1",
+						},
+					},
+					api.Interface{
+						Type: "bridge",
+						Source: api.InterfaceSource{
+							Bridge: "other_br",
+						},
+						Alias: &api.Alias{
+							Name: "iface2",
+						},
+					},
+				}
+				_, err := findInterfaceByName(interfaces, "iface3")
+				Expect(err).To(HaveOccurred())
+			})
+			It("should pass when interface alias matches the name", func() {
+				interfaces := []api.Interface{
+					api.Interface{
+						Type: "bridge",
+						Source: api.InterfaceSource{
+							Bridge: api.DefaultBridgeName,
+						},
+						Alias: &api.Alias{
+							Name: "iface1",
+						},
+					},
+				}
+				idx, err := findInterfaceByName(interfaces, "iface1")
+				Expect(err).ToNot(HaveOccurred())
+				Expect(idx).To(Equal(0))
+			})
+			It("should pass when matched interface is not the first in the list", func() {
+				interfaces := []api.Interface{
+					api.Interface{
+						Type: "not-bridge",
+						Source: api.InterfaceSource{
+							Bridge: api.DefaultBridgeName,
+						},
+						Alias: &api.Alias{
+							Name: "iface1",
+						},
+					},
+					api.Interface{
+						Type: "bridge",
+						Source: api.InterfaceSource{
+							Bridge: "other_br",
+						},
+						Alias: &api.Alias{
+							Name: "iface2",
+						},
+					},
+					api.Interface{
+						Type: "bridge",
+						Source: api.InterfaceSource{
+							Bridge: api.DefaultBridgeName,
+						},
+						Alias: &api.Alias{
+							Name: "iface3",
+						},
+					},
+				}
+				idx, err := findInterfaceByName(interfaces, "iface3")
+				Expect(err).ToNot(HaveOccurred())
+				Expect(idx).To(Equal(2))
+			})
+		})
+		Context("getBinding", func() {
+			Context("for Bridge", func() {
+				It("should populate MAC address", func() {
+					domain := NewDomainWithBridgeInterface()
+					vmi := newVMIBridgeInterface("testnamespace", "testVmName")
+					api.SetObjectDefaults_Domain(domain)
+					vmi.Spec.Domain.Devices.Interfaces[0].MacAddress = "de-ad-00-00-be-af"
+					driver, err := getBinding(vmi, &vmi.Spec.Domain.Devices.Interfaces[0], &vmi.Spec.Networks[0], domain, podInterface)
+					Expect(err).ToNot(HaveOccurred())
+					bridge, ok := driver.(*BridgePodInterface)
+					Expect(ok).To(BeTrue())
+					Expect(bridge.vif.MAC.String()).To(Equal("de:ad:00:00:be:af"))
+				})
+			})
+		})
+		Context("SRIOV Plug", func() {
+			It("Does not crash", func() {
+				// Plug doesn't do anything for sriov so it's enough to pass an empty domain
+				domain := &api.Domain{}
+				// Same for network
+				net := &v1.Network{}
+
+				iface := &v1.Interface{
+					Name: "sriov",
+					InterfaceBindingMethod: v1.InterfaceBindingMethod{
+						SRIOV: &v1.InterfaceSRIOV{},
+					},
+				}
+				vmi := newVMI("testnamespace", "testVmName")
+				podiface := PodInterface{}
+				err := podiface.Plug(vmi, iface, net, domain, "fakeiface")
+				Expect(err).ToNot(HaveOccurred())
+			})
+		})
+		Context("Masquerade Plug", func() {
+			It("should define a new VIF bind to a bridge", func() {
+				domain := NewDomainWithBridgeInterface()
+				vm := newVMIMasqueradeInterface("testnamespace", "testVmName")
+
+				api.SetObjectDefaults_Domain(domain)
+				TestPodInterfaceIPBinding(vm, domain)
+			})
+
+		})
+		Context("Slirp Plug", func() {
+			It("Should create an interface in the qemu command line and remove it from the interfaces", func() {
+				domain := NewDomainWithSlirpInterface()
+				vmi := newVMISlirpInterface("testnamespace", "testVmName")
+
+				api.SetObjectDefaults_Domain(domain)
+
+				driver, err := getBinding(vmi, &vmi.Spec.Domain.Devices.Interfaces[0], &vmi.Spec.Networks[0], domain, podInterface)
+				Expect(err).ToNot(HaveOccurred())
+				TestRunPlug(driver)
+				Expect(len(domain.Spec.Devices.Interfaces)).To(Equal(0))
+				Expect(len(domain.Spec.QEMUCmd.QEMUArg)).To(Equal(2))
+				Expect(domain.Spec.QEMUCmd.QEMUArg[0]).To(Equal(api.Arg{Value: "-device"}))
+				Expect(domain.Spec.QEMUCmd.QEMUArg[1]).To(Equal(api.Arg{Value: "e1000,netdev=default,id=default"}))
+			})
+			It("Should append MAC address to qemu arguments if set", func() {
+				domain := NewDomainWithSlirpInterface()
+				vmi := newVMISlirpInterface("testnamespace", "testVmName")
+
+				api.SetObjectDefaults_Domain(domain)
+				vmi.Spec.Domain.Devices.Interfaces[0].MacAddress = "de-ad-00-00-be-af"
+
+				driver, err := getBinding(vmi, &vmi.Spec.Domain.Devices.Interfaces[0], &vmi.Spec.Networks[0], domain, podInterface)
+				Expect(err).ToNot(HaveOccurred())
+				TestRunPlug(driver)
+				Expect(len(domain.Spec.Devices.Interfaces)).To(Equal(0))
+				Expect(len(domain.Spec.QEMUCmd.QEMUArg)).To(Equal(2))
+				Expect(domain.Spec.QEMUCmd.QEMUArg[0]).To(Equal(api.Arg{Value: "-device"}))
+				Expect(domain.Spec.QEMUCmd.QEMUArg[1]).To(Equal(api.Arg{Value: "e1000,netdev=default,id=default,mac=de-ad-00-00-be-af"}))
+			})
+			It("Should create an interface in the qemu command line, remove it from the interfaces and leave the other interfaces inplace", func() {
+				domain := NewDomainWithSlirpInterface()
+				vmi := newVMISlirpInterface("testnamespace", "testVmName")
+
+				api.SetObjectDefaults_Domain(domain)
+
+				domain.Spec.Devices.Interfaces = append(domain.Spec.Devices.Interfaces, api.Interface{
+					Model: &api.Model{
+						Type: "virtio",
+					},
+					Type: "bridge",
+					Source: api.InterfaceSource{
+						Bridge: api.DefaultBridgeName,
+					},
+					Alias: &api.Alias{
+						Name: "default",
+					}})
+
+				driver, err := getBinding(vmi, &vmi.Spec.Domain.Devices.Interfaces[0], &vmi.Spec.Networks[0], domain, podInterface)
+				Expect(err).ToNot(HaveOccurred())
+				TestRunPlug(driver)
+				Expect(len(domain.Spec.Devices.Interfaces)).To(Equal(1))
+				Expect(len(domain.Spec.QEMUCmd.QEMUArg)).To(Equal(2))
+				Expect(domain.Spec.QEMUCmd.QEMUArg[0]).To(Equal(api.Arg{Value: "-device"}))
+				Expect(domain.Spec.QEMUCmd.QEMUArg[1]).To(Equal(api.Arg{Value: "e1000,netdev=default,id=default"}))
+			})
+		})
 	})
 })
 
-func newVM(namespace string, name string) *v1.VirtualMachine {
-	vm := &v1.VirtualMachine{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
-		Spec:       v1.VirtualMachineSpec{Domain: v1.NewMinimalDomainSpec()},
+func newVMI(namespace, name string) *v1.VirtualMachineInstance {
+	vmi := &v1.VirtualMachineInstance{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: namespace,
+		},
+		Spec: v1.VirtualMachineInstanceSpec{
+			Domain:   v1.NewMinimalDomainSpec(),
+			Networks: []v1.Network{*v1.DefaultPodNetwork()},
+		},
 	}
-	v1.SetObjectDefaults_VirtualMachine(vm)
-	return vm
+
+	return vmi
 }
 
-func NewDomainWithPodNetwork() *api.Domain {
+func newVMIBridgeInterface(namespace string, name string) *v1.VirtualMachineInstance {
+	vmi := newVMI(namespace, name)
+	vmi.Spec.Domain.Devices.Interfaces = []v1.Interface{*v1.DefaultNetworkInterface()}
+	v1.SetObjectDefaults_VirtualMachineInstance(vmi)
+	return vmi
+}
 
+func newVMIMasqueradeInterface(namespace string, name string) *v1.VirtualMachineInstance {
+	vmi := newVMI(namespace, name)
+	vmi.Spec.Domain.Devices.Interfaces = []v1.Interface{{Name: "default", InterfaceBindingMethod: v1.InterfaceBindingMethod{Masquerade: &v1.InterfaceMasquerade{}}}}
+	v1.SetObjectDefaults_VirtualMachineInstance(vmi)
+	return vmi
+}
+
+func newVMISlirpInterface(namespace string, name string) *v1.VirtualMachineInstance {
+	vmi := newVMI(namespace, name)
+	vmi.Spec.Domain.Devices.Interfaces = []v1.Interface{*v1.DefaultSlirpNetworkInterface()}
+	v1.SetObjectDefaults_VirtualMachineInstance(vmi)
+	return vmi
+}
+
+func NewDomainWithBridgeInterface() *api.Domain {
 	domain := &api.Domain{}
 	domain.Spec.Devices.Interfaces = []api.Interface{{
 		Model: &api.Model{
@@ -195,7 +475,34 @@ func NewDomainWithPodNetwork() *api.Domain {
 		Type: "bridge",
 		Source: api.InterfaceSource{
 			Bridge: api.DefaultBridgeName,
+		},
+		Alias: &api.Alias{
+			Name: "default",
 		}},
 	}
+	return domain
+}
+
+func NewDomainWithSlirpInterface() *api.Domain {
+	domain := &api.Domain{}
+	domain.Spec.Devices.Interfaces = []api.Interface{{
+		Model: &api.Model{
+			Type: "e1000",
+		},
+		Type: "user",
+		Alias: &api.Alias{
+			Name: "default",
+		}},
+	}
+
+	// Create network interface
+	if domain.Spec.QEMUCmd == nil {
+		domain.Spec.QEMUCmd = &api.Commandline{}
+	}
+
+	if domain.Spec.QEMUCmd.QEMUArg == nil {
+		domain.Spec.QEMUCmd.QEMUArg = make([]api.Arg, 0)
+	}
+
 	return domain
 }

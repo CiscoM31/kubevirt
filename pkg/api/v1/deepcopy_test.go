@@ -3,7 +3,7 @@ package v1
 import (
 	"reflect"
 
-	"github.com/google/gofuzz"
+	fuzz "github.com/google/gofuzz"
 	. "github.com/onsi/ginkgo"
 	"github.com/onsi/ginkgo/extensions/table"
 	. "github.com/onsi/gomega"
@@ -28,7 +28,7 @@ var _ = Describe("Generated deepcopy functions", func() {
 			&CDRomTarget{},
 			&Volume{},
 			&VolumeSource{},
-			&RegistryDiskSource{},
+			&ContainerDiskSource{},
 			&ClockOffset{},
 			&ClockOffsetUTC{},
 			&Clock{},
@@ -48,27 +48,34 @@ var _ = Describe("Generated deepcopy functions", func() {
 			&Watchdog{},
 			&WatchdogDevice{},
 			&I6300ESBWatchdog{},
+			&VirtualMachineInstance{},
+			&VirtualMachineInstanceList{},
+			&VirtualMachineInstanceSpec{},
+			&VirtualMachineInstanceStatus{},
+			&VirtualMachineInstanceCondition{},
+			&VMISelector{},
+			&VirtualMachineInstanceReplicaSet{},
+			&VirtualMachineInstanceReplicaSetList{},
+			&VirtualMachineInstanceReplicaSetSpec{},
+			&VirtualMachineInstanceReplicaSetStatus{},
+			&VirtualMachineInstanceReplicaSetCondition{},
+			&VirtualMachineInstanceTemplateSpec{},
 			&VirtualMachine{},
 			&VirtualMachineList{},
 			&VirtualMachineSpec{},
-			&Affinity{},
-			&VirtualMachineStatus{},
 			&VirtualMachineCondition{},
-			&VMSelector{},
-			&VirtualMachineReplicaSet{},
-			&VirtualMachineReplicaSetList{},
-			&VMReplicaSetSpec{},
-			&VMReplicaSetStatus{},
-			&VMReplicaSetCondition{},
-			&VMTemplateSpec{},
-			&OfflineVirtualMachine{},
-			&OfflineVirtualMachineList{},
-			&OfflineVirtualMachineSpec{},
-			&OfflineVirtualMachineCondition{},
-			&OfflineVirtualMachineStatus{},
-			&VirtualMachinePreset{},
-			&VirtualMachinePresetList{},
-			&VirtualMachinePresetSpec{},
+			&VirtualMachineStatus{},
+			&VirtualMachineInstancePreset{},
+			&VirtualMachineInstancePresetList{},
+			&VirtualMachineInstancePresetSpec{},
+			&Probe{},
+			&Handler{},
+			&Hugepages{},
+			&Interface{},
+			&Memory{},
+			&Machine{},
+			&InterfaceBridge{},
+			&InterfaceSlirp{},
 		}
 	})
 

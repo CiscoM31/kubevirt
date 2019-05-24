@@ -27,7 +27,7 @@ import (
 	"sync"
 
 	"github.com/fsnotify/fsnotify"
-	"k8s.io/apimachinery/pkg/apis/meta/v1"
+	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/tools/cache"
@@ -45,7 +45,7 @@ import (
 // events will be delivered exactly once.
 
 // While for many tasks this is not good enough, it is a sufficient pattern
-// to use the socket creation as a secondary resource for the VM controller
+// to use the socket creation as a secondary resource for the VirtualMachineInstance controller
 // in virt-handler
 
 // TODO: In case Watch is never called, we could leak inotify go-routines,

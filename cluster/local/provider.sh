@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 function _cert_dir() {
     echo $GOPATH/src/kubevirt.io/kubevirt/cluster/local/certs
@@ -40,7 +40,9 @@ EOF
 }
 
 function build() {
-    make manifests docker
+    ${KUBEVIRT_PATH}hack/dockerized "DOCKER_TAG=${DOCKER_TAG}
+    KUBEVIRT_PROVIDER=${KUBEVIRT_PROVIDER} ./hack/build-manifests.sh"
+    make docker
 }
 
 function _kubectl() {

@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 #
 # Copyright 2014 The Kubernetes Authors.
 #
@@ -27,6 +27,9 @@
 #        "dirty" indicates source code changes after the git commit id
 #        "archive" indicates the tree was produced by 'git archive'
 #    KUBEVIRT_GIT_VERSION - "vX.Y" used to indicate the last release version.
+#    KUBEVIRT_SOURCE_DATE_EPOCH - unix timestamp.  Set to ' ' to generate using
+#          'date' instead of 'git'.
+#
 
 # Grovels through git to set a set of env variables.
 
@@ -57,7 +60,7 @@ function kubevirt::version::get_version_vars() {
         fi
 
         # Use git describe to find the version based on tags.
-        if [[ -n ${KUBEVIRT_GIT_VERSION-} ]] || KUBEVIRT_GIT_VERSION=$("${git[@]}" describe --tags --abbrev=14 "${KUBEVIRT_GIT_COMMIT}^{commit}" 2>/dev/null); then
+        if [[ -n ${KUBEVIRT_GIT_VERSION-} ]] || KUBEVIRT_GIT_VERSION=$("${git[@]}" describe --match='v[0-9]*' --tags --abbrev=14 "${KUBEVIRT_GIT_COMMIT}^{commit}" 2>/dev/null); then
             # This translates the "git describe" to an actual semver.org
             # compatible semantic version that looks something like this:
             #   v1.1.0-alpha.0.6+84c76d1142ea4d
@@ -100,7 +103,7 @@ function kubevirt::version::ldflag() {
 function kubevirt::version::ldflags() {
     kubevirt::version::get_version_vars
 
-    SOURCE_DATE_EPOCH=$(git show -s --format=format:%ct HEAD)
+    SOURCE_DATE_EPOCH=${KUBEVIRT_SOURCE_DATE_EPOCH-$(git show -s --format=format:%ct HEAD)}
 
     local buildDate
     [[ -z ${SOURCE_DATE_EPOCH-} ]] || buildDate="--date=@${SOURCE_DATE_EPOCH}"

@@ -23,19 +23,17 @@ import (
 	"fmt"
 	"io/ioutil"
 	"os"
-	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
-	"kubevirt.io/kubevirt/pkg/api/v1"
+	v1 "kubevirt.io/kubevirt/pkg/api/v1"
 	diskutils "kubevirt.io/kubevirt/pkg/ephemeral-disk-utils"
 	"kubevirt.io/kubevirt/pkg/log"
 	"kubevirt.io/kubevirt/pkg/precond"
 	cmdclient "kubevirt.io/kubevirt/pkg/virt-handler/cmd-client"
-	watchdog "kubevirt.io/kubevirt/pkg/watchdog"
+	"kubevirt.io/kubevirt/pkg/watchdog"
 )
 
 type OnShutdownCallback func(pid int)
@@ -43,7 +41,7 @@ type OnShutdownCallback func(pid int)
 type monitor struct {
 	timeout                     time.Duration
 	pid                         int
-	commandPrefix               string
+	cmdlineMatchStr             string
 	start                       time.Time
 	isDone                      bool
 	gracePeriod                 int
@@ -53,7 +51,7 @@ type monitor struct {
 }
 
 type ProcessMonitor interface {
-	RunForever(startTimeout time.Duration)
+	RunForever(startTimeout time.Duration, signalStopChan chan struct{})
 }
 
 func GracefulShutdownTriggerDir(baseDir string) string {
@@ -65,9 +63,9 @@ func GracefulShutdownTriggerFromNamespaceName(baseDir string, namespace string, 
 	return filepath.Join(baseDir, "graceful-shutdown-trigger", triggerFile)
 }
 
-func VmGracefulShutdownTriggerClear(baseDir string, vm *v1.VirtualMachine) error {
-	namespace := precond.MustNotBeEmpty(vm.GetObjectMeta().GetNamespace())
-	domain := precond.MustNotBeEmpty(vm.GetObjectMeta().GetName())
+func VmGracefulShutdownTriggerClear(baseDir string, vmi *v1.VirtualMachineInstance) error {
+	namespace := precond.MustNotBeEmpty(vmi.GetObjectMeta().GetNamespace())
+	domain := precond.MustNotBeEmpty(vmi.GetObjectMeta().GetName())
 
 	triggerFile := GracefulShutdownTriggerFromNamespaceName(baseDir, namespace, domain)
 
@@ -78,9 +76,9 @@ func GracefulShutdownTriggerClear(triggerFile string) error {
 	return diskutils.RemoveFile(triggerFile)
 }
 
-func VmHasGracefulShutdownTrigger(baseDir string, vm *v1.VirtualMachine) (bool, error) {
-	namespace := precond.MustNotBeEmpty(vm.GetObjectMeta().GetNamespace())
-	domain := precond.MustNotBeEmpty(vm.GetObjectMeta().GetName())
+func VmHasGracefulShutdownTrigger(baseDir string, vmi *v1.VirtualMachineInstance) (bool, error) {
+	namespace := precond.MustNotBeEmpty(vmi.GetObjectMeta().GetNamespace())
+	domain := precond.MustNotBeEmpty(vmi.GetObjectMeta().GetName())
 
 	return hasGracefulShutdownTrigger(baseDir, namespace, domain)
 }
@@ -167,12 +165,12 @@ func InitializeSharedDirectories(baseDir string) error {
 	return nil
 }
 
-func NewProcessMonitor(commandPrefix string,
+func NewProcessMonitor(cmdlineMatchStr string,
 	gracefulShutdownTriggerFile string,
 	gracePeriod int,
 	shutdownCallback OnShutdownCallback) ProcessMonitor {
 	return &monitor{
-		commandPrefix:               commandPrefix,
+		cmdlineMatchStr:             cmdlineMatchStr,
 		gracePeriod:                 gracePeriod,
 		gracefulShutdownTriggerFile: gracefulShutdownTriggerFile,
 		shutdownCallback:            shutdownCallback,
@@ -195,7 +193,7 @@ func (mon *monitor) refresh() {
 		return
 	}
 
-	log.Log.Debugf("Refreshing. CommandPrefix %s pid %d", mon.commandPrefix, mon.pid)
+	log.Log.V(4).Infof("Refreshing. CommandPrefix %s pid %d", mon.cmdlineMatchStr, mon.pid)
 
 	expired := mon.isGracePeriodExpired()
 
@@ -203,23 +201,23 @@ func (mon *monitor) refresh() {
 	if mon.pid == 0 {
 		var err error
 
-		mon.pid, err = findPid(mon.commandPrefix)
+		mon.pid, err = FindPid(mon.cmdlineMatchStr)
 		if err != nil {
 
-			log.Log.Infof("Still missing PID for %s, %v", mon.commandPrefix, err)
+			log.Log.Infof("Still missing PID for %s, %v", mon.cmdlineMatchStr, err)
 			// check to see if we've timed out looking for the process
 			elapsed := time.Since(mon.start)
 			if mon.timeout > 0 && elapsed >= mon.timeout {
-				log.Log.Infof("%s not found after timeout", mon.commandPrefix)
+				log.Log.Infof("%s not found after timeout", mon.cmdlineMatchStr)
 				mon.isDone = true
 			} else if expired {
-				log.Log.Infof("%s not found after grace period expired", mon.commandPrefix)
+				log.Log.Infof("%s not found after grace period expired", mon.cmdlineMatchStr)
 				mon.isDone = true
 			}
 			return
 		}
 
-		log.Log.Infof("Found PID for %s: %d", mon.commandPrefix, mon.pid)
+		log.Log.Infof("Found PID for %s: %d", mon.cmdlineMatchStr, mon.pid)
 	}
 
 	exists, err := pidExists(mon.pid)
@@ -228,7 +226,7 @@ func (mon *monitor) refresh() {
 		return
 	}
 	if exists == false {
-		log.Log.Infof("Process %s and pid %d is gone!", mon.commandPrefix, mon.pid)
+		log.Log.Infof("Process %s and pid %d is gone!", mon.cmdlineMatchStr, mon.pid)
 		mon.pid = 0
 		mon.isDone = true
 		return
@@ -242,7 +240,7 @@ func (mon *monitor) refresh() {
 	return
 }
 
-func (mon *monitor) monitorLoop(startTimeout time.Duration, signalChan chan os.Signal) {
+func (mon *monitor) monitorLoop(startTimeout time.Duration, signalStopChan chan struct{}) {
 	// random value, no real rationale
 	rate := 1 * time.Second
 
@@ -262,9 +260,7 @@ func (mon *monitor) monitorLoop(startTimeout time.Duration, signalChan chan os.S
 		select {
 		case <-ticker.C:
 			mon.refresh()
-		case s := <-signalChan:
-			log.Log.Infof("Received signal %d.", s)
-
+		case <-signalStopChan:
 			if mon.gracePeriodStartTime != 0 {
 				continue
 			}
@@ -280,16 +276,9 @@ func (mon *monitor) monitorLoop(startTimeout time.Duration, signalChan chan os.S
 	ticker.Stop()
 }
 
-func (mon *monitor) RunForever(startTimeout time.Duration) {
-	c := make(chan os.Signal, 1)
-	signal.Notify(c, os.Interrupt,
-		syscall.SIGHUP,
-		syscall.SIGINT,
-		syscall.SIGTERM,
-		syscall.SIGQUIT,
-	)
+func (mon *monitor) RunForever(startTimeout time.Duration, signalStopChan chan struct{}) {
 
-	mon.monitorLoop(startTimeout, c)
+	mon.monitorLoop(startTimeout, signalStopChan)
 }
 
 func readProcCmdline(pathname string) ([]string, error) {
@@ -315,21 +304,19 @@ func pidExists(pid int) (bool, error) {
 	return true, nil
 }
 
-func findPid(commandNamePrefix string) (int, error) {
+func FindPid(commandNamePrefix string) (int, error) {
 	entries, err := filepath.Glob("/proc/*/cmdline")
 	if err != nil {
 		return 0, err
 	}
 
 	for _, entry := range entries {
-		argv, err := readProcCmdline(entry)
+		content, err := ioutil.ReadFile(entry)
 		if err != nil {
 			return 0, err
 		}
 
-		match, _ := filepath.Match(fmt.Sprintf("%s*", commandNamePrefix), filepath.Base(argv[0]))
-		// command prefix does not match
-		if !match {
+		if !strings.Contains(string(content), commandNamePrefix) {
 			continue
 		}
 

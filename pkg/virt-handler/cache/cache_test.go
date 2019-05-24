@@ -60,7 +60,7 @@ var _ = Describe("Domain informer", func() {
 		socketsDir = filepath.Join(shareDir, "sockets")
 		os.Mkdir(socketsDir, 0755)
 
-		informer, err = NewSharedInformer(shareDir, 10)
+		informer, err = NewSharedInformer(shareDir, 10, nil, nil)
 		Expect(err).ToNot(HaveOccurred())
 
 		ctrl = gomock.NewController(GinkgoT())
@@ -93,15 +93,15 @@ var _ = Describe("Domain informer", func() {
 		It("should list current domains.", func() {
 			var list []*api.Domain
 
-			list = append(list, api.NewMinimalDomain("testvm1"))
+			list = append(list, api.NewMinimalDomain("testvmi1"))
 
-			socketPath := filepath.Join(socketsDir, "default_testvm1_sock")
+			socketPath := filepath.Join(socketsDir, "default_testvmi1_sock")
 			domainManager.EXPECT().ListAllDomains().Return(list, nil)
 
 			cmdserver.RunServer(socketPath, domainManager, stopChan, nil)
 
 			// ensure we can connect to the server first.
-			client, err := cmdclient.GetClient(socketPath)
+			client, err := cmdclient.NewClient(socketPath)
 			Expect(err).ToNot(HaveOccurred())
 			client.Close()
 
@@ -127,7 +127,7 @@ var _ = Describe("Domain informer", func() {
 			cmdserver.RunServer(socketPath, domainManager, stopChan, nil)
 
 			// ensure we can connect to the server first.
-			client, err := cmdclient.GetClient(socketPath)
+			client, err := cmdclient.NewClient(socketPath)
 			Expect(err).ToNot(HaveOccurred())
 			client.Close()
 
@@ -151,7 +151,7 @@ var _ = Describe("Domain informer", func() {
 
 			watchdogFile := watchdog.WatchdogFileFromNamespaceName(shareDir, "default", "test")
 			os.MkdirAll(filepath.Dir(watchdogFile), 0755)
-			watchdog.WatchdogFileUpdate(watchdogFile)
+			watchdog.WatchdogFileUpdate(watchdogFile, "somestring")
 
 			err = d.startBackground()
 			Expect(err).ToNot(HaveOccurred())
@@ -186,7 +186,7 @@ var _ = Describe("Domain informer", func() {
 			cmdserver.RunServer(socketPath, domainManager, stopChan, nil)
 
 			// ensure we can connect to the server first.
-			client, err := cmdclient.GetClient(socketPath)
+			client, err := cmdclient.NewClient(socketPath)
 			Expect(err).ToNot(HaveOccurred())
 			client.Close()
 
@@ -201,7 +201,7 @@ var _ = Describe("Domain informer", func() {
 			go informer.Run(stopChan)
 			cache.WaitForCacheSync(stopChan, informer.HasSynced)
 
-			client, err := notifyclient.NewDomainEventClient(shareDir)
+			client, err := notifyclient.NewNotifier(shareDir)
 			Expect(err).ToNot(HaveOccurred())
 
 			// verify add

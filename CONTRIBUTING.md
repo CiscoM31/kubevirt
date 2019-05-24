@@ -7,7 +7,7 @@ Let's start with the relationship between the two important components:
 * **KubeVirt** is an add-on which is installed on-top of Kubernetes, to be able
   to add basic virtualization functionality to Kubernetes.
 
-Even though KubeVirt is an add-on to Kubernetes, both of them have things in
+KubeVirt is an add-on to Kubernetes, and they have several things in
 common:
 
 * Mostly written in golang
@@ -95,7 +95,7 @@ Maintainers are:
   * [User Guide - Kubernetes](https://kubernetes.io/docs/user-guide/)
 * Details
   * [Declarative Management of Kubernetes Objects Using Configuration Files - Kubernetes](https://kubernetes.io/docs/concepts/tools/kubectl/object-management-using-declarative-config/)
-  * [Kubernetes Architecture](https://github.com/kubernetes/community/blob/master/contributors/design-proposals/architecture.md)
+  * [Kubernetes Architecture](https://github.com/kubernetes/community/blob/master/contributors/design-proposals/architecture/architecture.md)
 
 ## Additional Topics
 

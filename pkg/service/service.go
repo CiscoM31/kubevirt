@@ -47,7 +47,9 @@ func (service *ServiceListen) Address() string {
 }
 
 func (service *ServiceListen) InitFlags() {
-	flag.CommandLine.AddGoFlagSet(goflag.CommandLine)
+	flag.CommandLine.AddGoFlag(goflag.CommandLine.Lookup("v"))
+	flag.CommandLine.AddGoFlag(goflag.CommandLine.Lookup("kubeconfig"))
+	flag.CommandLine.AddGoFlag(goflag.CommandLine.Lookup("master"))
 }
 
 func (service *ServiceListen) AddCommonFlags() {
@@ -62,5 +64,9 @@ func (service *ServiceLibvirt) AddLibvirtFlags() {
 
 func Setup(service Service) {
 	service.AddFlags()
+
+	// set new default verbosity, was set to 0 by glog
+	flag.Set("v", "2")
+
 	flag.Parse()
 }

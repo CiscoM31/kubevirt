@@ -1,20 +1,16 @@
 package api
 
-const DefaultBridgeName = "br1"
+const (
+	resolvConf        = "/etc/resolv.conf"
+	DefaultProtocol   = "TCP"
+	DefaultVMCIDR     = "10.0.2.0/24"
+	DefaultBridgeName = "k6t-eth0"
+)
 
 func SetDefaults_Devices(devices *Devices) {
-	// Use vga as video device, since it is better than cirrus
-	// and does not require guest drivers
-	var heads uint = 1
-	var vram uint = 16384
-	devices.Video = []Video{
-		{
-			Model: VideoModel{
-				Type:  "vga",
-				Heads: &heads,
-				VRam:  &vram,
-			},
-		},
+	// Set default memballoon, "none" means that controller disabled
+	devices.Ballooning = &Ballooning{
+		Model: "none",
 	}
 
 }

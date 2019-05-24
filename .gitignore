@@ -2,6 +2,8 @@
 *.iml
 tools/openapispec/openapispec
 tools/crd-generator/crd-generator
+tools/resource-generator/resource-generator
+tools/marketplace/marketplace
 **/bin
 bin/*
 .vagrant
@@ -28,3 +30,8 @@ vendor/**/*_test.go
 **/polarion.xml
 tools/manifest-templator/manifest-templator
 tools/vms-generator/vms-generator
+.coverprofile
+coverage.html
+manifests/**/*.tmp
+/bazel-*
+/.bazelrc

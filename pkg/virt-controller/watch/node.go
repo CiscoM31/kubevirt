@@ -3,9 +3,10 @@ package watch
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
-	"k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/labels"
@@ -15,12 +16,16 @@ import (
 	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/workqueue"
 
-	"strings"
-
 	virtv1 "kubevirt.io/kubevirt/pkg/api/v1"
 	"kubevirt.io/kubevirt/pkg/controller"
 	"kubevirt.io/kubevirt/pkg/kubecli"
 	"kubevirt.io/kubevirt/pkg/log"
+)
+
+const (
+	// NodeUnresponsiveReason is in various places as reason to indicate that
+	// an action was taken because virt-handler became unresponsive.
+	NodeUnresponsiveReason = "NodeUnresponsive"
 )
 
 // NodeController is the main NodeController struct.
@@ -28,19 +33,19 @@ type NodeController struct {
 	clientset        kubecli.KubevirtClient
 	Queue            workqueue.RateLimitingInterface
 	nodeInformer     cache.SharedIndexInformer
-	vmInformer       cache.SharedIndexInformer
+	vmiInformer      cache.SharedIndexInformer
 	recorder         record.EventRecorder
 	heartBeatTimeout time.Duration
 	recheckInterval  time.Duration
 }
 
 // NewNodeController creates a new instance of the NodeController struct.
-func NewNodeController(clientset kubecli.KubevirtClient, nodeInformer cache.SharedIndexInformer, vmInformer cache.SharedIndexInformer, recorder record.EventRecorder) *NodeController {
+func NewNodeController(clientset kubecli.KubevirtClient, nodeInformer cache.SharedIndexInformer, vmiInformer cache.SharedIndexInformer, recorder record.EventRecorder) *NodeController {
 	c := &NodeController{
 		clientset:        clientset,
 		Queue:            workqueue.NewRateLimitingQueue(workqueue.DefaultControllerRateLimiter()),
 		nodeInformer:     nodeInformer,
-		vmInformer:       vmInformer,
+		vmiInformer:      vmiInformer,
 		recorder:         recorder,
 		heartBeatTimeout: 5 * time.Minute,
 		recheckInterval:  1 * time.Minute,
@@ -52,7 +57,7 @@ func NewNodeController(clientset kubecli.KubevirtClient, nodeInformer cache.Shar
 		UpdateFunc: c.updateNode,
 	})
 
-	c.vmInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
+	c.vmiInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc:    c.addVirtualMachine,
 		DeleteFunc: func(_ interface{}) {}, // nothing to do
 		UpdateFunc: c.updateVirtualMachine,
@@ -84,27 +89,27 @@ func (c *NodeController) enqueueNode(obj interface{}) {
 }
 
 func (c *NodeController) addVirtualMachine(obj interface{}) {
-	vm := obj.(*virtv1.VirtualMachine)
-	if vm.Status.NodeName != "" {
-		c.Queue.Add(vm.Status.NodeName)
+	vmi := obj.(*virtv1.VirtualMachineInstance)
+	if vmi.Status.NodeName != "" {
+		c.Queue.Add(vmi.Status.NodeName)
 	}
 }
 
 func (c *NodeController) updateVirtualMachine(old, curr interface{}) {
-	currVM := curr.(*virtv1.VirtualMachine)
-	if currVM.Status.NodeName != "" {
-		c.Queue.Add(currVM.Status.NodeName)
+	currVMI := curr.(*virtv1.VirtualMachineInstance)
+	if currVMI.Status.NodeName != "" {
+		c.Queue.Add(currVMI.Status.NodeName)
 	}
 }
 
 // Run runs the passed in NodeController.
-func (c *NodeController) Run(threadiness int, stopCh chan struct{}) {
+func (c *NodeController) Run(threadiness int, stopCh <-chan struct{}) {
 	defer controller.HandlePanic()
 	defer c.Queue.ShutDown()
 	log.Log.Info("Starting node controller.")
 
 	// Wait for cache sync before we start the node controller
-	cache.WaitForCacheSync(stopCh, c.nodeInformer.HasSynced, c.vmInformer.HasSynced)
+	cache.WaitForCacheSync(stopCh, c.nodeInformer.HasSynced, c.vmiInformer.HasSynced)
 
 	// Start the actual work
 	for i := 0; i < threadiness; i++ {
@@ -164,6 +169,7 @@ func (c *NodeController) execute(key string) error {
 		return fmt.Errorf("failed to determine if node %s is responsive: %v", nodeName, err)
 	} else if unresponsive {
 		if nodeExists && node.Labels[virtv1.NodeSchedulable] == "true" {
+			c.recorder.Event(node, v1.EventTypeNormal, NodeUnresponsiveReason, "virt-handler is not responsive, marking node as unresponsive")
 			data := []byte(fmt.Sprintf(`{"metadata": { "labels": {"%s": "false"}}}`, virtv1.NodeSchedulable))
 			_, err = c.clientset.CoreV1().Nodes().Patch(nodeName, types.StrategicMergePatchType, data)
 			if err != nil {
@@ -171,31 +177,39 @@ func (c *NodeController) execute(key string) error {
 				return fmt.Errorf("failed to mark node %s as unschedulable: %v", nodeName, err)
 			}
 		}
-		vms, err := c.virtalMachinesOnNode(nodeName)
+		vmis, err := c.virtualMachinesOnNode(nodeName)
 		if err != nil {
-			logger.Reason(err).Error("Failed fetch vms for node")
+			logger.Reason(err).Error("Failed fetch vmis for node")
 			return err
-		} else if len(vms) == 0 {
+		} else if len(vmis) == 0 {
 			if nodeExists {
 				c.Queue.AddAfter(key, c.recheckInterval)
 			}
 			return nil
 		}
-		pods, err := c.podsOnNode(nodeName)
+		pods, err := c.alivePodsOnNode(nodeName)
 		if err != nil {
 			logger.Reason(err).Error("Failed fetch pods for node")
 			return err
 		}
-		vms = filterStuckVirtualMachinesWithoutPods(vms, pods)
+
+		vmis = filterStuckVirtualMachinesWithoutPods(vmis, pods)
 
 		errs := []string{}
 		// Do sequential updates, we don't want to create update storms in situations where something might already be wrong
-		for _, vm := range vms {
-			logger.V(2).Infof("Moving vm %s in namespace %s on unresponsive node to failed state", vm.Name, vm.Namespace)
-			_, err := c.clientset.VM(vm.Namespace).Patch(vm.Name, types.JSONPatchType, []byte(fmt.Sprintf("[{ \"op\": \"replace\", \"path\": \"/status/phase\", \"value\": \"%s\" }]", virtv1.Failed)))
+		for _, vmi := range vmis {
+			c.recorder.Event(vmi, v1.EventTypeNormal, NodeUnresponsiveReason, fmt.Sprintf("virt-handler on node %s is not responsive, marking VMI as failed", vmi.Status.NodeName))
+			logger.V(2).Infof("Moving vmi %s in namespace %s on unresponsive node to failed state", vmi.Name, vmi.Namespace)
+			phasePatch := fmt.Sprintf(`{ "op": "replace", "path": "/status/phase", "value": "%s" }`, virtv1.Failed)
+			operation := "add"
+			if vmi.Status.Reason != "" {
+				operation = "replace"
+			}
+			reasonPatch := fmt.Sprintf(`{ "op": "%s", "path": "/status/reason", "value": "%s" }`, operation, NodeUnresponsiveReason)
+			_, err := c.clientset.VirtualMachineInstance(vmi.Namespace).Patch(vmi.Name, types.JSONPatchType, []byte(fmt.Sprintf("[%s, %s]", phasePatch, reasonPatch)))
 			if err != nil {
-				errs = append(errs, fmt.Sprintf("failed to move vm %s in namespace %s to final state: %v", vm.Name, vm.Namespace, err))
-				logger.Reason(err).Errorf("Failed to move vm %s in namespace %s to final state", vm.Name, vm.Namespace)
+				errs = append(errs, fmt.Sprintf("failed to move vmi %s in namespace %s to final state: %v", vmi.Name, vmi.Namespace, err))
+				logger.Reason(err).Errorf("Failed to move vmi %s in namespace %s to final state", vmi.Name, vmi.Namespace)
 			}
 		}
 
@@ -209,12 +223,12 @@ func (c *NodeController) execute(key string) error {
 	return nil
 }
 
-func (c *NodeController) virtalMachinesOnNode(nodeName string) ([]*virtv1.VirtualMachine, error) {
+func (c *NodeController) virtualMachinesOnNode(nodeName string) ([]*virtv1.VirtualMachineInstance, error) {
 	labelSelector, err := labels.Parse(fmt.Sprintf("%s in (%s)", virtv1.NodeNameLabel, nodeName))
 	if err != nil {
 		return nil, err
 	}
-	list, err := c.clientset.VM(v1.NamespaceAll).List(metav1.ListOptions{
+	list, err := c.clientset.VirtualMachineInstance(v1.NamespaceAll).List(&metav1.ListOptions{
 		LabelSelector: labelSelector.String(),
 	})
 
@@ -222,22 +236,17 @@ func (c *NodeController) virtalMachinesOnNode(nodeName string) ([]*virtv1.Virtua
 		return nil, err
 	}
 
-	vms := []*virtv1.VirtualMachine{}
+	vmis := []*virtv1.VirtualMachineInstance{}
 
 	for i := range list.Items {
-		vms = append(vms, &list.Items[i])
+		vmis = append(vmis, &list.Items[i])
 	}
-	return vms, nil
+	return vmis, nil
 }
 
-func (c *NodeController) podsOnNode(nodeName string) ([]*v1.Pod, error) {
-	labelSelector, err := labels.Parse(virtv1.DomainLabel)
+func (c *NodeController) alivePodsOnNode(nodeName string) ([]*v1.Pod, error) {
 	handlerNodeSelector := fields.ParseSelectorOrDie("spec.nodeName=" + nodeName)
-	if err != nil {
-		return nil, err
-	}
 	list, err := c.clientset.CoreV1().Pods(v1.NamespaceAll).List(metav1.ListOptions{
-		LabelSelector: labelSelector.String(),
 		FieldSelector: handlerNodeSelector.String(),
 	})
 	if err != nil {
@@ -247,39 +256,48 @@ func (c *NodeController) podsOnNode(nodeName string) ([]*v1.Pod, error) {
 	pods := []*v1.Pod{}
 
 	for i := range list.Items {
-		pods = append(pods, &list.Items[i])
+		pod := &list.Items[i]
+		if controllerRef := controller.GetControllerOf(pod); !isControlledByVMI(controllerRef) {
+			continue
+		}
+		phase := pod.Status.Phase
+		if phase != v1.PodFailed && phase != v1.PodSucceeded {
+			pods = append(pods, pod)
+		}
 	}
 	return pods, nil
 }
 
-func filterStuckVirtualMachinesWithoutPods(vms []*virtv1.VirtualMachine, pods []*v1.Pod) []*virtv1.VirtualMachine {
+func filterStuckVirtualMachinesWithoutPods(vmis []*virtv1.VirtualMachineInstance, pods []*v1.Pod) []*virtv1.VirtualMachineInstance {
 	podsPerNamespace := map[string]map[string]*v1.Pod{}
 
 	for _, pod := range pods {
-		podsForVM, ok := podsPerNamespace[pod.Namespace]
+		podsForVMI, ok := podsPerNamespace[pod.Namespace]
 		if !ok {
-			podsForVM = map[string]*v1.Pod{}
+			podsForVMI = map[string]*v1.Pod{}
 		}
-		name := pod.Labels[virtv1.DomainLabel]
-		if len(name) == 0 {
-			continue
+		if controllerRef := controller.GetControllerOf(pod); isControlledByVMI(controllerRef) {
+			podsForVMI[string(controllerRef.UID)] = pod
+			podsPerNamespace[pod.Namespace] = podsForVMI
 		}
-		podsForVM[name] = pod
-		podsPerNamespace[pod.Namespace] = podsForVM
 	}
 
-	filtered := []*virtv1.VirtualMachine{}
-	for _, vm := range vms {
-		if vm.IsScheduled() || vm.IsRunning() {
-			if podsForVM, exists := podsPerNamespace[vm.Namespace]; exists {
-				if _, exists := podsForVM[vm.Name]; exists {
+	filtered := []*virtv1.VirtualMachineInstance{}
+	for _, vmi := range vmis {
+		if vmi.IsScheduled() || vmi.IsRunning() {
+			if podsForVMI, exists := podsPerNamespace[vmi.Namespace]; exists {
+				if _, exists := podsForVMI[string(vmi.UID)]; exists {
 					continue
 				}
 			}
-			filtered = append(filtered, vm)
+			filtered = append(filtered, vmi)
 		}
 	}
 	return filtered
+}
+
+func isControlledByVMI(controllerRef *metav1.OwnerReference) bool {
+	return controllerRef != nil && controllerRef.Kind == virtv1.VirtualMachineInstanceGroupVersionKind.Kind
 }
 
 func isNodeUnresponsive(node *v1.Node, timeout time.Duration) (bool, error) {

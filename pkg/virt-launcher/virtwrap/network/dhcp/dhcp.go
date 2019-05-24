@@ -24,6 +24,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"net"
+	"os"
 	"regexp"
 	"strings"
 	"time"
@@ -32,8 +33,7 @@ import (
 	dhcpConn "github.com/krolaw/dhcp4/conn"
 	"github.com/vishvananda/netlink"
 
-	"os"
-
+	v1 "kubevirt.io/kubevirt/pkg/api/v1"
 	"kubevirt.io/kubevirt/pkg/log"
 )
 
@@ -41,6 +41,7 @@ const (
 	infiniteLease             = 999 * 24 * time.Hour
 	errorSearchDomainNotValid = "Search domain is not valid"
 	errorSearchDomainTooLong  = "Search domains length exceeded allowable size"
+	errorNTPConfiguration     = "Could not parse NTP server as IPv4 address: %s"
 )
 
 // simple domain validation regex. Put it here to avoid compiling each time.
@@ -57,9 +58,56 @@ func SingleClientDHCPServer(
 	dnsIPs [][]byte,
 	routes *[]netlink.Route,
 	searchDomains []string,
-	mtu uint16) error {
+	mtu uint16,
+	customDHCPOptions *v1.DHCPOptions) error {
 
 	log.Log.Info("Starting SingleClientDHCPServer")
+
+	hostname, err := os.Hostname()
+	if err != nil {
+		return fmt.Errorf("reading the pods hostname failed: %v", err)
+	}
+
+	options, err := prepareDHCPOptions(clientMask, routerIP, dnsIPs, routes, searchDomains, mtu, hostname, customDHCPOptions)
+	if err != nil {
+		return err
+	}
+
+	handler := &DHCPHandler{
+		clientIP:      clientIP,
+		clientMAC:     clientMAC,
+		serverIP:      serverIP.To4(),
+		leaseDuration: infiniteLease,
+		options:       options,
+	}
+
+	// turn TX offload checksum because it causes dhcp failures
+	if err := EthtoolTXOff(serverIface); err != nil {
+		log.Log.Reason(err).Errorf("Failed to set tx offload for interface %s off", serverIface)
+		return err
+	}
+
+	l, err := dhcpConn.NewUDP4BoundListener(serverIface, ":67")
+	if err != nil {
+		return err
+	}
+	defer l.Close()
+	err = dhcp.Serve(l, handler)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func prepareDHCPOptions(
+	clientMask net.IPMask,
+	routerIP net.IP,
+	dnsIPs [][]byte,
+	routes *[]netlink.Route,
+	searchDomains []string,
+	mtu uint16,
+	hostname string,
+	customDHCPOptions *v1.DHCPOptions) (dhcp.Options, error) {
 
 	mtuArray := make([]byte, 2)
 	binary.BigEndian.PutUint16(mtuArray, mtu)
@@ -79,36 +127,57 @@ func SingleClientDHCPServer(
 
 	searchDomainBytes, err := convertSearchDomainsToBytes(searchDomains)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if searchDomainBytes != nil {
 		dhcpOptions[dhcp.OptionDomainSearch] = searchDomainBytes
 	}
 
-	hostname, err := os.Hostname()
-	if err != nil {
-		return fmt.Errorf("reading the pods hostname failed: %v", err)
-	}
 	dhcpOptions[dhcp.OptionHostName] = []byte(hostname)
 
-	handler := &DHCPHandler{
-		clientIP:      clientIP,
-		clientMAC:     clientMAC,
-		serverIP:      serverIP.To4(),
-		leaseDuration: infiniteLease,
-		options:       dhcpOptions,
+	// Windows will ask for the domain name and use it for DNS resolution
+	domainName := getDomainName(searchDomains)
+	if len(domainName) > 0 {
+		dhcpOptions[dhcp.OptionDomainName] = []byte(domainName)
 	}
 
-	l, err := dhcpConn.NewUDP4BoundListener(serverIface, ":67")
-	if err != nil {
-		return err
+	if customDHCPOptions != nil {
+		if customDHCPOptions.TFTPServerName != "" {
+			log.Log.Infof("Setting dhcp option tftp server name to %s", customDHCPOptions.TFTPServerName)
+			dhcpOptions[dhcp.OptionTFTPServerName] = []byte(customDHCPOptions.TFTPServerName)
+		}
+		if customDHCPOptions.BootFileName != "" {
+			log.Log.Infof("Setting dhcp option boot file name to %s", customDHCPOptions.BootFileName)
+			dhcpOptions[dhcp.OptionBootFileName] = []byte(customDHCPOptions.BootFileName)
+		}
+
+		if len(customDHCPOptions.NTPServers) > 0 {
+			log.Log.Infof("Setting dhcp option NTP server name to %s", customDHCPOptions.NTPServers)
+
+			ntpServers := [][]byte{}
+
+			for _, server := range customDHCPOptions.NTPServers {
+				ip := net.ParseIP(server).To4()
+
+				if ip == nil {
+					return nil, fmt.Errorf(errorNTPConfiguration, server)
+				}
+				ntpServers = append(ntpServers, []byte(ip))
+			}
+
+			dhcpOptions[dhcp.OptionNetworkTimeProtocolServers] = bytes.Join(ntpServers, nil)
+		}
+
+		if customDHCPOptions.PrivateOptions != nil {
+			for _, privateOptions := range customDHCPOptions.PrivateOptions {
+				if privateOptions.Option >= 224 && privateOptions.Option <= 254 {
+					dhcpOptions[dhcp.OptionCode(byte(privateOptions.Option))] = []byte(privateOptions.Value)
+				}
+			}
+		}
 	}
-	defer l.Close()
-	err = dhcp.Serve(l, handler)
-	if err != nil {
-		return err
-	}
-	return nil
+
+	return dhcpOptions, nil
 }
 
 type DHCPHandler struct {
@@ -120,29 +189,48 @@ type DHCPHandler struct {
 }
 
 func (h *DHCPHandler) ServeDHCP(p dhcp.Packet, msgType dhcp.MessageType, options dhcp.Options) (d dhcp.Packet) {
-	log.Log.Debug("Serving a new request")
+	log.Log.V(4).Info("Serving a new request")
 	if mac := p.CHAddr(); !bytes.Equal(mac, h.clientMAC) {
-		log.Log.Debug("The request is not from our client")
+		log.Log.V(4).Info("The request is not from our client")
 		return nil // Is not our client
 	}
 
 	switch msgType {
 
 	case dhcp.Discover:
-		log.Log.Debug("The request has message type DISCOVER")
+		log.Log.V(4).Info("The request has message type DISCOVER")
 		return dhcp.ReplyPacket(p, dhcp.Offer, h.serverIP, h.clientIP, h.leaseDuration,
-			h.options.SelectOrderOrAll(options[dhcp.OptionParameterRequestList]))
+			h.options.SelectOrderOrAll(nil))
 
 	case dhcp.Request:
-		log.Log.Debug("The request has message type REQUEST")
+		log.Log.V(4).Info("The request has message type REQUEST")
 		return dhcp.ReplyPacket(p, dhcp.ACK, h.serverIP, h.clientIP, h.leaseDuration,
-			h.options.SelectOrderOrAll(options[dhcp.OptionParameterRequestList]))
+			h.options.SelectOrderOrAll(nil))
 
 	default:
-		log.Log.Debug("The request has unhandled message type")
+		log.Log.V(4).Info("The request has unhandled message type")
 		return nil // Ignored message type
 
 	}
+}
+
+func sortRoutes(routes []netlink.Route) []netlink.Route {
+	// Default route must come last, otherwise it may not get applied
+	// because there is no route to its gateway yet
+	var sortedRoutes []netlink.Route
+	var defaultRoutes []netlink.Route
+	for _, route := range routes {
+		if route.Dst == nil {
+			defaultRoutes = append(defaultRoutes, route)
+			continue
+		}
+		sortedRoutes = append(sortedRoutes, route)
+	}
+	for _, defaultRoute := range defaultRoutes {
+		sortedRoutes = append(sortedRoutes, defaultRoute)
+	}
+
+	return sortedRoutes
 }
 
 func formClasslessRoutes(routes *[]netlink.Route) (formattedRoutes []byte) {
@@ -154,8 +242,12 @@ func formClasslessRoutes(routes *[]netlink.Route) (formattedRoutes []byte) {
 	//              192.168.1/24, gateway: 192.168.2.3
 	//		would result in the following structure:
 	//      []byte{8, 10, 10, 1, 2, 3, 24, 192, 168, 1, 192, 168, 2, 3}
+	if routes == nil {
+		return []byte{}
+	}
 
-	for _, route := range *routes {
+	sortedRoutes := sortRoutes(*routes)
+	for _, route := range sortedRoutes {
 		if route.Dst == nil {
 			route.Dst = &net.IPNet{
 				IP:   net.IPv4(0, 0, 0, 0),
@@ -225,4 +317,15 @@ func isValidSearchDomain(domain string) bool {
 		return false
 	}
 	return searchDomainValidationRegex.MatchString(domain)
+}
+
+//getDomainName returns the longest search domain entry, which is the most exact equivalent to a domain
+func getDomainName(searchDomains []string) string {
+	selected := ""
+	for _, d := range searchDomains {
+		if len(d) > len(selected) {
+			selected = d
+		}
+	}
+	return selected
 }

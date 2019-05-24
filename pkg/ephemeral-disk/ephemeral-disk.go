@@ -25,12 +25,12 @@ import (
 	"os/exec"
 	"path/filepath"
 
-	"kubevirt.io/kubevirt/pkg/api/v1"
+	v1 "kubevirt.io/kubevirt/pkg/api/v1"
 	diskutils "kubevirt.io/kubevirt/pkg/ephemeral-disk-utils"
 )
 
 var mountBaseDir = "/var/run/libvirt/kubevirt-ephemeral-disk"
-var pvcBaseDir = "/var/run/kubevirt-private/vm-disks"
+var pvcBaseDir = "/var/run/kubevirt-private/vmi-disks"
 var ephemeralImageDiskOwner = "qemu"
 
 func generateBaseDir() string {
@@ -64,7 +64,7 @@ func SetLocalDataOwner(user string) {
 func createVolumeDirectory(volumeName string) error {
 	dir := generateVolumeMountDir(volumeName)
 
-	err := os.Mkdir(dir, 0755)
+	err := os.MkdirAll(dir, 0755)
 	if err != nil {
 		return err
 	}
@@ -77,11 +77,11 @@ func GetFilePath(volumeName string) string {
 	return filepath.Join(volumeMountDir, "disk.qcow2")
 }
 
-func CreateEphemeralImages(vm *v1.VirtualMachine) error {
+func CreateEphemeralImages(vmi *v1.VirtualMachineInstance) error {
 	// The domain is setup to use the COW image instead of the base image. What we have
 	// to do here is only create the image where the domain expects it (GetFilePath)
 	// for each disk that requires it.
-	for _, volume := range vm.Spec.Volumes {
+	for _, volume := range vmi.Spec.Volumes {
 		if volume.VolumeSource.Ephemeral != nil {
 			err := createVolumeDirectory(volume.Name)
 			if err != nil {

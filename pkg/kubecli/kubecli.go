@@ -22,26 +22,34 @@ package kubecli
 
 import (
 	"flag"
+	"os"
+	"sync"
 
+	secv1 "github.com/openshift/client-go/security/clientset/versioned/typed/security/v1"
+	"github.com/spf13/pflag"
+	extclient "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/serializer"
+	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	restclient "k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 
-	"os"
+	networkclient "github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/client/clientset/versioned"
 
-	"github.com/spf13/pflag"
-
-	"kubevirt.io/kubevirt/pkg/api/v1"
+	cdiclient "kubevirt.io/containerized-data-importer/pkg/client/clientset/versioned"
+	v1 "kubevirt.io/kubevirt/pkg/api/v1"
 )
 
 var (
 	kubeconfig string
 	master     string
 )
+
+var virtclient KubevirtClient
+var once sync.Once
 
 func init() {
 	flag.StringVar(&kubeconfig, "kubeconfig", "", "absolute path to the kubeconfig file")
@@ -69,7 +77,43 @@ func GetKubevirtSubresourceClientFromFlags(master string, kubeconfig string) (Ku
 		return nil, err
 	}
 
-	return &kubevirt{master, kubeconfig, restClient, config, coreClient}, nil
+	cdiClient, err := cdiclient.NewForConfig(config)
+	if err != nil {
+		return nil, err
+	}
+
+	networkClient, err := networkclient.NewForConfig(config)
+	if err != nil {
+		return nil, err
+	}
+
+	extensionsClient, err := extclient.NewForConfig(config)
+	if err != nil {
+		return nil, err
+	}
+
+	secClient, err := secv1.NewForConfig(config)
+	if err != nil {
+		return nil, err
+	}
+
+	discoveryClient, err := discovery.NewDiscoveryClientForConfig(config)
+	if err != nil {
+		return nil, err
+	}
+
+	return &kubevirt{
+		master,
+		kubeconfig,
+		restClient,
+		config,
+		cdiClient,
+		networkClient,
+		extensionsClient,
+		secClient,
+		discoveryClient,
+		coreClient,
+	}, nil
 }
 
 // DefaultClientConfig creates a clientcmd.ClientConfig with the following hierarchy:
@@ -144,9 +188,12 @@ var GetKubevirtClientFromClientConfig = func(cmdConfig clientcmd.ClientConfig) (
 
 func GetKubevirtClientFromRESTConfig(config *rest.Config) (KubevirtClient, error) {
 	config.GroupVersion = &v1.GroupVersion
-	config.NegotiatedSerializer = serializer.DirectCodecFactory{CodecFactory: scheme.Codecs}
+	config.NegotiatedSerializer = serializer.DirectCodecFactory{CodecFactory: v1.Codecs}
 	config.APIPath = "/apis"
 	config.ContentType = runtime.ContentTypeJSON
+	if config.UserAgent == "" {
+		config.UserAgent = restclient.DefaultKubernetesUserAgent()
+	}
 
 	restClient, err := rest.RESTClientFor(config)
 	if err != nil {
@@ -158,7 +205,43 @@ func GetKubevirtClientFromRESTConfig(config *rest.Config) (KubevirtClient, error
 		return nil, err
 	}
 
-	return &kubevirt{master, kubeconfig, restClient, config, coreClient}, nil
+	cdiClient, err := cdiclient.NewForConfig(config)
+	if err != nil {
+		return nil, err
+	}
+
+	networkClient, err := networkclient.NewForConfig(config)
+	if err != nil {
+		return nil, err
+	}
+
+	extensionsClient, err := extclient.NewForConfig(config)
+	if err != nil {
+		return nil, err
+	}
+
+	secClient, err := secv1.NewForConfig(config)
+	if err != nil {
+		return nil, err
+	}
+
+	discoveryClient, err := discovery.NewDiscoveryClientForConfig(config)
+	if err != nil {
+		return nil, err
+	}
+
+	return &kubevirt{
+		master,
+		kubeconfig,
+		restClient,
+		config,
+		cdiClient,
+		networkClient,
+		extensionsClient,
+		secClient,
+		discoveryClient,
+		coreClient,
+	}, nil
 }
 
 func GetKubevirtClientFromFlags(master string, kubeconfig string) (KubevirtClient, error) {
@@ -170,7 +253,11 @@ func GetKubevirtClientFromFlags(master string, kubeconfig string) (KubevirtClien
 }
 
 func GetKubevirtClient() (KubevirtClient, error) {
-	return GetKubevirtClientFromFlags(master, kubeconfig)
+	var err error
+	once.Do(func() {
+		virtclient, err = GetKubevirtClientFromFlags(master, kubeconfig)
+	})
+	return virtclient, err
 }
 
 func GetKubevirtSubresourceClient() (KubevirtClient, error) {

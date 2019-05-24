@@ -6,14 +6,14 @@ import (
 	"path"
 	"strconv"
 
-	"kubevirt.io/kubevirt/pkg/api/v1"
+	v1 "kubevirt.io/kubevirt/pkg/api/v1"
 )
 
 var EmptyDiskBaseDir = "/var/run/libvirt/empty-disks/"
 
-func CreateTemporaryDisks(vm *v1.VirtualMachine) error {
+func CreateTemporaryDisks(vmi *v1.VirtualMachineInstance) error {
 
-	for _, volume := range vm.Spec.Volumes {
+	for _, volume := range vmi.Spec.Volumes {
 
 		if volume.EmptyDisk != nil {
 			// qemu-img takes the size in bytes or in Kibibytes/Mebibytes/...; lets take bytes

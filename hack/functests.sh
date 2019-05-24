@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 #
 # This file is part of the KubeVirt project
 #
@@ -24,4 +24,8 @@ source hack/config.sh
 
 functest_docker_prefix=${manifest_docker_prefix-${docker_prefix}}
 
-${TESTS_OUT_DIR}/tests.test -kubeconfig=${kubeconfig} -tag=${docker_tag} -prefix=${functest_docker_prefix} -kubectl-path=${kubectl} -test.timeout 90m ${FUNC_TEST_ARGS}
+if [[ ${TARGET} == openshift* ]]; then
+    oc=${kubectl}
+fi
+
+${TESTS_OUT_DIR}/tests.test -kubeconfig=${kubeconfig} -container-tag=${docker_tag} -container-tag-alt=${docker_tag_alt} -container-prefix=${functest_docker_prefix} -oc-path=${oc} -kubectl-path=${kubectl} -test.timeout 210m ${FUNC_TEST_ARGS} -installed-namespace=${namespace}

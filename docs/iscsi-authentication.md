@@ -1,4 +1,4 @@
-This document describes how to associate a k8s secret with a VM for the purpose of iscsi initiator authentication.
+This document describes how to associate a k8s secret with a VMI for the purpose of iscsi initiator authentication.
 
 *NOTE: Only client authentication is supported at this time, meaning that the iscsi target with authenticate an initiator has permissions to access a device, but that a initiator can not authenticate the target.*
 
@@ -6,7 +6,7 @@ This document describes how to associate a k8s secret with a VM for the purpose 
 1. create a k8s secret containing the password and username fields.
 
 The k8s secret must be formatted in the same way kubernetes performs iscsi
-authentication for volumes. https://github.com/kubernetes/kubernetes/blob/master/examples/volumes/iscsi/chap-secret.yaml
+authentication for volumes. https://github.com/kubernetes/examples/blob/master/staging/volumes/iscsi/chap-secret.yaml
 
 ```
 cat << END > my-chap-secret.yaml
@@ -71,5 +71,5 @@ kubectl create -f my-chap-secret.yaml
 kubectl create -f my-vm.yaml
 ```
 
-From there, the password and username fields in the k8s secret will automatically be mapped to a libvirt secret when the VM is scheduled to a node allowing the iscsi auth to work without any further configuration. 
+From there, the password and username fields in the k8s secret will automatically be mapped to a libvirt secret when the VMI is scheduled to a node allowing the iscsi auth to work without any further configuration. 
 

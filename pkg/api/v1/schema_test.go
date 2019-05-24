@@ -20,20 +20,26 @@
 package v1
 
 import (
+	"bytes"
 	"encoding/json"
+	"text/template"
 
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
-	"k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 )
 
+type NetworkTemplateConfig struct {
+	InterfaceConfig string
+}
+
 var exampleJSON = `{
-  "kind": "VirtualMachine",
-  "apiVersion": "kubevirt.io/v1alpha1",
+  "kind": "VirtualMachineInstance",
+  "apiVersion": "kubevirt.io/v1alpha3",
   "metadata": {
-    "name": "testvm",
+    "name": "testvmi",
     "namespace": "default",
-    "selfLink": "/apis/kubevirt.io/v1alpha1/namespaces/default/virtualmachines/testvm",
+    "selfLink": "/apis/kubevirt.io/v1alpha3/namespaces/default/virtualmachineinstances/testvmi",
     "creationTimestamp": null
   },
   "spec": {
@@ -44,10 +50,24 @@ var exampleJSON = `{
         }
       },
       "cpu": {
-        "cores": 3
+        "cores": 3,
+        "sockets": 1,
+        "threads": 1,
+        "model": "Conroe",
+        "features": [
+          {
+            "name": "pcid",
+            "policy": "require"
+          },
+          {
+            "name": "monitor",
+            "policy": "disable"
+          }
+        ],
+        "dedicatedCpuPlacement": true
       },
       "machine": {
-        "type": "q35"
+        "type": ""
       },
       "firmware": {
         "uuid": "28a42a60-44ef-4428-9c10-1a6aee94627f"
@@ -108,21 +128,32 @@ var exampleJSON = `{
           "vendorid": {
             "enabled": true,
             "vendorid": "vendor"
+          },
+          "frequencies": {
+            "enabled": false
+          },
+          "reenlightenment": {
+            "enabled": false
+          },
+          "tlbflush": {
+            "enabled": true
           }
+        },
+        "smm": {
+          "enabled": true
         }
       },
       "devices": {
         "disks": [
           {
             "name": "disk0",
-            "volumeName": "volume0",
             "disk": {
               "bus": "virtio"
-            }
+            },
+            "dedicatedIOThread": true
           },
           {
             "name": "cdrom0",
-            "volumeName": "volume1",
             "cdrom": {
               "bus": "virtio",
               "readonly": true,
@@ -131,7 +162,6 @@ var exampleJSON = `{
           },
           {
             "name": "floppy0",
-            "volumeName": "volume2",
             "floppy": {
               "readonly": true,
               "tray": "open"
@@ -139,38 +169,58 @@ var exampleJSON = `{
           },
           {
             "name": "lun0",
-            "volumeName": "volume3",
             "lun": {
               "bus": "virtio",
               "readonly": true
             }
+          },
+          {
+            "name": "disk1",
+            "disk": {
+              "bus": "virtio"
+            },
+            "serial": "sn-11223344"
           }
         ],
         "interfaces": [
           {
             "name": "default",
-            "bridge": {}
+            {{.InterfaceConfig}}
           }
-        ]
-      }
+        ],
+        "inputs": [
+          {
+            "bus": "virtio",
+            "type": "tablet",
+            "name": "tablet0"
+          }
+        ],
+        "rng": {},
+        "blockMultiQueue": true
+      },
+      "ioThreadsPolicy": "shared"
     },
     "volumes": [
       {
-        "name": "volume0",
-        "registryDisk": {
-          "image": "test/image"
+        "name": "disk0",
+        "containerDisk": {
+          "image": "test/image",
+          "path": "/disk.img"
         }
       },
       {
-        "name": "volume1",
+        "name": "cdrom0",
         "cloudInitNoCloud": {
           "secretRef": {
             "name": "testsecret"
+          },
+          "networkDataSecretRef": {
+            "name": "testnetworksecret"
           }
         }
       },
       {
-        "name": "volume2",
+        "name": "floppy0",
         "persistentVolumeClaim": {
           "claimName": "testclaim"
         }
@@ -188,24 +238,24 @@ var exampleJSON = `{
 
 var _ = Describe("Schema", func() {
 	//The example domain should stay in sync to the json above
-	var exampleVM *VirtualMachine
+	var exampleVMI *VirtualMachineInstance
 
 	BeforeEach(func() {
-		exampleVM = NewMinimalVM("testvm")
-		exampleVM.Spec.Domain.Devices.Disks = []Disk{
+		exampleVMI = NewMinimalVMI("testvmi")
+
+		exampleVMI.Spec.Domain.Devices.Disks = []Disk{
 			{
-				Name:       "disk0",
-				VolumeName: "volume0",
+				Name: "disk0",
 				DiskDevice: DiskDevice{
 					Disk: &DiskTarget{
 						Bus:      "virtio",
 						ReadOnly: false,
 					},
 				},
+				DedicatedIOThread: _true,
 			},
 			{
-				Name:       "cdrom0",
-				VolumeName: "volume1",
+				Name: "cdrom0",
 				DiskDevice: DiskDevice{
 					CDRom: &CDRomTarget{
 						Bus:      "virtio",
@@ -215,8 +265,7 @@ var _ = Describe("Schema", func() {
 				},
 			},
 			{
-				Name:       "floppy0",
-				VolumeName: "volume2",
+				Name: "floppy0",
 				DiskDevice: DiskDevice{
 					Floppy: &FloppyTarget{
 						ReadOnly: true,
@@ -225,8 +274,7 @@ var _ = Describe("Schema", func() {
 				},
 			},
 			{
-				Name:       "lun0",
-				VolumeName: "volume3",
+				Name: "lun0",
 				DiskDevice: DiskDevice{
 					LUN: &LunTarget{
 						Bus:      "virtio",
@@ -234,29 +282,53 @@ var _ = Describe("Schema", func() {
 					},
 				},
 			},
+			{
+				Name:   "disk1",
+				Serial: "sn-11223344",
+				DiskDevice: DiskDevice{
+					Disk: &DiskTarget{
+						Bus:      "virtio",
+						ReadOnly: false,
+					},
+				},
+			},
 		}
 
-		exampleVM.Spec.Volumes = []Volume{
+		exampleVMI.Spec.Domain.Devices.Rng = &Rng{}
+		exampleVMI.Spec.Domain.Devices.Inputs = []Input{
 			{
-				Name: "volume0",
+				Bus:  "virtio",
+				Type: "tablet",
+				Name: "tablet0",
+			},
+		}
+		exampleVMI.Spec.Domain.Devices.BlockMultiQueue = _true
+
+		exampleVMI.Spec.Volumes = []Volume{
+			{
+				Name: "disk0",
 				VolumeSource: VolumeSource{
-					RegistryDisk: &RegistryDiskSource{
+					ContainerDisk: &ContainerDiskSource{
 						Image: "test/image",
+						Path:  "/disk.img",
 					},
 				},
 			},
 			{
-				Name: "volume1",
+				Name: "cdrom0",
 				VolumeSource: VolumeSource{
 					CloudInitNoCloud: &CloudInitNoCloudSource{
 						UserDataSecretRef: &v1.LocalObjectReference{
 							Name: "testsecret",
 						},
+						NetworkDataSecretRef: &v1.LocalObjectReference{
+							Name: "testnetworksecret",
+						},
 					},
 				},
 			},
 			{
-				Name: "volume2",
+				Name: "floppy0",
 				VolumeSource: VolumeSource{
 					PersistentVolumeClaim: &v1.PersistentVolumeClaimVolumeSource{
 						ClaimName: "testclaim",
@@ -264,22 +336,26 @@ var _ = Describe("Schema", func() {
 				},
 			},
 		}
-		exampleVM.Spec.Domain.Features = &Features{
+		exampleVMI.Spec.Domain.Features = &Features{
 			ACPI: FeatureState{Enabled: _false},
+			SMM:  &FeatureState{Enabled: _true},
 			APIC: &FeatureAPIC{Enabled: _true},
 			Hyperv: &FeatureHyperv{
-				Relaxed:    &FeatureState{Enabled: _true},
-				VAPIC:      &FeatureState{Enabled: _false},
-				Spinlocks:  &FeatureSpinlocks{Enabled: _true},
-				VPIndex:    &FeatureState{Enabled: _false},
-				Runtime:    &FeatureState{Enabled: _true},
-				SyNIC:      &FeatureState{Enabled: _false},
-				SyNICTimer: &FeatureState{Enabled: _true},
-				Reset:      &FeatureState{Enabled: _false},
-				VendorID:   &FeatureVendorID{Enabled: _true, VendorID: "vendor"},
+				Relaxed:         &FeatureState{Enabled: _true},
+				VAPIC:           &FeatureState{Enabled: _false},
+				Spinlocks:       &FeatureSpinlocks{Enabled: _true},
+				VPIndex:         &FeatureState{Enabled: _false},
+				Runtime:         &FeatureState{Enabled: _true},
+				SyNIC:           &FeatureState{Enabled: _false},
+				SyNICTimer:      &FeatureState{Enabled: _true},
+				Reset:           &FeatureState{Enabled: _false},
+				VendorID:        &FeatureVendorID{Enabled: _true, VendorID: "vendor"},
+				Frequencies:     &FeatureState{Enabled: _false},
+				Reenlightenment: &FeatureState{Enabled: _false},
+				TLBFlush:        &FeatureState{Enabled: _true},
 			},
 		}
-		exampleVM.Spec.Domain.Clock = &Clock{
+		exampleVMI.Spec.Domain.Clock = &Clock{
 			ClockOffset: ClockOffset{
 				UTC: &ClockOffsetUTC{},
 			},
@@ -291,21 +367,27 @@ var _ = Describe("Schema", func() {
 				Hyperv: &HypervTimer{},
 			},
 		}
-		exampleVM.Spec.Domain.Firmware = &Firmware{
+		exampleVMI.Spec.Domain.Firmware = &Firmware{
 			UUID: "28a42a60-44ef-4428-9c10-1a6aee94627f",
 		}
-		exampleVM.Spec.Domain.CPU = &CPU{
-			Cores: 3,
-		}
-		exampleVM.Spec.Domain.Devices.Interfaces = []Interface{
-			Interface{
-				Name: "default",
-				InterfaceBindingMethod: InterfaceBindingMethod{
-					Bridge: &InterfaceBridge{},
+		exampleVMI.Spec.Domain.CPU = &CPU{
+			Cores:   3,
+			Sockets: 1,
+			Threads: 1,
+			Model:   "Conroe",
+			Features: []CPUFeature{
+				{
+					Name:   "pcid",
+					Policy: "require",
+				},
+				{
+					Name:   "monitor",
+					Policy: "disable",
 				},
 			},
+			DedicatedCPUPlacement: true,
 		}
-		exampleVM.Spec.Networks = []Network{
+		exampleVMI.Spec.Networks = []Network{
 			Network{
 				Name: "default",
 				NetworkSource: NetworkSource{
@@ -313,20 +395,121 @@ var _ = Describe("Schema", func() {
 				},
 			},
 		}
+		policy := IOThreadsPolicyShared
+		exampleVMI.Spec.Domain.IOThreadsPolicy = &policy
 
-		SetObjectDefaults_VirtualMachine(exampleVM)
+		SetObjectDefaults_VirtualMachineInstance(exampleVMI)
 	})
-	Context("With example schema in json", func() {
+	Context("With example schema in json use pod network and bridge interface", func() {
 		It("Unmarshal json into struct", func() {
-			newVM := &VirtualMachine{}
-			err := json.Unmarshal([]byte(exampleJSON), newVM)
+			exampleVMI.Spec.Domain.Devices.Interfaces = []Interface{
+				Interface{
+					Name: "default",
+					InterfaceBindingMethod: InterfaceBindingMethod{
+						Bridge: &InterfaceBridge{},
+					},
+				},
+			}
+			networkTemplateData := NetworkTemplateConfig{InterfaceConfig: `"bridge": {}`}
+			tmpl, err := template.New("vmexample").Parse(exampleJSON)
 			Expect(err).To(BeNil())
-			Expect(newVM).To(Equal(exampleVM))
+			var tpl bytes.Buffer
+			err = tmpl.Execute(&tpl, networkTemplateData)
+			Expect(err).To(BeNil())
+			newVMI := &VirtualMachineInstance{}
+			err = json.Unmarshal(tpl.Bytes(), newVMI)
+			Expect(err).To(BeNil())
+			Expect(newVMI).To(Equal(exampleVMI))
 		})
 		It("Marshal struct into json", func() {
-			buf, err := json.MarshalIndent(*exampleVM, "", "  ")
+			exampleVMI.Spec.Domain.Devices.Interfaces = []Interface{
+				Interface{
+					Name: "default",
+					InterfaceBindingMethod: InterfaceBindingMethod{
+						Bridge: &InterfaceBridge{},
+					},
+				},
+			}
+
+			networkTemplateData := NetworkTemplateConfig{InterfaceConfig: `"bridge": {}`}
+			tmpl, err := template.New("vmexample").Parse(exampleJSON)
 			Expect(err).To(BeNil())
-			Expect(string(buf)).To(Equal(exampleJSON))
+			var tpl bytes.Buffer
+			err = tmpl.Execute(&tpl, networkTemplateData)
+			Expect(err).To(BeNil())
+			exampleJSONParsed := tpl.String()
+			buf, err := json.MarshalIndent(*exampleVMI, "", "  ")
+			Expect(err).To(BeNil())
+			Expect(string(buf)).To(Equal(exampleJSONParsed))
+		})
+	})
+	Context("With example schema in json use pod network and slirp interface", func() {
+		It("Unmarshal json into struct", func() {
+			exampleVMI.Spec.Domain.Devices.Interfaces = []Interface{
+				Interface{
+					Name: "default",
+					InterfaceBindingMethod: InterfaceBindingMethod{
+						Slirp: &InterfaceSlirp{},
+					},
+				},
+			}
+			networkTemplateData := NetworkTemplateConfig{InterfaceConfig: `"slirp": {}`}
+			tmpl, err := template.New("vmexample").Parse(exampleJSON)
+			Expect(err).To(BeNil())
+			var tpl bytes.Buffer
+			err = tmpl.Execute(&tpl, networkTemplateData)
+			Expect(err).To(BeNil())
+			newVMI := &VirtualMachineInstance{}
+			err = json.Unmarshal(tpl.Bytes(), newVMI)
+			Expect(err).To(BeNil())
+			Expect(newVMI).To(Equal(exampleVMI))
+		})
+		It("Marshal struct into json", func() {
+			exampleVMI.Spec.Domain.Devices.Interfaces = []Interface{
+				Interface{
+					Name: "default",
+					InterfaceBindingMethod: InterfaceBindingMethod{
+						Slirp: &InterfaceSlirp{},
+					},
+				},
+			}
+
+			networkTemplateData := NetworkTemplateConfig{InterfaceConfig: `"slirp": {}`}
+			tmpl, err := template.New("vmexample").Parse(exampleJSON)
+			Expect(err).To(BeNil())
+			var tpl bytes.Buffer
+			err = tmpl.Execute(&tpl, networkTemplateData)
+			Expect(err).To(BeNil())
+			exampleJSONParsed := tpl.String()
+			buf, err := json.MarshalIndent(*exampleVMI, "", "  ")
+			Expect(err).To(BeNil())
+			Expect(string(buf)).To(Equal(exampleJSONParsed))
+		})
+		It("Marshal struct into json with port configure", func() {
+			exampleVMI.Spec.Domain.Devices.Interfaces = []Interface{
+				Interface{
+					Name: "default",
+					InterfaceBindingMethod: InterfaceBindingMethod{
+						Slirp: &InterfaceSlirp{}},
+					Ports: []Port{{Port: 80}},
+				},
+			}
+			networkTemplateData := NetworkTemplateConfig{InterfaceConfig: `"slirp": {},
+            "ports": [
+              {
+                "port": 80
+              }
+            ]`}
+
+			tmpl, err := template.New("vmexample").Parse(exampleJSON)
+			Expect(err).To(BeNil())
+			var tpl bytes.Buffer
+			err = tmpl.Execute(&tpl, networkTemplateData)
+			Expect(err).To(BeNil())
+			exampleJSONParsed := tpl.String()
+			buf, err := json.MarshalIndent(*exampleVMI, "", "  ")
+			Expect(err).To(BeNil())
+			Expect(string(buf)).To(Equal(exampleJSONParsed))
 		})
 	})
 })

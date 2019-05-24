@@ -20,23 +20,21 @@
 package endpoints
 
 import (
-	. "github.com/onsi/ginkgo"
-	. "github.com/onsi/gomega"
-
-	"net/http"
-
 	"encoding/json"
+	"net/http"
 	"net/http/httptest"
 	"net/url"
 
-	"github.com/emicklei/go-restful"
+	restful "github.com/emicklei/go-restful"
+	. "github.com/onsi/ginkgo"
+	. "github.com/onsi/gomega"
 	"golang.org/x/net/context"
 
 	"kubevirt.io/kubevirt/pkg/rest"
 )
 
 func newValidDeleteRequest() *http.Request {
-	request, _ := http.NewRequest("DELETE", "/apis/kubevirt.io/v1alpha1/namespaces/default/virtualmachines/test", nil)
+	request, _ := http.NewRequest("DELETE", "/apis/kubevirt.io/v1alpha3/namespaces/default/virtualmachineinstances/test", nil)
 	return request
 }
 
@@ -58,7 +56,7 @@ var _ = Describe("Delete", func() {
 
 		target := MakeGoRestfulWrapper(NewHandlerBuilder().Delete().Endpoint(testDeleteEndpoint).Build(ctx))
 
-		ws.Route(ws.DELETE("/apis/kubevirt.io/v1alpha1/namespaces/{namespace}/virtualmachines/{name}").To(target))
+		ws.Route(ws.DELETE("/apis/kubevirt.io/v1alpha3/namespaces/{namespace}/virtualmachineinstances/{name}").To(target))
 		request = newValidDeleteRequest()
 		recorder = httptest.NewRecorder()
 	})
@@ -84,7 +82,7 @@ var _ = Describe("Delete", func() {
 				Expect(responseBody).To(Equal(payload{Name: "test", Metadata: Metadata{Name: "test", Namespace: "default"}}))
 			})
 			It("should detect labelSelector", func() {
-				request, _ := http.NewRequest("DELETE", "/apis/kubevirt.io/v1alpha1/namespaces/default/virtualmachines/test?labelSelector=app%3Dmyapp", nil)
+				request, _ := http.NewRequest("DELETE", "/apis/kubevirt.io/v1alpha3/namespaces/default/virtualmachineinstances/test?labelSelector=app%3Dmyapp", nil)
 				handler.ServeHTTP(recorder, request)
 				responseBody := payload{}
 				json.NewDecoder(recorder.Body).Decode(&responseBody)

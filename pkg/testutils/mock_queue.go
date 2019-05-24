@@ -2,15 +2,17 @@ package testutils
 
 import (
 	"sync"
-
-	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/client-go/tools/cache"
-	"k8s.io/client-go/tools/cache/testing"
-	"k8s.io/client-go/util/workqueue"
+	"sync/atomic"
 
 	k8sv1 "k8s.io/api/core/v1"
+	"k8s.io/api/policy/v1beta1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/tools/cache"
+	framework "k8s.io/client-go/tools/cache/testing"
+	"k8s.io/client-go/util/workqueue"
 
-	"kubevirt.io/kubevirt/pkg/api/v1"
+	cdiv1 "kubevirt.io/containerized-data-importer/pkg/apis/core/v1alpha1"
+	v1 "kubevirt.io/kubevirt/pkg/api/v1"
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/api"
 )
 
@@ -20,19 +22,20 @@ any RateLimitingInterface implementing queue. This allows synchronous
 testing of the controller. The typical pattern is:
 
     MockQueue.ExpectAdd(3)
-    vmSource.Add(vm)
-    vmSource.Add(vm1)
-    vmSource.Add(vm2)
+    vmiSource.Add(vmi)
+    vmiSource.Add(vmi1)
+    vmiSource.Add(vmi2)
     MockQueue.Wait()
 
-This ensures that Source callbacks which are listening on vmSource
+This ensures that Source callbacks which are listening on vmiSource
 enqueued three times an object. Since enqueing is typically the last
 action in listener callbacks, we can assume that the wanted scenario for
 a controller is set up, and an execution will process this scenario.
 */
 type MockWorkQueue struct {
 	workqueue.RateLimitingInterface
-	addWG *sync.WaitGroup
+	addWG            *sync.WaitGroup
+	rateLimitedEnque int32
 }
 
 func (q *MockWorkQueue) Add(obj interface{}) {
@@ -40,6 +43,15 @@ func (q *MockWorkQueue) Add(obj interface{}) {
 	if q.addWG != nil {
 		q.addWG.Done()
 	}
+}
+
+func (q *MockWorkQueue) AddRateLimited(item interface{}) {
+	q.RateLimitingInterface.AddRateLimited(item)
+	atomic.AddInt32(&q.rateLimitedEnque, 1)
+}
+
+func (q *MockWorkQueue) GetRateLimitedEnqueueCount() int {
+	return int(atomic.LoadInt32(&q.rateLimitedEnque))
 }
 
 // ExpectAdds allows setting the amount of expected enqueues.
@@ -58,7 +70,7 @@ func (q *MockWorkQueue) Wait() {
 }
 
 func NewMockWorkQueue(queue workqueue.RateLimitingInterface) *MockWorkQueue {
-	return &MockWorkQueue{queue, nil}
+	return &MockWorkQueue{queue, nil, 0}
 }
 
 func NewFakeInformerFor(obj runtime.Object) (cache.SharedIndexInformer, *framework.FakeControllerSource) {
@@ -67,26 +79,32 @@ func NewFakeInformerFor(obj runtime.Object) (cache.SharedIndexInformer, *framewo
 	return objInformer, objSource
 }
 
+func NewFakeInformerWithIndexersFor(obj runtime.Object, indexers cache.Indexers) (cache.SharedIndexInformer, *framework.FakeControllerSource) {
+	objSource := framework.NewFakeControllerSource()
+	objInformer := cache.NewSharedIndexInformer(objSource, obj, 0, indexers)
+	return objInformer, objSource
+}
+
 type VirtualMachineFeeder struct {
 	MockQueue *MockWorkQueue
 	Source    *framework.FakeControllerSource
 }
 
-func (v *VirtualMachineFeeder) Add(vm *v1.VirtualMachine) {
+func (v *VirtualMachineFeeder) Add(vmi *v1.VirtualMachineInstance) {
 	v.MockQueue.ExpectAdds(1)
-	v.Source.Add(vm)
+	v.Source.Add(vmi)
 	v.MockQueue.Wait()
 }
 
-func (v *VirtualMachineFeeder) Modify(vm *v1.VirtualMachine) {
+func (v *VirtualMachineFeeder) Modify(vmi *v1.VirtualMachineInstance) {
 	v.MockQueue.ExpectAdds(1)
-	v.Source.Modify(vm)
+	v.Source.Modify(vmi)
 	v.MockQueue.Wait()
 }
 
-func (v *VirtualMachineFeeder) Delete(vm *v1.VirtualMachine) {
+func (v *VirtualMachineFeeder) Delete(vmi *v1.VirtualMachineInstance) {
 	v.MockQueue.ExpectAdds(1)
-	v.Source.Delete(vm)
+	v.Source.Delete(vmi)
 	v.MockQueue.Wait()
 }
 
@@ -127,31 +145,121 @@ func NewPodFeeder(queue *MockWorkQueue, source *framework.FakeControllerSource) 
 	}
 }
 
+type PodDisruptionBudgetFeeder struct {
+	MockQueue *MockWorkQueue
+	Source    *framework.FakeControllerSource
+}
+
+func (v *PodDisruptionBudgetFeeder) Add(pdb *v1beta1.PodDisruptionBudget) {
+	v.MockQueue.ExpectAdds(1)
+	v.Source.Add(pdb)
+	v.MockQueue.Wait()
+}
+
+func (v *PodDisruptionBudgetFeeder) Modify(pdb *v1beta1.PodDisruptionBudget) {
+	v.MockQueue.ExpectAdds(1)
+	v.Source.Modify(pdb)
+	v.MockQueue.Wait()
+}
+
+func (v *PodDisruptionBudgetFeeder) Delete(pdb *v1beta1.PodDisruptionBudget) {
+	v.MockQueue.ExpectAdds(1)
+	v.Source.Delete(pdb)
+	v.MockQueue.Wait()
+}
+
+func NewPodDisruptionBudgetFeeder(queue *MockWorkQueue, source *framework.FakeControllerSource) *PodDisruptionBudgetFeeder {
+	return &PodDisruptionBudgetFeeder{
+		MockQueue: queue,
+		Source:    source,
+	}
+}
+
+type MigrationFeeder struct {
+	MockQueue *MockWorkQueue
+	Source    *framework.FakeControllerSource
+}
+
+func (v *MigrationFeeder) Add(migration *v1.VirtualMachineInstanceMigration) {
+	v.MockQueue.ExpectAdds(1)
+	v.Source.Add(migration)
+	v.MockQueue.Wait()
+}
+
+func (v *MigrationFeeder) Modify(migration *v1.VirtualMachineInstanceMigration) {
+	v.MockQueue.ExpectAdds(1)
+	v.Source.Modify(migration)
+	v.MockQueue.Wait()
+}
+
+func (v *MigrationFeeder) Delete(migration *v1.VirtualMachineInstanceMigration) {
+	v.MockQueue.ExpectAdds(1)
+	v.Source.Delete(migration)
+	v.MockQueue.Wait()
+}
+
+func NewMigrationFeeder(queue *MockWorkQueue, source *framework.FakeControllerSource) *MigrationFeeder {
+	return &MigrationFeeder{
+		MockQueue: queue,
+		Source:    source,
+	}
+}
+
 type DomainFeeder struct {
 	MockQueue *MockWorkQueue
 	Source    *framework.FakeControllerSource
 }
 
-func (v *DomainFeeder) Add(vm *api.Domain) {
+func (v *DomainFeeder) Add(vmi *api.Domain) {
 	v.MockQueue.ExpectAdds(1)
-	v.Source.Add(vm)
+	v.Source.Add(vmi)
 	v.MockQueue.Wait()
 }
 
-func (v *DomainFeeder) Modify(vm *api.Domain) {
+func (v *DomainFeeder) Modify(vmi *api.Domain) {
 	v.MockQueue.ExpectAdds(1)
-	v.Source.Modify(vm)
+	v.Source.Modify(vmi)
 	v.MockQueue.Wait()
 }
 
-func (v *DomainFeeder) Delete(vm *api.Domain) {
+func (v *DomainFeeder) Delete(vmi *api.Domain) {
 	v.MockQueue.ExpectAdds(1)
-	v.Source.Delete(vm)
+	v.Source.Delete(vmi)
 	v.MockQueue.Wait()
 }
 
 func NewDomainFeeder(queue *MockWorkQueue, source *framework.FakeControllerSource) *DomainFeeder {
 	return &DomainFeeder{
+		MockQueue: queue,
+		Source:    source,
+	}
+}
+
+type DataVolumeFeeder struct {
+	MockQueue *MockWorkQueue
+	Source    *framework.FakeControllerSource
+}
+
+func (v *DataVolumeFeeder) Add(dataVolume *cdiv1.DataVolume) {
+	v.MockQueue.ExpectAdds(1)
+	v.Source.Add(dataVolume)
+	v.MockQueue.Wait()
+}
+
+func (v *DataVolumeFeeder) Modify(dataVolume *cdiv1.DataVolume) {
+	v.MockQueue.ExpectAdds(1)
+	v.Source.Modify(dataVolume)
+	v.MockQueue.Wait()
+}
+
+func (v *DataVolumeFeeder) Delete(dataVolume *cdiv1.DataVolume) {
+	v.MockQueue.ExpectAdds(1)
+	v.Source.Delete(dataVolume)
+	v.MockQueue.Wait()
+}
+
+func NewDataVolumeFeeder(queue *MockWorkQueue, source *framework.FakeControllerSource) *DataVolumeFeeder {
+	return &DataVolumeFeeder{
 		MockQueue: queue,
 		Source:    source,
 	}

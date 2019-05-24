@@ -1,7 +1,8 @@
-source $(dirname "$0")/../hack/common.sh
+#!/usr/bin/env bash
+set -e
 
+source hack/common.sh
 test -t 1 && USE_TTY="-it"
-
 source ${KUBEVIRT_DIR}/cluster/$KUBEVIRT_PROVIDER/provider.sh
 source hack/config.sh
 

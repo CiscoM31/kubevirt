@@ -23,6 +23,8 @@ import (
 	"sync"
 	"time"
 
+	"k8s.io/client-go/tools/record"
+
 	k8sv1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/watch"
@@ -35,11 +37,13 @@ import (
 	"kubevirt.io/kubevirt/pkg/watchdog"
 )
 
-func newListWatchFromNotify(virtShareDir string, watchdogTimeout int) cache.ListerWatcher {
+func newListWatchFromNotify(virtShareDir string, watchdogTimeout int, recorder record.EventRecorder, vmiStore cache.Store) cache.ListerWatcher {
 	d := &DomainWatcher{
 		backgroundWatcherStarted: false,
 		virtShareDir:             virtShareDir,
 		watchdogTimeout:          watchdogTimeout,
+		recorder:                 recorder,
+		vmiStore:                 vmiStore,
 	}
 
 	return d
@@ -53,6 +57,8 @@ type DomainWatcher struct {
 	backgroundWatcherStarted bool
 	virtShareDir             string
 	watchdogTimeout          int
+	recorder                 record.EventRecorder
+	vmiStore                 cache.Store
 }
 
 func (d *DomainWatcher) startBackground() error {
@@ -74,7 +80,7 @@ func (d *DomainWatcher) startBackground() error {
 		srvErr := make(chan error)
 		go func() {
 			defer close(srvErr)
-			err := notifyserver.RunServer(d.virtShareDir, d.stopChan, d.eventChan)
+			err := notifyserver.RunServer(d.virtShareDir, d.stopChan, d.eventChan, d.recorder, d.vmiStore)
 			srvErr <- err
 		}()
 
@@ -119,7 +125,7 @@ func (d *DomainWatcher) listAllKnownDomains() ([]*api.Domain, error) {
 	}
 	for _, socketFile := range socketFiles {
 		log.Log.V(3).Infof("List domains from sock %s", socketFile)
-		client, err := cmdclient.GetClient(socketFile)
+		client, err := cmdclient.NewClient(socketFile)
 		if err != nil {
 			log.Log.Reason(err).Error("failed to connect to cmd client socket")
 			// Ignore failure to connect to client.
@@ -190,8 +196,8 @@ func (d *DomainWatcher) ResultChan() <-chan watch.Event {
 	return d.eventChan
 }
 
-func NewSharedInformer(virtShareDir string, watchdogTimeout int) (cache.SharedInformer, error) {
-	lw := newListWatchFromNotify(virtShareDir, watchdogTimeout)
+func NewSharedInformer(virtShareDir string, watchdogTimeout int, recorder record.EventRecorder, vmiStore cache.Store) (cache.SharedInformer, error) {
+	lw := newListWatchFromNotify(virtShareDir, watchdogTimeout, recorder, vmiStore)
 	informer := cache.NewSharedInformer(lw, &api.Domain{}, 0)
 	return informer, nil
 }

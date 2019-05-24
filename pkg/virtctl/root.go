@@ -7,14 +7,14 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"flag"
-
 	"kubevirt.io/kubevirt/pkg/kubecli"
+	"kubevirt.io/kubevirt/pkg/log"
 	"kubevirt.io/kubevirt/pkg/virtctl/console"
 	"kubevirt.io/kubevirt/pkg/virtctl/expose"
-	"kubevirt.io/kubevirt/pkg/virtctl/offlinevm"
+	"kubevirt.io/kubevirt/pkg/virtctl/imageupload"
 	"kubevirt.io/kubevirt/pkg/virtctl/templates"
 	"kubevirt.io/kubevirt/pkg/virtctl/version"
+	"kubevirt.io/kubevirt/pkg/virtctl/vm"
 	"kubevirt.io/kubevirt/pkg/virtctl/vnc"
 )
 
@@ -39,22 +39,24 @@ func NewVirtctlCommand() *cobra.Command {
 	optionsCmd.SetUsageTemplate(templates.OptionsUsageTemplate())
 	//TODO: Add a ClientConfigFactory which allows substituting the KubeVirt client with a mock for unit testing
 	clientConfig := kubecli.DefaultClientConfig(rootCmd.PersistentFlags())
-	flag.CommandLine.Set("logtostderr", "true")
 	AddGlogFlags(rootCmd.PersistentFlags())
 	rootCmd.SetUsageTemplate(templates.MainUsageTemplate())
 	rootCmd.AddCommand(
 		console.NewCommand(clientConfig),
 		vnc.NewCommand(clientConfig),
-		offlinevm.NewStartCommand(clientConfig),
-		offlinevm.NewStopCommand(clientConfig),
+		vm.NewStartCommand(clientConfig),
+		vm.NewStopCommand(clientConfig),
+		vm.NewRestartCommand(clientConfig),
 		expose.NewExposeCommand(clientConfig),
 		version.VersionCommand(clientConfig),
+		imageupload.NewImageUploadCommand(clientConfig),
 		optionsCmd,
 	)
 	return rootCmd
 }
 
 func Execute() {
+	log.InitializeLogging("virtctl")
 	if err := NewVirtctlCommand().Execute(); err != nil {
 		fmt.Println(strings.TrimSpace(err.Error()))
 		os.Exit(1)

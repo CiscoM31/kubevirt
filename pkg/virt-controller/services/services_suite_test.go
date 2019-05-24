@@ -17,16 +17,19 @@
  *
  */
 
-package services_test
+package services
 
 import (
+	"testing"
+
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
 
-	"testing"
+	"kubevirt.io/kubevirt/pkg/log"
 )
 
 func TestServices(t *testing.T) {
+	log.Log.SetIOWriter(GinkgoWriter)
 	RegisterFailHandler(Fail)
 	RunSpecs(t, "Services Suite")
 }
