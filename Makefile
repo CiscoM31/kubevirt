@@ -3,7 +3,7 @@ export GO15VENDOREXPERIMENT := 1
 all: build manifests
 
 generate:
-	hack/dockerized "KUBEVIRT_PROVIDER=${KUBEVIRT_PROVIDER} DOCKER_PREFIX=${DOCKER_PREFIX} DOCKER_TAG=${DOCKER_TAG} ./hack/generate.sh"
+	hack/dockerized "./hack/generate.sh"
 
 apidocs: generate
 	./hack/gen-swagger-doc/gen-swagger-docs.sh v1 html"
