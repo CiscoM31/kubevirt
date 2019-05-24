@@ -257,7 +257,6 @@ func (t *templateService) RenderLaunchManifest(vm *v1.VirtualMachine) (*k8sv1.Po
 			Annotations: map[string]string{
 				v1.CreatedByAnnotation: string(vm.UID),
 				v1.OwnedByAnnotation:   "virt-controller",
-				"networks": `[ { "name": "calico-networkobj" }, { "name": "bridge-networkobj" } ]`,
 			},
 		},
 		Spec: k8sv1.PodSpec{

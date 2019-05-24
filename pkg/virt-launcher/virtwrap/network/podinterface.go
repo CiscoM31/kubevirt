@@ -78,7 +78,7 @@ func (l *PodInterface) Plug(iface *v1.Interface, network *v1.Network, domain *ap
 			panic(err)
 		}
 
-		// driver.startDHCPServer()
+		driver.startDHCPServer()
 
 		// After the network is configured, cache the result
 		// in case this function is called again.

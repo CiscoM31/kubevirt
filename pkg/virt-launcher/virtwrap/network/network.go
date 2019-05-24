@@ -33,7 +33,7 @@ import (
 )
 
 const (
-	podInterface        = "net0"
+	podInterface        = "eth0"
 	defaultDNS          = "8.8.8.8"
 	resolvConf          = "/etc/resolv.conf"
 	defaultSearchDomain = "cluster.local"
