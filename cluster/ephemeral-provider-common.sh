@@ -1,6 +1,6 @@
 #!/bin/bash
 
-set -ex
+set -e
 
 _cli="docker run --privileged --net=host --rm ${USE_TTY} -v /var/run/docker.sock:/var/run/docker.sock kubevirtci/gocli@sha256:aa7f295a7908fa333ab5e98ef3af0bfafbabfd3cee2b83f9af47f722e3000f6a"
 
@@ -47,8 +47,8 @@ function build() {
     done
 
     # Build everyting and publish it
-#    ${KUBEVIRT_PATH}hack/dockerized "DOCKER_TAG=${DOCKER_TAG} KUBEVIRT_PROVIDER=${KUBEVIRT_PROVIDER} ./hack/build-manifests.sh"
-#    make build docker publish
+    ${KUBEVIRT_PATH}hack/dockerized "DOCKER_TAG=${DOCKER_TAG} KUBEVIRT_PROVIDER=${KUBEVIRT_PROVIDER} ./hack/build-manifests.sh"
+    make build docker publish
 
     # Make sure that all nodes use the newest images
     container=""
@@ -58,10 +58,10 @@ function build() {
         container="${container} ${manifest_docker_prefix}/${name}:${docker_tag}"
         container_alias="${container_alias} ${manifest_docker_prefix}/${name}:${docker_tag} kubevirt/${name}:${docker_tag}"
     done
-#    for i in $(seq 1 ${KUBEVIRT_NUM_NODES}); do
-#        ${_cli} ssh --prefix $provider_prefix "node$(printf "%02d" ${i})" "echo \"${container}\" | xargs \-\-max-args=1 sudo docker pull"
-#        ${_cli} ssh --prefix $provider_prefix "node$(printf "%02d" ${i})" "echo \"${container_alias}\" | xargs \-\-max-args=2 sudo docker tag"
-#    done
+    for i in $(seq 1 ${KUBEVIRT_NUM_NODES}); do
+        ${_cli} ssh --prefix $provider_prefix "node$(printf "%02d" ${i})" "echo \"${container}\" | xargs \-\-max-args=1 sudo docker pull"
+        ${_cli} ssh --prefix $provider_prefix "node$(printf "%02d" ${i})" "echo \"${container_alias}\" | xargs \-\-max-args=2 sudo docker tag"
+    done
 }
 
 function _kubectl() {
