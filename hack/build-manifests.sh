@@ -40,7 +40,6 @@ for arg in $args; do
         --namespace=${namespace} \
         --docker-prefix=${manifest_docker_prefix} \
         --docker-tag=${docker_tag} \
-        --image-pull-policy=${image_pull_policy} \
         --generated-manifests-dir=${KUBEVIRT_DIR}/manifests/generated/ \
         --input-file=${KUBEVIRT_DIR}/manifests/$arg >${outfile}
 done
