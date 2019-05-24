@@ -17,10 +17,11 @@ function build() {
     # Then make sure we are using latest on all the nodes, this will require SSH keys to be setup
     for node in `_kubectl get nodes | tail -n +2 | awk '{print $1}'`; do
         echo "Connecting to host $node"
+        ssh-add -l
         ssh $SSH_USER $node docker pull $DOCKER_PREFIX/virt-api
         ssh $SSH_USER $node docker pull $DOCKER_PREFIX/virt-handler
         ssh $SSH_USER $node docker pull $DOCKER_PREFIX/virt-launcher
-        ssh $SSH_USER $node docker pull $DOCKER_PREFIX/virt-controller
+        ssh $SSH)$node docker pull $DOCKER_PREFIX/virt-controller
     done
 
 }
