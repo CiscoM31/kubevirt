@@ -19,7 +19,9 @@ import (
 	"kubevirt.io/kubevirt/pkg/api/v1"
 	"kubevirt.io/kubevirt/pkg/kubecli"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/client-go/tools/clientcmd"
 	cdiv1 "kubevirt.io/containerized-data-importer/pkg/apis/core/v1alpha1"
+	cdiClientset "kubevirt.io/containerized-data-importer/pkg/client/clientset/versioned"
 	"net/url"
 )
 
@@ -328,7 +330,6 @@ func AttachDisk(c kubecli.KubevirtClient, vm *v1.VirtualMachine, diskParams Disk
 					vm.Spec.DataVolumeTemplates = append(vm.Spec.DataVolumeTemplates, dv)
 					vol.DataVolume = &v1.DataVolumeSource{Name: dv.Name}
 					vmSpec.Volumes = append(vmSpec.Volumes, vol)
-					fmt.Printf("\n===PBUDS - VOLs: %+v", vmSpec.Volumes)
 				}
 			} else {
 				//empty disk
@@ -448,6 +449,37 @@ func GetVM(c kubecli.KubevirtClient, vmname, ns string) (*v1.VirtualMachine, err
 	return nil, errors2.New(errStr)
 }
 
+// GetCdiClient gets an instance of a kubernetes client that includes all the CDI extensions.
+func GetCdiClient() (*cdiClientset.Clientset, error) {
+	cfg, err := clientcmd.BuildConfigFromFlags("", "/opt/cisco/cluster-config")
+	if err != nil {
+			return nil, err
+	}
+	cdiClient, err := cdiClientset.NewForConfig(cfg)
+	if err != nil {
+			return nil, err
+	}
+	return cdiClient, nil
+}
+
+func GetDV(dvName, ns string) (*cdiv1.DataVolume, error) {
+	c, err := GetCdiClient()
+	if err != nil {
+		return nil, err
+	}
+	return c.CdiV1alpha1().DataVolumes(ns).Get(dvName, metav1.GetOptions{})
+}
+
+func IsDownloadInProgress(vm *v1.VirtualMachine, Ns string) bool {
+	for _, dv := range vm.Spec.DataVolumeTemplates {
+		dv, err := GetDV(dv.Name, Ns)
+		if err != nil && dv.Status.Phase != cdiv1.Succeeded &&
+			dv.Status.Phase != cdiv1.Failed && dv.Status.Phase != cdiv1.Unknown {
+			return true
+		}
+	}
+	return false
+}
 
 func DeleteVM(c kubecli.KubevirtClient, name, ns string) error {
 	return c.VirtualMachine(ns).Delete(name, &metav1.DeleteOptions{})
@@ -622,6 +654,7 @@ var filterDb = [...]EventFilter{
 	{"Registered Node", "Node added successfully to the compute cluster."},
 	{"Starting kubelet", "Started node initialization."},
 	{"System OOM encountered", "System is experiencing out of memory condition"},
+	{"Import into", ""},
 }
 
 func filterOutMsg(msg string) (bool, *EventFilter) {
@@ -725,7 +758,7 @@ func WatchKbEvents(client kubecli.KubevirtClient, rC chan ResourceEvent, quitDon
 					rC <- rEvent
 				} else {
 					if !strings.Contains(e.Message, lastmessage) {
-						fmt.Printf("\n%v", e)
+						fmt.Printf("\nraw: %v", e)
 						lastmessage = e.Message
 					}
 				}
