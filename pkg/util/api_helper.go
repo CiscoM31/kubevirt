@@ -628,16 +628,15 @@ type EventFilter struct {
 // sense for a user. The below table helps in filtering those out and
 // or translate them to better versions of the message
 var filterDb = [...]EventFilter{
-	{"Created virtual machine pod ", "Create of virtual machine has been initiated"},
-	{"Deleted virtual machine pod", "Stop of Virtual Machine initiated"},
+	{"Created virtual machine pod ", "Virtual machine start has been initiated"},
+	{"Signaled Graceful Shutdown", "Graceful shutdown of Virtual Machine initiated"},
 	{"Deleted finished virtual machine", "Virtual machine has been stopped"},
-	{"Signaled Deletion", "Virtual Machine stop operation succeeded"},
 	{"VirtualMachineInstance started", "Virtual Machine started"},
-	{"AttachVolume.Attach", ""},
-	{"Killing container", "Virtual Machine has been stopped"},
+	{"The VirtualMachineInstance was shut down", "Virtual Machine has been stopped"},
 	{"Failed to open", ""},
 	{"Failed to copy", ""},
 	{"Unable to mount volumes", ""},
+	{"The VirtualMachineInstance crashed", ""},
 	{"initialization failed for volume", ""},
 	{"NodeNotSchedulable", "node is in maintenance mode"},
 	{"NodeSchedulable", "node is in active state"},
@@ -655,6 +654,8 @@ var filterDb = [...]EventFilter{
 	{"Starting kubelet", "Started node initialization."},
 	{"System OOM encountered", "System is experiencing out of memory condition"},
 	{"Import into", ""},
+	{"Created DataVolume", ""},
+	{"Failed to import", ""},
 }
 
 func filterOutMsg(msg string) (bool, *EventFilter) {
