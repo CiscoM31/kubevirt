@@ -16,13 +16,15 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/rand"
 
-	"kubevirt.io/kubevirt/pkg/api/v1"
-	"kubevirt.io/kubevirt/pkg/kubecli"
+	"net/url"
+
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/tools/clientcmd"
+
 	cdiv1 "kubevirt.io/containerized-data-importer/pkg/apis/core/v1alpha1"
 	cdiClientset "kubevirt.io/containerized-data-importer/pkg/client/clientset/versioned"
-	"net/url"
+	v1 "kubevirt.io/kubevirt/pkg/api/v1"
+	"kubevirt.io/kubevirt/pkg/kubecli"
 )
 
 type DiskParams struct {
@@ -39,7 +41,7 @@ type DiskParams struct {
 
 const (
 	pvcCreatedByVM = "vmCreated"
-	pvcCDICreated = "cdi.kubevirt.io/storage.import.source"
+	pvcCDICreated  = "cdi.kubevirt.io/storage.import.source"
 )
 
 func NewVM(namespace string, vmName string) *v1.VirtualMachine {
@@ -292,6 +294,47 @@ func NewDataVolumeWithHTTPImport(dataVolumeName string, size string, httpURL str
 	}
 }
 
+// NewDataVolumeWithHTTPImport initializes a DataVolume struct with HTTP annotations
+func NewDataVolumeEmptyDisk(dataVolumeName string, size string) cdiv1.DataVolume {
+	return cdiv1.DataVolume{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: dataVolumeName,
+		},
+		Spec: cdiv1.DataVolumeSpec{
+			Source: cdiv1.DataVolumeSource{
+				Blank: &cdiv1.DataVolumeBlankImage{},
+			},
+			PVC: &k8sv1.PersistentVolumeClaimSpec{
+				AccessModes: []k8sv1.PersistentVolumeAccessMode{k8sv1.ReadWriteOnce},
+				Resources: k8sv1.ResourceRequirements{
+					Requests: k8sv1.ResourceList{
+						k8sv1.ResourceName(k8sv1.ResourceStorage): resource.MustParse(size),
+					},
+				},
+			},
+		},
+	}
+}
+
+// NewDataVolumeWithHTTPImport initializes a DataVolume struct with HTTP annotations
+func NewDataVolumePVC(dataVolumeName string, size string) cdiv1.DataVolume {
+	return cdiv1.DataVolume{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: dataVolumeName,
+		},
+		Spec: cdiv1.DataVolumeSpec{
+			PVC: &k8sv1.PersistentVolumeClaimSpec{
+				AccessModes: []k8sv1.PersistentVolumeAccessMode{k8sv1.ReadWriteOnce},
+				Resources: k8sv1.ResourceRequirements{
+					Requests: k8sv1.ResourceList{
+						k8sv1.ResourceName(k8sv1.ResourceStorage): resource.MustParse(size),
+					},
+				},
+			},
+		},
+	}
+}
+
 func AttachDisk(c kubecli.KubevirtClient, vm *v1.VirtualMachine, diskParams DiskParams) error {
 	disk := v1.Disk{}
 	disk.Name = diskParams.Name
@@ -311,7 +354,7 @@ func AttachDisk(c kubecli.KubevirtClient, vm *v1.VirtualMachine, diskParams Disk
 		}
 	}
 
-    vmSpec := &vm.Spec.Template.Spec
+	vmSpec := &vm.Spec.Template.Spec
 	vmSpec.Domain.Devices.Disks = append(vmSpec.Domain.Devices.Disks, disk)
 
 	vol := v1.Volume{}
@@ -331,19 +374,24 @@ func AttachDisk(c kubecli.KubevirtClient, vm *v1.VirtualMachine, diskParams Disk
 					vol.DataVolume = &v1.DataVolumeSource{Name: dv.Name}
 					vmSpec.Volumes = append(vmSpec.Volumes, vol)
 				}
-			} else {
-				//empty disk
+			} else if diskParams.VolName != "" && diskParams.VolumeHandle == "" {
 				fmt.Printf("\nCreating PVC for %s, class:%v", diskParams.Name, diskParams.Class)
 				pvc, err := CreateISCSIPvc(c, pvcName, "", diskParams.Class, diskParams.Capacity, "default", false,
-						diskParams.VolumeBlockMode, map[string]string{pvcCreatedByVM: "yes"})
+					diskParams.VolumeBlockMode, map[string]string{pvcCreatedByVM: "yes"})
 				if err != nil {
-						fmt.Printf("\nFailed to create PVC %s %v", pvcName, err)
-						return err
+					fmt.Printf("\nFailed to create PVC %s %v", pvcName, err)
+					return err
 				}
 				updatePVCPrivate(c, pvc)
 				vol.PersistentVolumeClaim = &k8sv1.PersistentVolumeClaimVolumeSource{
 					ClaimName: pvcName,
 				}
+				vmSpec.Volumes = append(vmSpec.Volumes, vol)
+			} else {
+				//empty disk
+				dv := NewDataVolumeEmptyDisk(disk.Name, diskParams.Capacity)
+				vm.Spec.DataVolumeTemplates = append(vm.Spec.DataVolumeTemplates, dv)
+				vol.DataVolume = &v1.DataVolumeSource{Name: dv.Name}
 				vmSpec.Volumes = append(vmSpec.Volumes, vol)
 			}
 		} else {
@@ -453,11 +501,11 @@ func GetVM(c kubecli.KubevirtClient, vmname, ns string) (*v1.VirtualMachine, err
 func GetCdiClient() (*cdiClientset.Clientset, error) {
 	cfg, err := clientcmd.BuildConfigFromFlags("", "/opt/cisco/cluster-config")
 	if err != nil {
-			return nil, err
+		return nil, err
 	}
 	cdiClient, err := cdiClientset.NewForConfig(cfg)
 	if err != nil {
-			return nil, err
+		return nil, err
 	}
 	return cdiClient, nil
 }
@@ -484,7 +532,6 @@ func IsDownloadInProgress(vm *v1.VirtualMachine, Ns string) bool {
 func DeleteVM(c kubecli.KubevirtClient, name, ns string) error {
 	return c.VirtualMachine(ns).Delete(name, &metav1.DeleteOptions{})
 }
-
 
 func DeleteVMIRS(c kubecli.KubevirtClient, name, ns string) error {
 	return c.ReplicaSet(ns).Delete(name, &metav1.DeleteOptions{})
