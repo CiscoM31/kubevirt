@@ -169,7 +169,7 @@ func CreateISCSIPvc(client kubecli.KubevirtClient, name, vName, class, capacity,
 		mode = k8sv1.PersistentVolumeBlock
 	}
 
-	accessMode := k8sv1.ReadWriteMany
+	accessMode := k8sv1.ReadWriteOnce
 	if readOnly {
 		accessMode = k8sv1.ReadOnlyMany
 	}
