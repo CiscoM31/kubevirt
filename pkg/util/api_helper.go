@@ -16,7 +16,14 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/rand"
 
-	"kubevirt.io/kubevirt/pkg/api/v1"
+	"net/url"
+
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/client-go/tools/clientcmd"
+
+	cdiv1 "kubevirt.io/containerized-data-importer/pkg/apis/core/v1alpha1"
+	cdiClientset "kubevirt.io/containerized-data-importer/pkg/client/clientset/versioned"
+	v1 "kubevirt.io/kubevirt/pkg/api/v1"
 	"kubevirt.io/kubevirt/pkg/kubecli"
 )
 
@@ -29,9 +36,33 @@ type DiskParams struct {
 	IsCdrom                             bool
 	VolumeBlockMode                     bool
 	HxVolName                           string
+	Order                               uint
 }
 
-const pvcCreatedByVM = "vmCreated"
+const (
+	pvcCreatedByVM = "vmCreated"
+	pvcCDICreated  = "cdi.kubevirt.io/storage.import.source"
+)
+
+func NewVM(namespace string, vmName string) *v1.VirtualMachine {
+	vm := &v1.VirtualMachine{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      vmName,
+			Namespace: namespace,
+		},
+		Spec: v1.VirtualMachineSpec{
+			Template: &v1.VirtualMachineInstanceTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{
+					Labels:    map[string]string{"name": vmName},
+					Name:      vmName,
+					Namespace: namespace,
+				},
+			},
+		},
+	}
+	vm.SetGroupVersionKind(schema.GroupVersionKind{Group: v1.GroupVersion.Group, Kind: "VirtualMachine", Version: v1.GroupVersion.Version})
+	return vm
+}
 
 func NewReplicaSetFromVMI(vmi *v1.VirtualMachineInstance, replicas int32) *v1.VirtualMachineInstanceReplicaSet {
 	name := "replicaset" + rand.String(5)
@@ -169,7 +200,7 @@ func CreateISCSIPvc(client kubecli.KubevirtClient, name, vName, class, capacity,
 		mode = k8sv1.PersistentVolumeBlock
 	}
 
-	accessMode := k8sv1.ReadWriteMany
+	accessMode := k8sv1.ReadWriteOnce
 	if readOnly {
 		accessMode = k8sv1.ReadOnlyMany
 	}
@@ -222,33 +253,92 @@ func updatePVCPrivate(client kubecli.KubevirtClient, pvc *k8sv1.PersistentVolume
 	return client.CoreV1().PersistentVolumeClaims(pvc.Namespace).Update(pvc)
 }
 
-func SetResources(vmi *v1.VirtualMachineInstance, cpu, memory, cpuModel string) error {
+func SetResources(vm *v1.VirtualMachine, cpu, memory, cpuModel string) error {
 	t := int64(30)
-	vmi.Spec.TerminationGracePeriodSeconds = &t
+	vmSpec := &vm.Spec.Template.Spec
+	vmSpec.TerminationGracePeriodSeconds = &t
 	cpus := resource.MustParse(cpu)
-	vmi.Spec.Domain.Resources.Requests[k8sv1.ResourceMemory] = resource.MustParse(memory)
-	vmi.Spec.Domain.Resources.Requests[k8sv1.ResourceCPU] = cpus
-	os := v1.OS{BootOrder: "hd,cdrom"}
-	vmi.Spec.Domain.OS = &os
+	vmSpec.Domain.Resources.Requests = make(map[k8sv1.ResourceName]resource.Quantity, 0)
+	vmSpec.Domain.Resources.Requests[k8sv1.ResourceMemory] = resource.MustParse(memory)
+	vmSpec.Domain.Resources.Requests[k8sv1.ResourceCPU] = cpus
 	cores, err := strconv.Atoi(cpu)
 	if err != nil {
 		return fmt.Errorf("SetResources failed: %v", err)
 	}
 	fmt.Printf("\nCores: %d\n", cores)
-	vmi.Spec.Domain.CPU = &v1.CPU{Cores: uint32(cores), Model: cpuModel}
+	vmSpec.Domain.CPU = &v1.CPU{Cores: uint32(cores), Model: cpuModel}
 	return nil
 }
 
-func AttachDisk(c kubecli.KubevirtClient, vmi *v1.VirtualMachineInstance, diskParams DiskParams) error {
+// NewDataVolumeWithHTTPImport initializes a DataVolume struct with HTTP annotations
+func NewDataVolumeWithHTTPImport(dataVolumeName string, size string, httpURL string) cdiv1.DataVolume {
+	return cdiv1.DataVolume{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: dataVolumeName,
+		},
+		Spec: cdiv1.DataVolumeSpec{
+			Source: cdiv1.DataVolumeSource{
+				HTTP: &cdiv1.DataVolumeSourceHTTP{
+					URL: httpURL,
+				},
+			},
+			PVC: &k8sv1.PersistentVolumeClaimSpec{
+				AccessModes: []k8sv1.PersistentVolumeAccessMode{k8sv1.ReadWriteOnce},
+				Resources: k8sv1.ResourceRequirements{
+					Requests: k8sv1.ResourceList{
+						k8sv1.ResourceName(k8sv1.ResourceStorage): resource.MustParse(size),
+					},
+				},
+			},
+		},
+	}
+}
+
+// NewDataVolumeWithHTTPImport initializes a DataVolume struct with HTTP annotations
+func NewDataVolumeEmptyDisk(dataVolumeName string, size string) cdiv1.DataVolume {
+	return cdiv1.DataVolume{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: dataVolumeName,
+		},
+		Spec: cdiv1.DataVolumeSpec{
+			Source: cdiv1.DataVolumeSource{
+				Blank: &cdiv1.DataVolumeBlankImage{},
+			},
+			PVC: &k8sv1.PersistentVolumeClaimSpec{
+				AccessModes: []k8sv1.PersistentVolumeAccessMode{k8sv1.ReadWriteOnce},
+				Resources: k8sv1.ResourceRequirements{
+					Requests: k8sv1.ResourceList{
+						k8sv1.ResourceName(k8sv1.ResourceStorage): resource.MustParse(size),
+					},
+				},
+			},
+		},
+	}
+}
+
+// NewDataVolumeWithHTTPImport initializes a DataVolume struct with HTTP annotations
+func NewDataVolumePVC(dataVolumeName string, size string) cdiv1.DataVolume {
+	return cdiv1.DataVolume{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: dataVolumeName,
+		},
+		Spec: cdiv1.DataVolumeSpec{
+			PVC: &k8sv1.PersistentVolumeClaimSpec{
+				AccessModes: []k8sv1.PersistentVolumeAccessMode{k8sv1.ReadWriteOnce},
+				Resources: k8sv1.ResourceRequirements{
+					Requests: k8sv1.ResourceList{
+						k8sv1.ResourceName(k8sv1.ResourceStorage): resource.MustParse(size),
+					},
+				},
+			},
+		},
+	}
+}
+
+func AttachDisk(c kubecli.KubevirtClient, vm *v1.VirtualMachine, diskParams DiskParams) error {
 	disk := v1.Disk{}
 	disk.Name = diskParams.Name
-	disk.VolumeName = diskParams.VolName
-
-	quantity, err := resource.ParseQuantity(diskParams.Capacity)
-	if err != nil {
-		return err
-	}
-	disk.Size = strconv.FormatInt(quantity.ToDec().ScaledValue(0), 10)
+	disk.BootOrder = &diskParams.Order
 
 	dt := "sata"
 	if diskParams.Bus == "virtio" || diskParams.Bus == "scsi" || diskParams.Bus == "ide" {
@@ -256,41 +346,59 @@ func AttachDisk(c kubecli.KubevirtClient, vmi *v1.VirtualMachineInstance, diskPa
 	}
 
 	if !diskParams.VolumeBlockMode {
-		disk.FilePath = diskParams.FilePath
-		disk.SourceFilePath = diskParams.SfilePath
-		disk.SourceVolumeName = diskParams.Svolume
-		disk.ExportVolumeName = diskParams.Evolume
-		disk.ExportFilePath = diskParams.EfilePath
 		if diskParams.IsCdrom == true {
 			readOnly := true
 			disk.CDRom = &v1.CDRomTarget{Bus: dt, ReadOnly: &readOnly}
 		} else {
-			disk.Disk = &v1.DiskTarget{Bus: dt, ImageFormat: diskParams.Format}
+			disk.Disk = &v1.DiskTarget{Bus: dt}
 		}
-
 	}
 
-	vmi.Spec.Domain.Devices.Disks = append(vmi.Spec.Domain.Devices.Disks, disk)
+	vmSpec := &vm.Spec.Template.Spec
+	vmSpec.Domain.Devices.Disks = append(vmSpec.Domain.Devices.Disks, disk)
 
 	vol := v1.Volume{}
-	vol.Name = fmt.Sprintf("my-%s", diskParams.Name)
+	vol.Name = diskParams.Name
 	var pvcName string
-	var pvc *k8sv1.PersistentVolumeClaim
 	if diskParams.HxVolName == "" {
 		pvcName = fmt.Sprintf("%s-%s", diskParams.Name, "pvc")
 		if diskParams.VolumeHandle == "" {
-			fmt.Printf("\nCreating PVC for %s, class:%v", diskParams.Name, diskParams.Class)
-			pvc, err = CreateISCSIPvc(c, pvcName, "", diskParams.Class, diskParams.Capacity, "default", false,
-				diskParams.VolumeBlockMode, map[string]string{pvcCreatedByVM: "yes"})
-			if err != nil {
-				fmt.Printf("\nFailed to create PVC %s %v", pvcName, err)
-				return err
+			// data volume needs to be configured if Sfilepath exists
+			if diskParams.SfilePath != "" {
+				// check if its HTTP
+				_, err := url.ParseRequestURI(diskParams.SfilePath)
+				if err == nil {
+					// HTTP source datavolume
+					dv := NewDataVolumeWithHTTPImport(disk.Name, diskParams.Capacity, diskParams.SfilePath)
+					vm.Spec.DataVolumeTemplates = append(vm.Spec.DataVolumeTemplates, dv)
+					vol.DataVolume = &v1.DataVolumeSource{Name: dv.Name}
+					vmSpec.Volumes = append(vmSpec.Volumes, vol)
+				}
+			} else if diskParams.VolName != "" && diskParams.VolumeHandle == "" {
+				fmt.Printf("\nCreating PVC for %s, class:%v", diskParams.Name, diskParams.Class)
+				pvc, err := CreateISCSIPvc(c, pvcName, "", diskParams.Class, diskParams.Capacity, "default", false,
+					diskParams.VolumeBlockMode, map[string]string{pvcCreatedByVM: "yes"})
+				if err != nil {
+					fmt.Printf("\nFailed to create PVC %s %v", pvcName, err)
+					return err
+				}
+				updatePVCPrivate(c, pvc)
+				vol.PersistentVolumeClaim = &k8sv1.PersistentVolumeClaimVolumeSource{
+					ClaimName: pvcName,
+				}
+				vmSpec.Volumes = append(vmSpec.Volumes, vol)
+			} else {
+				//empty disk
+				dv := NewDataVolumeEmptyDisk(disk.Name, diskParams.Capacity)
+				vm.Spec.DataVolumeTemplates = append(vm.Spec.DataVolumeTemplates, dv)
+				vol.DataVolume = &v1.DataVolumeSource{Name: dv.Name}
+				vmSpec.Volumes = append(vmSpec.Volumes, vol)
 			}
 		} else {
 			// we have a VolumeHandle from user. This is a case where a disk is being created
 			// with a volumeHandle that was saved from previous creation. We will
 			// create a PV using that volumeHandle and tie the PVC to this PV
-			pvc, err = GetPVC(c, pvcName)
+			pvc, err := GetPVC(c, pvcName)
 			if err != nil || pvc == nil {
 				pvName := fmt.Sprintf("%s-%s", diskParams.Name, "pv")
 				_, err = CreateCSIPv(c, pvName, diskParams, false)
@@ -306,150 +414,123 @@ func AttachDisk(c kubecli.KubevirtClient, vmi *v1.VirtualMachineInstance, diskPa
 					fmt.Printf("\nFailed to create PVC %s %v", pvcName, err)
 					return err
 				}
+				updatePVCPrivate(c, pvc)
+				vol.PersistentVolumeClaim = &k8sv1.PersistentVolumeClaimVolumeSource{
+					ClaimName: pvcName,
+				}
+				vmSpec.Volumes = append(vmSpec.Volumes, vol)
 			}
 		}
-		updatePVCPrivate(c, pvc)
 	} else {
 		pvcName = diskParams.HxVolName
 		if ok, _ := IsHXVolumeAvailable(c, diskParams.HxVolName); !ok {
 			fmt.Printf("HX Volume %s not found", pvcName)
 			return fmt.Errorf("HX Volume %s not found", pvcName)
 		}
-	}
-
-	vol.PersistentVolumeClaim = &k8sv1.PersistentVolumeClaimVolumeSource{
-		ClaimName: pvcName,
-	}
-	vmi.Spec.Volumes = append(vmi.Spec.Volumes, vol)
-
-	if diskParams.Svolume != "" {
-		vol = v1.Volume{}
-		vol.Name = fmt.Sprintf("%s", diskParams.Svolume)
-		pvcName = fmt.Sprintf("%s-%s", vol.Name, "source-pvc")
-		fmt.Printf("\nCreating source PVC for %s", pvcName)
-		sClass := fmt.Sprintf("%s-class", diskParams.Svolume)
-
-		pV, err := GetPv(c, diskParams.Svolume)
-		if err != nil {
-			fmt.Printf("PV %s not found for PVC %s configuration", diskParams.Svolume, pvcName)
-			return err
-		}
-		accessMode := pV.Spec.AccessModes
-		readOnly := false
-		if len(accessMode) != 0 {
-			if accessMode[0] == k8sv1.ReadOnlyMany {
-				readOnly = true
-			}
-		}
-		pvc, err = CreateISCSIPvc(c, pvcName, "", sClass, diskParams.Capacity, "default", readOnly,
-			diskParams.VolumeBlockMode, map[string]string{pvcCreatedByVM: "yes"})
-		if err != nil {
-			fmt.Printf("\nFailed to create PVC %s %v", pvcName, err)
-			return err
-		}
-
 		vol.PersistentVolumeClaim = &k8sv1.PersistentVolumeClaimVolumeSource{
-			ClaimName: pvc.Name,
+			ClaimName: pvcName,
 		}
-		for _, v := range vmi.Spec.Volumes {
-			// if already in the list, this is probably multiple disks refering
-			// to same source volume
-			if v.Name == vol.Name {
-				return nil
-			}
-		}
-		vmi.Spec.Volumes = append(vmi.Spec.Volumes, vol)
-	}
-
-	if diskParams.Evolume != "" {
-		vol = v1.Volume{}
-		vol.Name = fmt.Sprintf("%s", diskParams.Evolume)
-		pvcName = fmt.Sprintf("%s-%s", vol.Name, "export-pvc")
-		fmt.Printf("\nCreating export PVC for %s", pvcName)
-		eClass := fmt.Sprintf("%s-class", diskParams.Evolume)
-
-		pV, err := GetPv(c, diskParams.Evolume)
-		if err != nil {
-			fmt.Printf("PV %s not found for PVC %s configuration", diskParams.Evolume, pvcName)
-			return err
-		}
-		accessMode := pV.Spec.AccessModes
-		readOnly := false
-		if len(accessMode) != 0 {
-			if accessMode[0] == k8sv1.ReadOnlyMany {
-				readOnly = true
-			}
-		}
-		pvc, err = CreateISCSIPvc(c, pvcName, "", eClass, diskParams.Capacity, "default", readOnly,
-			diskParams.VolumeBlockMode, map[string]string{pvcCreatedByVM: "yes"})
-		if err != nil {
-			fmt.Printf("\nFailed to create PVC %s %v", pvcName, err)
-			return err
-		}
-
-		vol.PersistentVolumeClaim = &k8sv1.PersistentVolumeClaimVolumeSource{
-			ClaimName: pvc.Name,
-		}
-		for _, v := range vmi.Spec.Volumes {
-			// if already in the list, this is probably multiple disks refering
-			// to same source volume
-			if v.Name == vol.Name {
-				return nil
-			}
-		}
-		vmi.Spec.Volumes = append(vmi.Spec.Volumes, vol)
+		vmSpec.Volumes = append(vmSpec.Volumes, vol)
 	}
 
 	return nil
 }
 
 func GetVMIList(c kubecli.KubevirtClient, ns string) (*v1.VirtualMachineInstanceList, error) {
-	vmis, err := c.VirtualMachineInstance(ns).List(&metav1.ListOptions{})
-	return vmis, err
+	vms, err := c.VirtualMachineInstance(ns).List(&metav1.ListOptions{})
+	return vms, err
+}
+
+func GetVMList(c kubecli.KubevirtClient, ns string) (*v1.VirtualMachineList, error) {
+	vms, err := c.VirtualMachine(ns).List(&metav1.ListOptions{})
+	return vms, err
 }
 
 func GetVMIRSList(c kubecli.KubevirtClient, ns string) (*v1.VirtualMachineInstanceReplicaSetList, error) {
-	vmis, err := c.ReplicaSet(ns).List(metav1.ListOptions{})
-	return vmis, err
+	vms, err := c.ReplicaSet(ns).List(metav1.ListOptions{})
+	return vms, err
 }
 
-func GetVMIRS(c kubecli.KubevirtClient, vminame, ns string) (*v1.VirtualMachineInstanceReplicaSet, error) {
+func GetVMIRS(c kubecli.KubevirtClient, vmname, ns string) (*v1.VirtualMachineInstanceReplicaSet, error) {
 	list, err := GetVMIRSList(c, ns)
 	if err != nil {
 		return nil, err
 	}
-	for _, vmirs := range list.Items {
-		if vmirs.Spec.Template.ObjectMeta.Name == vminame {
-			return &vmirs, nil
+	for _, vmrs := range list.Items {
+		if vmrs.Spec.Template.ObjectMeta.Name == vmname {
+			return &vmrs, nil
 		}
 	}
 
-	return nil, fmt.Errorf("VMI Replicaset %s not found", vminame)
+	return nil, fmt.Errorf("VMI Replicaset %s not found", vmname)
 }
 
-func GetVMI(c kubecli.KubevirtClient, vminame, ns string) (*v1.VirtualMachineInstance, error) {
-	list, err := GetVMIRSList(c, ns)
+func GetVMI(c kubecli.KubevirtClient, vmname, ns string) (*v1.VirtualMachineInstance, error) {
+	list, err := GetVMIList(c, ns)
 	if err != nil {
 		return nil, err
 	}
-	for _, vmirs := range list.Items {
-		if vmirs.Spec.Template.ObjectMeta.Name == vminame {
-			vmiList, err := GetVMIList(c, ns)
-			if err != nil {
-				return nil, err
-			}
-			for _, vmi := range vmiList.Items {
-				for _, ref := range vmi.OwnerReferences {
-					if ref.Name == vmirs.Name {
-						return &vmi, nil
-					}
-				}
+	for _, vmi := range list.Items {
+		for _, ref := range vmi.OwnerReferences {
+			if ref.Name == vmname {
+				return &vmi, nil
 			}
 		}
 	}
 
-	errStr := fmt.Sprintf("VMI %s not found", vminame)
+	errStr := fmt.Sprintf("VMI %s not found", vmname)
 	return nil, errors2.New(errStr)
+}
+
+func GetVM(c kubecli.KubevirtClient, vmname, ns string) (*v1.VirtualMachine, error) {
+	list, err := GetVMList(c, ns)
+	if err != nil {
+		return nil, err
+	}
+	for _, vm := range list.Items {
+		if vm.Name == vmname {
+			return &vm, nil
+		}
+	}
+
+	errStr := fmt.Sprintf("VM %s not found", vmname)
+	return nil, errors2.New(errStr)
+}
+
+// GetCdiClient gets an instance of a kubernetes client that includes all the CDI extensions.
+func GetCdiClient() (*cdiClientset.Clientset, error) {
+	cfg, err := clientcmd.BuildConfigFromFlags("", "/opt/cisco/cluster-config")
+	if err != nil {
+		return nil, err
+	}
+	cdiClient, err := cdiClientset.NewForConfig(cfg)
+	if err != nil {
+		return nil, err
+	}
+	return cdiClient, nil
+}
+
+func GetDV(dvName, ns string) (*cdiv1.DataVolume, error) {
+	c, err := GetCdiClient()
+	if err != nil {
+		return nil, err
+	}
+	return c.CdiV1alpha1().DataVolumes(ns).Get(dvName, metav1.GetOptions{})
+}
+
+func IsDownloadInProgress(vm *v1.VirtualMachine, Ns string) bool {
+	for _, dv := range vm.Spec.DataVolumeTemplates {
+		dv, err := GetDV(dv.Name, Ns)
+		if err != nil && dv.Status.Phase != cdiv1.Succeeded &&
+			dv.Status.Phase != cdiv1.Failed && dv.Status.Phase != cdiv1.Unknown {
+			return true
+		}
+	}
+	return false
+}
+
+func DeleteVM(c kubecli.KubevirtClient, name, ns string) error {
+	return c.VirtualMachine(ns).Delete(name, &metav1.DeleteOptions{})
 }
 
 func DeleteVMIRS(c kubecli.KubevirtClient, name, ns string) error {
@@ -496,7 +577,7 @@ func GetPVC(c kubecli.KubevirtClient, name string) (*k8sv1.PersistentVolumeClaim
 }
 
 // Assign affinity and anti affinity labels
-func AddAppAffinityLables(vmi *v1.VirtualMachineInstance, affinityLabel, antiAffinityLabel map[string]string) error {
+func AddAppAffinityLables(vmi *v1.VirtualMachine, affinityLabel, antiAffinityLabel map[string]string) error {
 
 	affLables := k8sv1.Affinity{}
 
@@ -520,7 +601,7 @@ func AddAppAffinityLables(vmi *v1.VirtualMachineInstance, affinityLabel, antiAff
 		affLables.PodAntiAffinity = &podAntiAff
 	}
 
-	vmi.Spec.Affinity = &affLables
+	vmi.Spec.Template.Spec.Affinity = &affLables
 
 	return nil
 }
@@ -594,16 +675,15 @@ type EventFilter struct {
 // sense for a user. The below table helps in filtering those out and
 // or translate them to better versions of the message
 var filterDb = [...]EventFilter{
-	{"Created virtual machine pod ", "Create of virtual machine has been initiated"},
-	{"Deleted virtual machine pod", "Stop of Virtual Machine initiated"},
+	{"Created virtual machine pod ", "Virtual machine start has been initiated"},
+	{"Signaled Graceful Shutdown", "Graceful shutdown of Virtual Machine initiated"},
 	{"Deleted finished virtual machine", "Virtual machine has been stopped"},
-	{"Signaled Deletion", "Virtual Machine stop operation succeeded"},
 	{"VirtualMachineInstance started", "Virtual Machine started"},
-	{"AttachVolume.Attach", ""},
-	{"Killing container", "Virtual Machine has been stopped"},
+	{"The VirtualMachineInstance was shut down", "Virtual Machine has been stopped"},
 	{"Failed to open", ""},
 	{"Failed to copy", ""},
 	{"Unable to mount volumes", ""},
+	{"The VirtualMachineInstance crashed", ""},
 	{"initialization failed for volume", ""},
 	{"NodeNotSchedulable", "node is in maintenance mode"},
 	{"NodeSchedulable", "node is in active state"},
@@ -620,6 +700,9 @@ var filterDb = [...]EventFilter{
 	{"Registered Node", "Node added successfully to the compute cluster."},
 	{"Starting kubelet", "Started node initialization."},
 	{"System OOM encountered", "System is experiencing out of memory condition"},
+	{"Import into", ""},
+	{"Created DataVolume", ""},
+	{"Failed to import", ""},
 }
 
 func filterOutMsg(msg string) (bool, *EventFilter) {
@@ -723,7 +806,7 @@ func WatchKbEvents(client kubecli.KubevirtClient, rC chan ResourceEvent, quitDon
 					rC <- rEvent
 				} else {
 					if !strings.Contains(e.Message, lastmessage) {
-						fmt.Printf("\n%v", e)
+						fmt.Printf("\nraw: %v", e)
 						lastmessage = e.Message
 					}
 				}
@@ -765,7 +848,7 @@ func IsHXVolumeAvailable(client kubecli.KubevirtClient, volName string) (bool, e
 func IsPVCGenVM(claim k8sv1.PersistentVolumeClaim) bool {
 
 	for k, _ := range claim.GetObjectMeta().GetAnnotations() {
-		if k == pvcCreatedByVM {
+		if k == pvcCreatedByVM || k == pvcCDICreated {
 			return true
 		}
 	}
