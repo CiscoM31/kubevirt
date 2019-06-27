@@ -42,6 +42,7 @@ type DiskParams struct {
 const (
 	pvcCreatedByVM = "vmCreated"
 	pvcCDICreated  = "cdi.kubevirt.io/storage.import.source"
+	CloudInitName  = "CloudInitDisk"
 )
 
 func NewVM(namespace string, vmName string) *v1.VirtualMachine {
@@ -316,6 +317,39 @@ func NewDataVolumeEmptyDisk(dataVolumeName string, size string) cdiv1.DataVolume
 	}
 }
 
+type CloudConfigType string
+
+const (
+	CloudConfigTypeNoCloud     CloudConfigType = "NoCloudSource"
+	CloudConfigTypeConfigDrive CloudConfigType = "ConfigDriveSource"
+)
+
+type CloudConfig struct {
+	ConfigType CloudConfigType
+	UserDataSecretRef string
+	UserDataBase64 string
+	UserData string
+	NetworkDataSecretRef string
+	NetworkDataBase64 string
+	NetworkData string
+}
+
+func NewCloudInitConfig(config *CloudConfig) *v1.CloudInitNoCloudSource {
+	cloudInit := &v1.CloudInitNoCloudSource{
+		UserDataBase64: config.UserDataBase64,
+		UserData: config.UserData,
+		NetworkDataBase64: config.NetworkDataBase64,
+		NetworkData: config.NetworkData,
+	}
+	if config.UserDataSecretRef != "" {
+		cloudInit.UserDataSecretRef = &k8sv1.LocalObjectReference{Name: config.UserDataSecretRef}
+	}
+	if config.NetworkDataSecretRef != "" {
+		cloudInit.NetworkDataSecretRef = &k8sv1.LocalObjectReference{Name: config.NetworkDataSecretRef}
+	}
+	return cloudInit
+}
+
 // NewDataVolumeWithHTTPImport initializes a DataVolume struct with HTTP annotations
 func NewDataVolumePVC(dataVolumeName string, size string) cdiv1.DataVolume {
 	return cdiv1.DataVolume{
@@ -333,6 +367,25 @@ func NewDataVolumePVC(dataVolumeName string, size string) cdiv1.DataVolume {
 			},
 		},
 	}
+}
+
+// Attach a CloudInit disk with the given cloud config
+func AttachCloudInitDisk(c kubecli.KubevirtClient, vm *v1.VirtualMachine, config *CloudConfig) error {
+	disk := v1.Disk{}
+	disk.Name = CloudInitName
+	disk.Disk = &v1.DiskTarget{Bus: "virtio"}
+	vmSpec := &vm.Spec.Template.Spec
+	vmSpec.Domain.Devices.Disks = append(vmSpec.Domain.Devices.Disks, disk)
+
+	vol := v1.Volume{Name: CloudInitName}
+
+	if config.ConfigType == CloudConfigTypeNoCloud {
+		vol.CloudInitNoCloud = NewCloudInitConfig(config)
+	} else {
+		// FIXME - needs next version of kubevirt
+	}
+	vmSpec.Volumes = append(vmSpec.Volumes, vol)
+	return nil
 }
 
 func AttachDisk(c kubecli.KubevirtClient, vm *v1.VirtualMachine, diskParams DiskParams) error {
