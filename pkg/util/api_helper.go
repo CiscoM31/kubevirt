@@ -328,21 +328,21 @@ const (
 )
 
 type CloudConfig struct {
-	ConfigType CloudConfigType
-	UserDataSecretRef string
-	UserDataBase64 string
-	UserData string
+	ConfigType           CloudConfigType
+	UserDataSecretRef    string
+	UserDataBase64       string
+	UserData             string
 	NetworkDataSecretRef string
-	NetworkDataBase64 string
-	NetworkData string
+	NetworkDataBase64    string
+	NetworkData          string
 }
 
 func NewCloudInitConfig(config *CloudConfig) *v1.CloudInitNoCloudSource {
 	cloudInit := &v1.CloudInitNoCloudSource{
-		UserDataBase64: config.UserDataBase64,
-		UserData: config.UserData,
+		UserDataBase64:    config.UserDataBase64,
+		UserData:          config.UserData,
 		NetworkDataBase64: config.NetworkDataBase64,
-		NetworkData: config.NetworkData,
+		NetworkData:       config.NetworkData,
 	}
 	if config.UserDataSecretRef != "" {
 		cloudInit.UserDataSecretRef = &k8sv1.LocalObjectReference{Name: config.UserDataSecretRef}
