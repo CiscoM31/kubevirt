@@ -407,20 +407,34 @@ func AttachDisk(c kubecli.KubevirtClient, vm *v1.VirtualMachine, diskParams Disk
 				if err == nil {
 					// HTTP source datavolume
 					dv := NewDataVolumeWithHTTPImport(disk.Name, diskParams.Capacity, diskParams.SfilePath)
-					SetDVLabels(&dv, "DiskOwner", vm.Name)
+					err := SetDVOwnerLabel(&dv, vm.Name)
+					if err != nil {
+						return err
+					}
 					vm.Spec.DataVolumeTemplates = append(vm.Spec.DataVolumeTemplates, dv)
 					vol.DataVolume = &v1.DataVolumeSource{Name: dv.Name}
 					vmSpec.Volumes = append(vmSpec.Volumes, vol)
 				}
 			} else if diskParams.DataDisk != "" {
 				vol.DataVolume = &v1.DataVolumeSource{Name: diskParams.DataDisk}
+				dv1, err := GetDV(diskParams.DataDisk, vm.Namespace)
+				if err != nil {
+					fmt.Printf("Data Disk DataVolume %v does not exist, %v", diskParams.DataDisk, err)
+					return fmt.Errorf("Data Disk DataVolume %v does not exist, %v", diskParams.DataDisk, err)
+				} else {
+					err := SetDVOwnerLabel(dv1, vm.Name)
+					if err != nil {
+						return err
+					}
+					updateDataVolumeFromDefinition(dv1)
+				}
 				vmSpec.Volumes = append(vmSpec.Volumes, vol)
 			} else if diskParams.VolName != "" && diskParams.VolumeHandle == "" {
 				fmt.Printf("\nCreating PVC for %s, class:%v", diskParams.Name, diskParams.Class)
 				pvc, err := CreateISCSIPvc(c, pvcName, "", diskParams.Class, diskParams.Capacity, "default", false,
 					diskParams.VolumeBlockMode, map[string]string{pvcCreatedByVM: "yes"})
 				if err != nil {
-					fmt.Printf("\nFailed to create PVC %s %v", pvcName, err)
+					fmt.Printf("Failed to create PVC %s %v", pvcName, err)
 					return err
 				}
 				updatePVCPrivate(c, pvc)
@@ -758,7 +772,7 @@ func filterOutMsg(msg string) (bool, *EventFilter) {
 func sendOlderEvents(rC chan ResourceEvent, oldEventList *k8sv1.EventList) {
 	// send all older events
 	for _, e := range oldEventList.Items {
-		fmt.Printf("\nOld Event: %v", e)
+		//fmt.Printf("\nOld Event: %v", e)
 		if filter, newevent := filterOutMsg(e.Message); !filter {
 			msg := e.Message
 			if newevent.transMsg != "" {
@@ -962,11 +976,17 @@ func createDataVolumeFromDefinition(clientSet *cdiClientset.Clientset, namespace
 }
 
 // CreateDataVolumeFromDefinition is used by tests to create a testable Data Volume
-func updateDataVolumeFromDefinition(clientSet *cdiClientset.Clientset, namespace string, def *cdiv1.DataVolume) (*cdiv1.DataVolume, error) {
+func updateDataVolumeFromDefinition(def *cdiv1.DataVolume) (*cdiv1.DataVolume, error) {
+	c, err := GetCDIClient()
+	if err != nil {
+		return nil, err
+	}
+
+	ns := def.Namespace
 	var dataVolume *cdiv1.DataVolume
-	err := wait.PollImmediate(dataVolumePollInterval, dataVolumeCreateTime, func() (bool, error) {
+	err = wait.PollImmediate(dataVolumePollInterval, dataVolumeCreateTime, func() (bool, error) {
 		var err error
-		dataVolume, err = clientSet.CdiV1alpha1().DataVolumes(namespace).Update(def)
+		dataVolume, err = c.CdiV1alpha1().DataVolumes(ns).Update(def)
 		if err == nil || apierrs.IsAlreadyExists(err) {
 			return true, nil
 		}
@@ -987,6 +1007,60 @@ func SetDVLabels(dv *cdiv1.DataVolume, label, value string) {
 	dv.ObjectMeta.GetObjectMeta().SetLabels(labels)
 }
 
+func SetDVOwnerLabel(dv *cdiv1.DataVolume, owner string) error {
+	labels := dv.ObjectMeta.GetObjectMeta().GetLabels()
+	if labels == nil {
+		labels = map[string]string{}
+	}
+	if v, ok := labels["DiskOwner"]; ok {
+		if v != owner {
+			return fmt.Errorf("cannot attach disk %v to vm:%v as it is already in use by %v", dv.Name, owner, v)
+		}
+		fmt.Printf("dv:%v, current:%v, new:%v", dv.Name, owner, v)
+	}
+	labels["DiskOwner"] = owner
+	dv.ObjectMeta.GetObjectMeta().SetLabels(labels)
+	return nil
+}
+
+func IsDVDataDisk(dv *cdiv1.DataVolume) bool {
+	labels := dv.ObjectMeta.GetObjectMeta().GetLabels()
+	if labels == nil {
+		return false
+	}
+	if dType, ok := labels["DiskType"]; ok {
+		if dType == "DataDisk" {
+			return true
+		}
+	}
+	return false
+}
+
+func RemoveDVOwnerLabel(dvName, owner, ns string) error {
+	dv, err := GetDV(dvName, ns)
+	if err != nil {
+		return err
+	}
+	if !IsDVDataDisk(dv) {
+		fmt.Printf("Not a data disk %v, cannot remove labels", dv.Name)
+		return fmt.Errorf("Not a data disk %v, cannot remove labels", dv.Name)
+	}
+	labels := dv.ObjectMeta.GetObjectMeta().GetLabels()
+	if labels == nil {
+		fmt.Printf("Failed to find dv:%v labels", dv.Name)
+		return fmt.Errorf("Failed to find dv:%v labels", dv.Name)
+	}
+	if val, ok := labels["DiskOwner"]; ok {
+		if val == owner {
+			delete(labels, "DiskOwner")
+			dv.ObjectMeta.GetObjectMeta().SetLabels(labels)
+			updateDataVolumeFromDefinition(dv)
+		}
+	}
+	fmt.Printf("Failed to find matching label on dv:%v user:%v", dv.Name, owner)
+	return fmt.Errorf("Failed to find matching label on dv:%v user:%v", dv.Name, owner)
+}
+
 // Create a Disk with a DataVolume
 func CreateDataDisk(params DiskParams, ns string) error {
 	var dv cdiv1.DataVolume
@@ -1004,7 +1078,6 @@ func CreateDataDisk(params DiskParams, ns string) error {
 	}
 
 	SetDVLabels(&dv, "DiskType", "DataDisk")
-	SetDVLabels(&dv, "DiskOwner", "IndependentUserCreated")
 
 	c, err := GetCDIClient()
 	if err != nil {
