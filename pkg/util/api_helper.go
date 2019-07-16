@@ -772,7 +772,6 @@ func filterOutMsg(msg string) (bool, *EventFilter) {
 func sendOlderEvents(rC chan ResourceEvent, oldEventList *k8sv1.EventList) {
 	// send all older events
 	for _, e := range oldEventList.Items {
-		//fmt.Printf("\nOld Event: %v", e)
 		if filter, newevent := filterOutMsg(e.Message); !filter {
 			msg := e.Message
 			if newevent.transMsg != "" {
@@ -960,7 +959,7 @@ func GetCDIClient() (*cdiClientset.Clientset, error) {
 	return cdiClient, nil
 }
 
-// CreateDataVolumeFromDefinition is used by tests to create a testable Data Volume
+// Create a Datavolume from a given definition.
 func createDataVolumeFromDefinition(clientSet *cdiClientset.Clientset, namespace string, def *cdiv1.DataVolume) (*cdiv1.DataVolume, error) {
 	var dataVolume *cdiv1.DataVolume
 	err := wait.PollImmediate(dataVolumePollInterval, dataVolumeCreateTime, func() (bool, error) {
@@ -977,7 +976,7 @@ func createDataVolumeFromDefinition(clientSet *cdiClientset.Clientset, namespace
 	return dataVolume, nil
 }
 
-// CreateDataVolumeFromDefinition is used by tests to create a testable Data Volume
+// Update a given datavolume
 func updateDataVolumeFromDefinition(def *cdiv1.DataVolume) (*cdiv1.DataVolume, error) {
 	c, err := GetCDIClient()
 	if err != nil {
@@ -1103,7 +1102,7 @@ func ListDVs(ns string) ([]cdiv1.DataVolume, error) {
 	return dvList.Items, err
 }
 
-// Create a Disk with a DataVolume
+// Delete a DataDisk
 func DeleteDataDisk(diskName string, ns string) error {
 	c, err := GetCDIClient()
 	if err != nil {
