@@ -9,17 +9,19 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"os"
+	"path/filepath"
+	"net/url"
 
 	k8sv1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/rand"
-
-	"net/url"
-
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/tools/clientcmd"
+	apierrs "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/util/wait"
 
 	cdiv1 "kubevirt.io/containerized-data-importer/pkg/apis/core/v1alpha1"
 	cdiClientset "kubevirt.io/containerized-data-importer/pkg/client/clientset/versioned"
@@ -31,6 +33,7 @@ type DiskParams struct {
 	Name, VolName, Class, FilePath, Bus string
 	Svolume, SfilePath                  string
 	Evolume, EfilePath                  string
+	DataDisk                            string
 	Capacity, Format                    string
 	VolumeHandle                        string
 	IsCdrom                             bool
@@ -325,21 +328,21 @@ const (
 )
 
 type CloudConfig struct {
-	ConfigType CloudConfigType
-	UserDataSecretRef string
-	UserDataBase64 string
-	UserData string
+	ConfigType           CloudConfigType
+	UserDataSecretRef    string
+	UserDataBase64       string
+	UserData             string
 	NetworkDataSecretRef string
-	NetworkDataBase64 string
-	NetworkData string
+	NetworkDataBase64    string
+	NetworkData          string
 }
 
 func NewCloudInitConfig(config *CloudConfig) *v1.CloudInitNoCloudSource {
 	cloudInit := &v1.CloudInitNoCloudSource{
-		UserDataBase64: config.UserDataBase64,
-		UserData: config.UserData,
+		UserDataBase64:    config.UserDataBase64,
+		UserData:          config.UserData,
 		NetworkDataBase64: config.NetworkDataBase64,
-		NetworkData: config.NetworkData,
+		NetworkData:       config.NetworkData,
 	}
 	if config.UserDataSecretRef != "" {
 		cloudInit.UserDataSecretRef = &k8sv1.LocalObjectReference{Name: config.UserDataSecretRef}
@@ -348,25 +351,6 @@ func NewCloudInitConfig(config *CloudConfig) *v1.CloudInitNoCloudSource {
 		cloudInit.NetworkDataSecretRef = &k8sv1.LocalObjectReference{Name: config.NetworkDataSecretRef}
 	}
 	return cloudInit
-}
-
-// NewDataVolumeWithHTTPImport initializes a DataVolume struct with HTTP annotations
-func NewDataVolumePVC(dataVolumeName string, size string) cdiv1.DataVolume {
-	return cdiv1.DataVolume{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: dataVolumeName,
-		},
-		Spec: cdiv1.DataVolumeSpec{
-			PVC: &k8sv1.PersistentVolumeClaimSpec{
-				AccessModes: []k8sv1.PersistentVolumeAccessMode{k8sv1.ReadWriteOnce},
-				Resources: k8sv1.ResourceRequirements{
-					Requests: k8sv1.ResourceList{
-						k8sv1.ResourceName(k8sv1.ResourceStorage): resource.MustParse(size),
-					},
-				},
-			},
-		},
-	}
 }
 
 // Attach a CloudInit disk with the given cloud config
@@ -423,16 +407,34 @@ func AttachDisk(c kubecli.KubevirtClient, vm *v1.VirtualMachine, diskParams Disk
 				if err == nil {
 					// HTTP source datavolume
 					dv := NewDataVolumeWithHTTPImport(disk.Name, diskParams.Capacity, diskParams.SfilePath)
+					err := SetDVOwnerLabel(&dv, vm.Name)
+					if err != nil {
+						return err
+					}
 					vm.Spec.DataVolumeTemplates = append(vm.Spec.DataVolumeTemplates, dv)
 					vol.DataVolume = &v1.DataVolumeSource{Name: dv.Name}
 					vmSpec.Volumes = append(vmSpec.Volumes, vol)
 				}
+			} else if diskParams.DataDisk != "" {
+				vol.DataVolume = &v1.DataVolumeSource{Name: diskParams.DataDisk}
+				dv1, err := GetDV(diskParams.DataDisk, vm.Namespace)
+				if err != nil {
+					fmt.Printf("Data Disk DataVolume %v does not exist, %v", diskParams.DataDisk, err)
+					return fmt.Errorf("Data Disk DataVolume %v does not exist, %v", diskParams.DataDisk, err)
+				} else {
+					err := SetDVOwnerLabel(dv1, vm.Name)
+					if err != nil {
+						return err
+					}
+					updateDataVolumeFromDefinition(dv1)
+				}
+				vmSpec.Volumes = append(vmSpec.Volumes, vol)
 			} else if diskParams.VolName != "" && diskParams.VolumeHandle == "" {
 				fmt.Printf("\nCreating PVC for %s, class:%v", diskParams.Name, diskParams.Class)
 				pvc, err := CreateISCSIPvc(c, pvcName, "", diskParams.Class, diskParams.Capacity, "default", false,
 					diskParams.VolumeBlockMode, map[string]string{pvcCreatedByVM: "yes"})
 				if err != nil {
-					fmt.Printf("\nFailed to create PVC %s %v", pvcName, err)
+					fmt.Printf("Failed to create PVC %s %v", pvcName, err)
 					return err
 				}
 				updatePVCPrivate(c, pvc)
@@ -770,7 +772,6 @@ func filterOutMsg(msg string) (bool, *EventFilter) {
 func sendOlderEvents(rC chan ResourceEvent, oldEventList *k8sv1.EventList) {
 	// send all older events
 	for _, e := range oldEventList.Items {
-		fmt.Printf("\nOld Event: %v", e)
 		if filter, newevent := filterOutMsg(e.Message); !filter {
 			msg := e.Message
 			if newevent.transMsg != "" {
@@ -907,4 +908,223 @@ func IsPVCGenVM(claim k8sv1.PersistentVolumeClaim) bool {
 	}
 
 	return false
+}
+
+// check if file exists
+func fileExists(path string) (bool, error) {
+	_, err := os.Stat(path)
+	if err == nil {
+		return true, nil
+	}
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	return false, err
+}
+
+
+const (
+        dataVolumePollInterval = 3 * time.Second
+        dataVolumeCreateTime   = 60 * time.Second
+
+        DISKOWNER_LABEL     = "DiskOwner"
+        DISKTYPE_LABEL      = "DiskType"
+        DISKTYPE_DATA       = "DataDisk"
+)
+
+
+// Obtain the ref to the kubevirt client object
+func GetCDIClient() (*cdiClientset.Clientset, error) {
+	home := os.Getenv("HOME")
+	if home == "" {
+		home = os.Getenv("USERPROFILE")
+	}
+
+	// use kubeconfig from fixed location
+	kubeconfig := "/opt/cisco/cluster-config"
+
+	if exists, _ := fileExists(kubeconfig); !exists {
+		kubeconfig = filepath.Join(home, ".kube", "config")
+	}
+
+	cfg, err := clientcmd.BuildConfigFromFlags("", kubeconfig)
+	if err != nil {
+		return nil, err
+	}
+	cdiClient, err := cdiClientset.NewForConfig(cfg)
+	if err != nil {
+		return nil, err
+	}
+
+	return cdiClient, nil
+}
+
+// Create a Datavolume from a given definition.
+func createDataVolumeFromDefinition(clientSet *cdiClientset.Clientset, namespace string, def *cdiv1.DataVolume) (*cdiv1.DataVolume, error) {
+	var dataVolume *cdiv1.DataVolume
+	err := wait.PollImmediate(dataVolumePollInterval, dataVolumeCreateTime, func() (bool, error) {
+		var err error
+		dataVolume, err = clientSet.CdiV1alpha1().DataVolumes(namespace).Create(def)
+		if err == nil || apierrs.IsAlreadyExists(err) {
+			return true, nil
+		}
+		return false, err
+	})
+	if err != nil {
+		return nil, err
+	}
+	return dataVolume, nil
+}
+
+// Update a given datavolume
+func updateDataVolumeFromDefinition(def *cdiv1.DataVolume) (*cdiv1.DataVolume, error) {
+	c, err := GetCDIClient()
+	if err != nil {
+		return nil, err
+	}
+
+	ns := def.Namespace
+	var dataVolume *cdiv1.DataVolume
+	err = wait.PollImmediate(dataVolumePollInterval, dataVolumeCreateTime, func() (bool, error) {
+		var err error
+		dataVolume, err = c.CdiV1alpha1().DataVolumes(ns).Update(def)
+		if err == nil || apierrs.IsAlreadyExists(err) {
+			return true, nil
+		}
+		return false, err
+	})
+	if err != nil {
+		return nil, err
+	}
+	return dataVolume, nil
+}
+
+func SetDVLabels(dv *cdiv1.DataVolume, label, value string) {
+	labels := dv.ObjectMeta.GetObjectMeta().GetLabels()
+	if labels == nil {
+		labels = map[string]string{}
+	}
+	labels[label] = value
+	dv.ObjectMeta.GetObjectMeta().SetLabels(labels)
+}
+
+func SetDVOwnerLabel(dv *cdiv1.DataVolume, owner string) error {
+	labels := dv.ObjectMeta.GetObjectMeta().GetLabels()
+	if labels == nil {
+		labels = map[string]string{}
+	}
+	if v, ok := labels[DISKOWNER_LABEL]; ok {
+		if v != owner {
+			return fmt.Errorf("cannot attach disk %v to vm:%v as it is already in use by %v", dv.Name, owner, v)
+		}
+		fmt.Printf("dv:%v, current:%v, new:%v", dv.Name, owner, v)
+	}
+	labels[DISKOWNER_LABEL] = owner
+	dv.ObjectMeta.GetObjectMeta().SetLabels(labels)
+	return nil
+}
+
+func IsDVDataDisk(dv *cdiv1.DataVolume) bool {
+	labels := dv.ObjectMeta.GetObjectMeta().GetLabels()
+	if labels == nil {
+		return false
+	}
+	if dType, ok := labels[DISKTYPE_LABEL]; ok {
+		if dType == DISKTYPE_DATA {
+			return true
+		}
+	}
+	return false
+}
+
+// Remove Owner Labels on the DV
+func RemoveDVOwnerLabel(dvName, owner, ns string) error {
+	dv, err := GetDV(dvName, ns)
+	if err != nil {
+		return err
+	}
+	if !IsDVDataDisk(dv) {
+		fmt.Printf("Not a data disk %v, cannot remove labels", dv.Name)
+		return fmt.Errorf("Not a data disk %v, cannot remove labels", dv.Name)
+	}
+	labels := dv.ObjectMeta.GetObjectMeta().GetLabels()
+	if labels == nil {
+		fmt.Printf("Failed to find dv:%v labels", dv.Name)
+		return fmt.Errorf("Failed to find dv:%v labels", dv.Name)
+	}
+	if val, ok := labels[DISKOWNER_LABEL]; ok {
+		if val == owner {
+			delete(labels, DISKOWNER_LABEL)
+			dv.ObjectMeta.GetObjectMeta().SetLabels(labels)
+			updateDataVolumeFromDefinition(dv)
+		}
+	}
+	fmt.Printf("Failed to find matching label on dv:%v user:%v", dv.Name, owner)
+	return fmt.Errorf("Failed to find matching label on dv:%v user:%v", dv.Name, owner)
+}
+
+// Create a Disk with a DataVolume
+func CreateDataDisk(params DiskParams, ns string) error {
+	var dv cdiv1.DataVolume
+
+	if params.SfilePath == "" {
+		dv = NewDataVolumeEmptyDisk(params.Name, params.Capacity)
+	} else {
+		// check if its HTTP
+		_, err := url.ParseRequestURI(params.SfilePath)
+		if err == nil {
+			dv = NewDataVolumeWithHTTPImport(params.Name, params.Capacity, params.SfilePath)
+		} else {
+			return err
+		}
+	}
+
+	SetDVLabels(&dv, DISKTYPE_LABEL, DISKTYPE_DATA)
+
+	c, err := GetCDIClient()
+	if err != nil {
+		return err
+	}
+
+	_, err = createDataVolumeFromDefinition(c, ns, &dv)
+
+	return err
+}
+
+// List all the DVs in the given namespace
+func ListDVs(ns string) ([]cdiv1.DataVolume, error) {
+	c, err := GetCDIClient()
+	if err != nil {
+		return nil, err
+	}
+	dvList, err := c.CdiV1alpha1().DataVolumes(ns).List(metav1.ListOptions{})
+
+	return dvList.Items, err
+}
+
+// Delete a DataDisk
+func DeleteDataDisk(diskName string, ns string) error {
+	c, err := GetCDIClient()
+	if err != nil {
+		return err
+	}
+
+	dv, err := c.CdiV1alpha1().DataVolumes(ns).Get(diskName, metav1.GetOptions{})
+	if err != nil || dv == nil {
+		return fmt.Errorf("Could not find disk %v, err:%v", diskName, err)
+	}
+
+	labels := dv.ObjectMeta.GetObjectMeta().GetLabels()
+	if labels != nil {
+		if v, ok := labels[DISKTYPE_LABEL]; ok {
+			if v != DISKTYPE_DATA {
+				if owner, ok := labels[DISKOWNER_LABEL]; ok {
+					return fmt.Errorf("disk %v is a VM owned disk, owner VM: %v", diskName, owner)
+				}
+				return fmt.Errorf("disk %d is a VM owned disk. Can only be deleted when VM is deleted", diskName)
+			}
+		}
+	}
+
+	return c.CdiV1alpha1().DataVolumes(ns).Delete(diskName, &metav1.DeleteOptions{})
 }
