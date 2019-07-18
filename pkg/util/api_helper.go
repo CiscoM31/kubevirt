@@ -1024,7 +1024,24 @@ func SetDVOwnerLabel(dv *cdiv1.DataVolume, owner string) error {
 	return nil
 }
 
-func IsDVDataDisk(dv *cdiv1.DataVolume) bool {
+func isDVDataDisk(dv *cdiv1.DataVolume) bool {
+	labels := dv.ObjectMeta.GetObjectMeta().GetLabels()
+	if labels == nil {
+		return false
+	}
+	if dType, ok := labels[DISKTYPE_LABEL]; ok {
+		if dType == DISKTYPE_DATA {
+			return true
+		}
+	}
+	return false
+}
+
+func IsDVDataDisk(dvName, ns string) bool {
+	dv, err := GetDV(dvName, ns)
+	if err != nil {
+		return false
+	}
 	labels := dv.ObjectMeta.GetObjectMeta().GetLabels()
 	if labels == nil {
 		return false
@@ -1043,14 +1060,14 @@ func RemoveDVOwnerLabel(dvName, owner, ns string) error {
 	if err != nil {
 		return err
 	}
-	if !IsDVDataDisk(dv) {
+	if !isDVDataDisk(dv) {
 		fmt.Printf("Not a data disk %v, cannot remove labels", dv.Name)
-		return fmt.Errorf("Not a data disk %v, cannot remove labels", dv.Name)
+		return fmt.Errorf("not a data disk %v, cannot remove labels", dv.Name)
 	}
 	labels := dv.ObjectMeta.GetObjectMeta().GetLabels()
 	if labels == nil {
 		fmt.Printf("Failed to find dv:%v labels", dv.Name)
-		return fmt.Errorf("Failed to find dv:%v labels", dv.Name)
+		return fmt.Errorf("failed to find dv:%v labels", dv.Name)
 	}
 	if val, ok := labels[DISKOWNER_LABEL]; ok {
 		if val == owner {
@@ -1060,7 +1077,7 @@ func RemoveDVOwnerLabel(dvName, owner, ns string) error {
 		}
 	}
 	fmt.Printf("Failed to find matching label on dv:%v user:%v", dv.Name, owner)
-	return fmt.Errorf("Failed to find matching label on dv:%v user:%v", dv.Name, owner)
+	return fmt.Errorf("failed to find matching label on dv:%v user:%v", dv.Name, owner)
 }
 
 // Create a Disk with a DataVolume
@@ -1102,8 +1119,22 @@ func ListDVs(ns string) ([]cdiv1.DataVolume, error) {
 	return dvList.Items, err
 }
 
+func GetDiskDV(name, ns string) (*cdiv1.DataVolume, error) {
+	c, err := GetCDIClient()
+	if err != nil {
+		return nil, err
+	}
+
+	dv, err := c.CdiV1alpha1().DataVolumes(ns).Get(name, metav1.GetOptions{})
+	if err != nil || dv == nil {
+		return nil, fmt.Errorf("Could not find disk %v, err:%v", name, err)
+	}
+
+	return dv, nil
+}
+
 // Delete a DataDisk
-func DeleteDataDisk(diskName string, ns string) error {
+func DeleteDataDisk(diskName, ns string) error {
 	c, err := GetCDIClient()
 	if err != nil {
 		return err
@@ -1116,13 +1147,8 @@ func DeleteDataDisk(diskName string, ns string) error {
 
 	labels := dv.ObjectMeta.GetObjectMeta().GetLabels()
 	if labels != nil {
-		if v, ok := labels[DISKTYPE_LABEL]; ok {
-			if v != DISKTYPE_DATA {
-				if owner, ok := labels[DISKOWNER_LABEL]; ok {
-					return fmt.Errorf("disk %v is a VM owned disk, owner VM: %v", diskName, owner)
-				}
-				return fmt.Errorf("disk %d is a VM owned disk. Can only be deleted when VM is deleted", diskName)
-			}
+		if owner, ok := labels[DISKOWNER_LABEL]; ok {
+			return fmt.Errorf("disk %v is in use by VM %v and cannot be deleted", diskName, owner)
 		}
 	}
 
