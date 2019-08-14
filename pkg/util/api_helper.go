@@ -1180,3 +1180,56 @@ func DeleteDataDisk(diskName, ns string) error {
 
 	return c.CdiV1alpha1().DataVolumes(ns).Delete(diskName, &metav1.DeleteOptions{})
 }
+
+// Trigger live migration on the given VM
+func LiveMigrateVM(c kubecli.KubevirtClient, vmName, ns string) error {
+	if c == nil {
+		return fmt.Errorf("Invalid kubevirt client")
+	}
+
+	migrate := &v1.VirtualMachineInstanceMigration{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      vmName+"-migration",
+			Namespace: ns,
+		},
+		Spec: v1.VirtualMachineInstanceMigrationSpec{VMIName: vmName},
+	}
+
+	jobs, err := c.VirtualMachineInstanceMigration(ns).List(&metav1.ListOptions{})
+	if err != nil {
+		return err
+	}
+	for _, m:= range jobs.Items {
+		if m.Spec.VMIName == vmName {
+			if m.Status.Phase != v1.MigrationSucceeded &&
+				m.Status.Phase != v1.MigrationFailed {
+					return fmt.Errorf("A migration job is already in progress")
+			}
+		}
+	}
+	c.VirtualMachineInstanceMigration(ns).Delete(migrate.Name, &metav1.DeleteOptions{})
+	_, err = c.VirtualMachineInstanceMigration(ns).Create(migrate)
+	return err
+}
+
+// Get live migration status
+func GetLiveMigrateStatus(c kubecli.KubevirtClient, vmName, ns string) (string, error) {
+	if c == nil {
+		return "", fmt.Errorf("Invalid kubevirt client")
+	}
+
+	jobs, err := c.VirtualMachineInstanceMigration(ns).List(&metav1.ListOptions{})
+	if err != nil {
+		return "", err
+	}
+
+	for _, m:= range jobs.Items {
+		if m.Spec.VMIName == vmName {
+			if m.Status.Phase == v1.MigrationRunning {
+				return "Migration in Progress", nil
+			}
+			return string(m.Status.Phase), nil
+		}
+	}
+	return "", nil
+}
