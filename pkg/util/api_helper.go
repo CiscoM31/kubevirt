@@ -745,6 +745,7 @@ type ResourceEvent struct {
 	Component string
 	Type      string
 	UID       string
+	Host      string
 	FirstSeen time.Time
 	LastSeen  time.Time
 }
@@ -786,6 +787,9 @@ var filterDb = [...]EventFilter{
 	{"Import into", ""},
 	{"Created DataVolume", ""},
 	{"Failed to import", ""},
+	{"Created migration target", "Migration of VM initiated"},
+	{"VirtualMachineInstance is migrating", "VM is migrating"},
+	{"node reported migration succeeded", "VM successfully migrated"},
 }
 
 func filterOutMsg(msg string) (bool, *EventFilter) {
@@ -814,6 +818,7 @@ func sendOlderEvents(rC chan ResourceEvent, oldEventList *k8sv1.EventList) {
 				e.Source.Component,
 				e.Type,
 				string(e.UID),
+				e.Source.Host,
 				e.FirstTimestamp.Time,
 				e.LastTimestamp.Time,
 			}
@@ -882,6 +887,7 @@ func WatchKbEvents(client kubecli.KubevirtClient, rC chan ResourceEvent, quitDon
 						e.Source.Component,
 						e.Type,
 						string(e.UID),
+						e.Source.Host,
 						e.FirstTimestamp.Time,
 						e.LastTimestamp.Time,
 					}
@@ -1189,7 +1195,7 @@ func LiveMigrateVM(c kubecli.KubevirtClient, vmName, ns string) error {
 
 	migrate := &v1.VirtualMachineInstanceMigration{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      vmName+"-migration",
+			Name:      vmName + "-migration",
 			Namespace: ns,
 		},
 		Spec: v1.VirtualMachineInstanceMigrationSpec{VMIName: vmName},
@@ -1199,11 +1205,11 @@ func LiveMigrateVM(c kubecli.KubevirtClient, vmName, ns string) error {
 	if err != nil {
 		return err
 	}
-	for _, m:= range jobs.Items {
+	for _, m := range jobs.Items {
 		if m.Spec.VMIName == vmName {
 			if m.Status.Phase != v1.MigrationSucceeded &&
 				m.Status.Phase != v1.MigrationFailed {
-					return fmt.Errorf("A migration job is already in progress")
+				return fmt.Errorf("A migration job is already in progress")
 			}
 		}
 	}
@@ -1223,7 +1229,7 @@ func GetLiveMigrateStatus(c kubecli.KubevirtClient, vmName, ns string) (string, 
 		return "", err
 	}
 
-	for _, m:= range jobs.Items {
+	for _, m := range jobs.Items {
 		if m.Spec.VMIName == vmName {
 			if m.Status.Phase == v1.MigrationRunning {
 				return "Migration in Progress", nil
