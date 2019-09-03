@@ -580,6 +580,20 @@ func GetVM(c kubecli.KubevirtClient, vmname, ns string) (*v1.VirtualMachine, err
 	return nil, errors2.New(errStr)
 }
 
+func GetVMRef(c kubecli.KubevirtClient, vmName, ns string) (string, error) {
+    genName := fmt.Sprintf("virt-launcher-%s-", vmName)
+	list, err := c.CoreV1().Pods(ns).List(metav1.ListOptions{})
+	if err != nil {
+		return "", err
+	}
+	for _, pod := range list.Items {
+		if pod.GenerateName ==  genName && pod.Annotations["kubevirt.io/migrationJobName"] == "" {
+			return strings.TrimLeft(pod.Name, "virt-launcher-"), nil
+		}
+	}
+	return "", fmt.Errorf("Pod for VM %s not found", vmName)
+}
+
 // GetCdiClient gets an instance of a kubernetes client that includes all the CDI extensions.
 func GetCdiClient() (*cdiClientset.Clientset, error) {
 	cfg, err := clientcmd.BuildConfigFromFlags("", "/opt/cisco/cluster-config")
