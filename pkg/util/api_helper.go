@@ -457,22 +457,13 @@ func AttachDisk(c kubecli.KubevirtClient, vm *v1.VirtualMachine, diskParams Disk
 					updateDataVolumeFromDefinition(dv1)
 				}
 				vmSpec.Volumes = append(vmSpec.Volumes, vol)
-			} else if diskParams.VolName != "" && diskParams.VolumeHandle == "" {
-				fmt.Printf("\nCreating PVC for %s, class:%v", diskParams.Name, diskParams.Class)
-				pvc, err := CreateISCSIPvc(c, pvcName, "", diskParams.Class, diskParams.Capacity, "default", false,
-					diskParams.VolumeBlockMode, map[string]string{pvcCreatedByVM: "yes"})
-				if err != nil {
-					fmt.Printf("Failed to create PVC %s %v", pvcName, err)
-					return err
-				}
-				updatePVCPrivate(c, pvc)
-				vol.PersistentVolumeClaim = &k8sv1.PersistentVolumeClaimVolumeSource{
-					ClaimName: pvcName,
-				}
-				vmSpec.Volumes = append(vmSpec.Volumes, vol)
 			} else {
 				//empty disk
 				dv := NewDataVolumeEmptyDisk(diskParams)
+				err := SetDVOwnerLabel(&dv, vm.Name)
+				if err != nil {
+					return err
+				}
 				vm.Spec.DataVolumeTemplates = append(vm.Spec.DataVolumeTemplates, dv)
 				vol.DataVolume = &v1.DataVolumeSource{Name: dv.Name}
 				vmSpec.Volumes = append(vmSpec.Volumes, vol)
