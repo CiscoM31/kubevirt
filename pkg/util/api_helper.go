@@ -520,6 +520,11 @@ func GetVMList(c kubecli.KubevirtClient, ns string) (*v1.VirtualMachineList, err
 	return vms, err
 }
 
+func GetPodList(c kubecli.KubevirtClient, ns string) (*k8sv1.PodList, error) {
+	pods, err := c.CoreV1().Pods(ns).List(metav1.ListOptions{})
+	return pods, err
+}
+
 func GetVMIRSList(c kubecli.KubevirtClient, ns string) (*v1.VirtualMachineInstanceReplicaSetList, error) {
 	vms, err := c.ReplicaSet(ns).List(metav1.ListOptions{})
 	return vms, err
