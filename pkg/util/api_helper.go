@@ -22,6 +22,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/rand"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/tools/clientcmd"
+	"k8s.io/apimachinery/pkg/labels"
 
 	cdiv1 "kubevirt.io/containerized-data-importer/pkg/apis/core/v1alpha1"
 	cdiClientset "kubevirt.io/containerized-data-importer/pkg/client/clientset/versioned"
@@ -576,18 +577,40 @@ func GetVM(c kubecli.KubevirtClient, vmname, ns string) (*v1.VirtualMachine, err
 	return nil, errors2.New(errStr)
 }
 
-func GetVMRef(c kubecli.KubevirtClient, vmName, ns string) (string, error) {
-    genName := fmt.Sprintf("virt-launcher-%s-", vmName)
-	list, err := c.CoreV1().Pods(ns).List(metav1.ListOptions{})
-	if err != nil {
-		return "", err
-	}
-	for _, pod := range list.Items {
-		if pod.GenerateName ==  genName && pod.Annotations["kubevirt.io/migrationJobName"] == "" {
-			return strings.TrimLeft(pod.Name, "virt-launcher-"), nil
-		}
-	}
-	return "", fmt.Errorf("Pod for VM %s not found", vmName)
+func GetVMPodRef(c kubecli.KubevirtClient, vmName, ns string) (string, error) {
+    label := map[string]string{"name": vmName}
+
+    //filter our request to find pods for this VM
+    list, err := c.CoreV1().Pods(ns).List(metav1.ListOptions{LabelSelector:labels.Set(label).String()})
+    if err != nil {
+        return "", err
+    }
+
+    vmref := ""
+    var ts *time.Time
+    for _, pod := range list.Items {
+        // look for the oldest running pod. That is the pod that the VM is on
+        // if a migration is in progress, there will be a newer pod and VM
+        // will not be running on it yet.
+        if pod.Status.Phase == "Running" {
+            if ts == nil {
+                t := pod.GetCreationTimestamp().Time
+                ts = &t
+                vmref = strings.TrimLeft(pod.Name, "virt-launcher-")
+            } else {
+                // is there an older pod
+                if pod.GetCreationTimestamp().Time.Sub(*ts) < 0 {
+                    t := pod.GetCreationTimestamp().Time
+                    ts = &t
+                    vmref = strings.TrimLeft(pod.Name, "virt-launcher-")
+                }
+            }
+        }
+    }
+    if vmref != "" {
+        return vmref, nil
+    }
+    return "", fmt.Errorf("Pod for VM %s not found", vmName)
 }
 
 // GetCdiClient gets an instance of a kubernetes client that includes all the CDI extensions.
