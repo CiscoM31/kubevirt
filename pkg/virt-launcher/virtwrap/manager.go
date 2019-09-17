@@ -847,8 +847,8 @@ func (l *LibvirtDomainManager) SyncVMI(vmi *v1.VirtualMachineInstance, useEmulat
 		if volume.VolumeSource.PersistentVolumeClaim != nil || volume.VolumeSource.DataVolume != nil {
 			isBlockPVC, err := isBlockDeviceVolume(volume.Name)
 			if err != nil {
-				logger.Reason(err).Errorf("failed to detect volume mode for Volume %v and PVC %v.",
-					volume.Name, volume.VolumeSource.PersistentVolumeClaim.ClaimName)
+				logger.Reason(err).Errorf("failed to detect volume mode for Volume %v",
+					volume.Name)
 				return nil, err
 			}
 			isBlockPVCMap[volume.Name] = isBlockPVC
