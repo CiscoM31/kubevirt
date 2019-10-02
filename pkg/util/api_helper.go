@@ -18,11 +18,11 @@ import (
 	apierrs "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/rand"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/tools/clientcmd"
-	"k8s.io/apimachinery/pkg/labels"
 
 	cdiv1 "kubevirt.io/containerized-data-importer/pkg/apis/core/v1alpha1"
 	cdiClientset "kubevirt.io/containerized-data-importer/pkg/client/clientset/versioned"
@@ -39,9 +39,11 @@ type DiskParams struct {
 	VolumeHandle                        string
 	IsCdrom                             bool
 	VolumeBlockMode                     bool
+	CloneFromDisk                       string
 	HxVolName                           string
 	Order                               uint
 	Shared                              bool
+	NameSpace                           string
 }
 
 const (
@@ -283,7 +285,7 @@ func SetResources(vm *v1.VirtualMachine, cpu, memory, cpuModel string) error {
 }
 
 // NewDataVolumeWithHTTPImport initializes a DataVolume struct with HTTP annotations
-func NewDataVolumeWithHTTPImport(params *DiskParams) cdiv1.DataVolume {
+func NewDataVolumeWithHTTPImport(params *DiskParams) *cdiv1.DataVolume {
 	mode := k8sv1.PersistentVolumeFilesystem
 	if params.VolumeBlockMode {
 		mode = k8sv1.PersistentVolumeBlock
@@ -293,9 +295,10 @@ func NewDataVolumeWithHTTPImport(params *DiskParams) cdiv1.DataVolume {
 		accessMode = []k8sv1.PersistentVolumeAccessMode{k8sv1.ReadWriteMany}
 	}
 
-	return cdiv1.DataVolume{
+	return &cdiv1.DataVolume{
 		ObjectMeta: metav1.ObjectMeta{
-			Name: params.Name,
+			Namespace: params.NameSpace,
+			Name:      params.Name,
 		},
 		Spec: cdiv1.DataVolumeSpec{
 			Source: cdiv1.DataVolumeSource{
@@ -316,8 +319,52 @@ func NewDataVolumeWithHTTPImport(params *DiskParams) cdiv1.DataVolume {
 	}
 }
 
+// New DataVolume with Clone from another
+func NewDataVolumeWithClone(params DiskParams) (*cdiv1.DataVolume, error) {
+	var dv *cdiv1.DataVolume
+	if params.CloneFromDisk != "" {
+		dvList, _ := ListDVs(params.NameSpace)
+		for _, d := range dvList {
+			if d.Name == params.CloneFromDisk {
+				dv = &d
+				break
+			}
+		}
+		if dv == nil || dv.Spec.PVC == nil {
+			return nil, fmt.Errorf("Source disk %v to clone from could not be found", params.CloneFromDisk)
+		}
+	}
+
+	mode := k8sv1.PersistentVolumeFilesystem
+	if params.VolumeBlockMode {
+		mode = k8sv1.PersistentVolumeBlock
+	}
+
+	return &cdiv1.DataVolume{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: params.NameSpace,
+			Name:      params.Name,
+		},
+		Spec: cdiv1.DataVolumeSpec{
+			Source: cdiv1.DataVolumeSource{
+				PVC: &cdiv1.DataVolumeSourcePVC{
+					Namespace: params.NameSpace,
+					Name:      params.CloneFromDisk,
+				},
+			},
+			PVC: &k8sv1.PersistentVolumeClaimSpec{
+				VolumeMode:  &mode,
+				AccessModes: dv.Spec.PVC.AccessModes,
+				Resources: k8sv1.ResourceRequirements{
+					Requests: dv.Spec.PVC.Resources.Requests,
+				},
+			},
+		},
+	}, nil
+}
+
 // NewDataVolumeWithHTTPImport initializes a DataVolume struct with HTTP annotations
-func NewDataVolumeEmptyDisk(params DiskParams) cdiv1.DataVolume {
+func NewDataVolumeEmptyDisk(params DiskParams) *cdiv1.DataVolume {
 	mode := k8sv1.PersistentVolumeFilesystem
 	if params.VolumeBlockMode {
 		mode = k8sv1.PersistentVolumeBlock
@@ -328,9 +375,10 @@ func NewDataVolumeEmptyDisk(params DiskParams) cdiv1.DataVolume {
 		accessMode = []k8sv1.PersistentVolumeAccessMode{k8sv1.ReadWriteMany}
 	}
 
-	return cdiv1.DataVolume{
+	return &cdiv1.DataVolume{
 		ObjectMeta: metav1.ObjectMeta{
-			Name: params.Name,
+			Namespace: params.NameSpace,
+			Name:      params.Name,
 		},
 		Spec: cdiv1.DataVolumeSpec{
 			Source: cdiv1.DataVolumeSource{
@@ -436,14 +484,26 @@ func AttachDisk(c kubecli.KubevirtClient, vm *v1.VirtualMachine, diskParams Disk
 				if err == nil {
 					// HTTP source datavolume
 					dv := NewDataVolumeWithHTTPImport(&diskParams)
-					err := SetDVOwnerLabel(&dv, vm.Name)
+					err := SetDVOwnerLabel(dv, vm.Name)
 					if err != nil {
 						return err
 					}
-					vm.Spec.DataVolumeTemplates = append(vm.Spec.DataVolumeTemplates, dv)
+					vm.Spec.DataVolumeTemplates = append(vm.Spec.DataVolumeTemplates, *dv)
 					vol.DataVolume = &v1.DataVolumeSource{Name: dv.Name}
 					vmSpec.Volumes = append(vmSpec.Volumes, vol)
 				}
+			} else if diskParams.CloneFromDisk != "" {
+				dv, err := NewDataVolumeWithClone(diskParams)
+				if err != nil || dv == nil {
+					return err
+				}
+				err = SetDVOwnerLabel(dv, vm.Name)
+				if err != nil {
+					return err
+				}
+				vm.Spec.DataVolumeTemplates = append(vm.Spec.DataVolumeTemplates, *dv)
+				vol.DataVolume = &v1.DataVolumeSource{Name: dv.Name}
+				vmSpec.Volumes = append(vmSpec.Volumes, vol)
 			} else if diskParams.DataDisk != "" {
 				vol.DataVolume = &v1.DataVolumeSource{Name: diskParams.DataDisk}
 				dv1, err := GetDV(diskParams.DataDisk, vm.Namespace)
@@ -461,11 +521,11 @@ func AttachDisk(c kubecli.KubevirtClient, vm *v1.VirtualMachine, diskParams Disk
 			} else {
 				//empty disk
 				dv := NewDataVolumeEmptyDisk(diskParams)
-				err := SetDVOwnerLabel(&dv, vm.Name)
+				err := SetDVOwnerLabel(dv, vm.Name)
 				if err != nil {
 					return err
 				}
-				vm.Spec.DataVolumeTemplates = append(vm.Spec.DataVolumeTemplates, dv)
+				vm.Spec.DataVolumeTemplates = append(vm.Spec.DataVolumeTemplates, *dv)
 				vol.DataVolume = &v1.DataVolumeSource{Name: dv.Name}
 				vmSpec.Volumes = append(vmSpec.Volumes, vol)
 			}
@@ -483,7 +543,7 @@ func AttachDisk(c kubecli.KubevirtClient, vm *v1.VirtualMachine, diskParams Disk
 					return err
 				}
 				fmt.Printf("\nCreating PVC for %s, class:%v", diskParams.Name, diskParams.Class)
-				pvc, err = CreateISCSIPvc(c, pvcName, pvName, diskParams.Class, diskParams.Capacity, "default", false,
+				pvc, err = CreateISCSIPvc(c, pvcName, pvName, diskParams.Class, diskParams.Capacity, diskParams.NameSpace, false,
 					diskParams.VolumeBlockMode, map[string]string{pvcCreatedByVM: "yes"})
 				if err != nil {
 					fmt.Printf("\nFailed to create PVC %s %v", pvcName, err)
@@ -578,39 +638,39 @@ func GetVM(c kubecli.KubevirtClient, vmname, ns string) (*v1.VirtualMachine, err
 }
 
 func GetVMPodRef(c kubecli.KubevirtClient, vmName, ns string) (string, error) {
-    label := map[string]string{"name": vmName}
+	label := map[string]string{"name": vmName}
 
-    //filter our request to find pods for this VM
-    list, err := c.CoreV1().Pods(ns).List(metav1.ListOptions{LabelSelector:labels.Set(label).String()})
-    if err != nil {
-        return "", err
-    }
+	//filter our request to find pods for this VM
+	list, err := c.CoreV1().Pods(ns).List(metav1.ListOptions{LabelSelector: labels.Set(label).String()})
+	if err != nil {
+		return "", err
+	}
 
-    vmref := ""
-    var ts *time.Time
-    for _, pod := range list.Items {
-        // look for the oldest running pod. That is the pod that the VM is on
-        // if a migration is in progress, there will be a newer pod and VM
-        // will not be running on it yet.
-        if pod.Status.Phase == "Running" {
-            if ts == nil {
-                t := pod.GetCreationTimestamp().Time
-                ts = &t
-                vmref = strings.TrimLeft(pod.Name, "virt-launcher-")
-            } else {
-                // is there an older pod
-                if pod.GetCreationTimestamp().Time.Sub(*ts) < 0 {
-                    t := pod.GetCreationTimestamp().Time
-                    ts = &t
-                    vmref = strings.TrimLeft(pod.Name, "virt-launcher-")
-                }
-            }
-        }
-    }
-    if vmref != "" {
-        return vmref, nil
-    }
-    return "", fmt.Errorf("Pod for VM %s not found", vmName)
+	vmref := ""
+	var ts *time.Time
+	for _, pod := range list.Items {
+		// look for the oldest running pod. That is the pod that the VM is on
+		// if a migration is in progress, there will be a newer pod and VM
+		// will not be running on it yet.
+		if pod.Status.Phase == "Running" {
+			if ts == nil {
+				t := pod.GetCreationTimestamp().Time
+				ts = &t
+				vmref = strings.TrimLeft(pod.Name, "virt-launcher-")
+			} else {
+				// is there an older pod
+				if pod.GetCreationTimestamp().Time.Sub(*ts) < 0 {
+					t := pod.GetCreationTimestamp().Time
+					ts = &t
+					vmref = strings.TrimLeft(pod.Name, "virt-launcher-")
+				}
+			}
+		}
+	}
+	if vmref != "" {
+		return vmref, nil
+	}
+	return "", fmt.Errorf("Pod for VM %s not found", vmName)
 }
 
 // GetCdiClient gets an instance of a kubernetes client that includes all the CDI extensions.
@@ -819,7 +879,10 @@ var filterDb = [...]EventFilter{
 	{"System OOM encountered", "System is experiencing out of memory condition"},
 	{"Import into", ""},
 	{"Created DataVolume", ""},
-	{"Failed to import", ""},
+	{"Failed to import", "Failed to import image"},
+	{"Successfully imported", "Successfully imported image"},
+	{"Successfully cloned ", ""},
+	{"Cloning from ", ""},
 	{"Created migration target", "Migration of VM initiated"},
 	{"VirtualMachineInstance is migrating", "VM is migrating"},
 	{"node reported migration succeeded", "VM successfully migrated"},
@@ -1147,28 +1210,36 @@ func RemoveDVOwnerLabel(dvName, owner, ns string) error {
 
 // Create a Disk with a DataVolume
 func CreateDataDisk(params DiskParams, ns string) error {
-	var dv cdiv1.DataVolume
-
-	if params.SfilePath == "" {
-		dv = NewDataVolumeEmptyDisk(params)
-	} else {
+	var dv *cdiv1.DataVolume
+	var err error
+	if params.SfilePath != "" {
 		// check if its HTTP
-		_, err := url.ParseRequestURI(params.SfilePath)
+		_, err = url.ParseRequestURI(params.SfilePath)
 		if err == nil {
 			dv = NewDataVolumeWithHTTPImport(&params)
 		} else {
 			return err
 		}
+	} else if params.CloneFromDisk != "" {
+		dv, err = NewDataVolumeWithClone(params)
+		if err != nil || dv == nil {
+			return err
+		}
+	} else {
+		dv = NewDataVolumeEmptyDisk(params)
+	}
+	if dv == nil {
+		return fmt.Errorf("Failed to create disk %v", params.Name)
 	}
 
-	SetDVLabels(&dv, DISKTYPE_LABEL, DISKTYPE_DATA)
+	SetDVLabels(dv, DISKTYPE_LABEL, DISKTYPE_DATA)
 
 	c, err := GetCDIClient()
 	if err != nil {
 		return err
 	}
 
-	_, err = createDataVolumeFromDefinition(c, ns, &dv)
+	_, err = createDataVolumeFromDefinition(c, ns, dv)
 
 	return err
 }
