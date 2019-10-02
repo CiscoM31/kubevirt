@@ -47,13 +47,13 @@ import (
 )
 
 const (
-	cloudInitUserMaxLen = 16384
+	cloudInitUserMaxLen = 65536
 	arrayLenMax         = 256
 	maxStrLen           = 256
 
 	// cloudInitNetworkMaxLen size is an arbitrary limit. It was selected to
 	// accommodate a reasonable number of interfaces and routes.
-	cloudInitNetworkMaxLen = 16384
+	cloudInitNetworkMaxLen = 65536
 
 	// Copied from kubernetes/pkg/apis/core/validation/validation.go
 	maxDNSNameservers     = 3
