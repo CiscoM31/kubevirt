@@ -286,12 +286,15 @@ func SetResources(vm *v1.VirtualMachine, cpu, memory, cpuModel string) error {
 
 // NewDataVolumeWithHTTPImport initializes a DataVolume struct with HTTP annotations
 func NewDataVolumeWithHTTPImport(params *DiskParams) *cdiv1.DataVolume {
+	accessMode := []k8sv1.PersistentVolumeAccessMode{k8sv1.ReadWriteOnce}
+	if params.Shared {
+		accessMode = []k8sv1.PersistentVolumeAccessMode{k8sv1.ReadWriteMany}
+	}
+
 	mode := k8sv1.PersistentVolumeFilesystem
 	if params.VolumeBlockMode {
 		mode = k8sv1.PersistentVolumeBlock
-	}
-	accessMode := []k8sv1.PersistentVolumeAccessMode{k8sv1.ReadWriteOnce}
-	if params.Shared {
+		//for block mode, we will default to ReadWriteMan to enable migration
 		accessMode = []k8sv1.PersistentVolumeAccessMode{k8sv1.ReadWriteMany}
 	}
 
@@ -333,11 +336,22 @@ func NewDataVolumeWithClone(params DiskParams) (*cdiv1.DataVolume, error) {
 		if dv == nil || dv.Spec.PVC == nil {
 			return nil, fmt.Errorf("Source disk %v to clone from could not be found", params.CloneFromDisk)
 		}
+
+		if dv.Spec.PVC.VolumeMode != nil && *dv.Spec.PVC.VolumeMode == k8sv1.PersistentVolumeBlock {
+			return nil, fmt.Errorf("Cloning from a disk %s which is in Block mode is not supported", params.CloneFromDisk)
+		}
+	}
+
+	accessMode := []k8sv1.PersistentVolumeAccessMode{k8sv1.ReadWriteOnce}
+	if params.Shared {
+		accessMode = []k8sv1.PersistentVolumeAccessMode{k8sv1.ReadWriteMany}
 	}
 
 	mode := k8sv1.PersistentVolumeFilesystem
 	if params.VolumeBlockMode {
 		mode = k8sv1.PersistentVolumeBlock
+		//for block mode, we will default to ReadWriteMan to enable migration
+		accessMode = []k8sv1.PersistentVolumeAccessMode{k8sv1.ReadWriteMany}
 	}
 
 	return &cdiv1.DataVolume{
@@ -354,7 +368,7 @@ func NewDataVolumeWithClone(params DiskParams) (*cdiv1.DataVolume, error) {
 			},
 			PVC: &k8sv1.PersistentVolumeClaimSpec{
 				VolumeMode:  &mode,
-				AccessModes: dv.Spec.PVC.AccessModes,
+				AccessModes: accessMode,
 				Resources: k8sv1.ResourceRequirements{
 					Requests: dv.Spec.PVC.Resources.Requests,
 				},
@@ -365,13 +379,15 @@ func NewDataVolumeWithClone(params DiskParams) (*cdiv1.DataVolume, error) {
 
 // NewDataVolumeWithHTTPImport initializes a DataVolume struct with HTTP annotations
 func NewDataVolumeEmptyDisk(params DiskParams) *cdiv1.DataVolume {
+	accessMode := []k8sv1.PersistentVolumeAccessMode{k8sv1.ReadWriteOnce}
+	if params.Shared {
+		accessMode = []k8sv1.PersistentVolumeAccessMode{k8sv1.ReadWriteMany}
+	}
+
 	mode := k8sv1.PersistentVolumeFilesystem
 	if params.VolumeBlockMode {
 		mode = k8sv1.PersistentVolumeBlock
-	}
-
-	accessMode := []k8sv1.PersistentVolumeAccessMode{k8sv1.ReadWriteOnce}
-	if params.Shared {
+		//for block mode, we will default to ReadWriteMan to enable migration
 		accessMode = []k8sv1.PersistentVolumeAccessMode{k8sv1.ReadWriteMany}
 	}
 
