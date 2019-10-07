@@ -340,6 +340,9 @@ func NewDataVolumeWithClone(params DiskParams) (*cdiv1.DataVolume, error) {
 		if dv.Spec.PVC.VolumeMode != nil && *dv.Spec.PVC.VolumeMode == k8sv1.PersistentVolumeBlock {
 			return nil, fmt.Errorf("Cloning from a disk %s which is in Block mode is not supported", params.CloneFromDisk)
 		}
+		if dv.Status.Phase != cdiv1.Succeeded {
+			return nil, fmt.Errorf("Source Disk %s is not in succeeded state. Cannot clone", params.CloneFromDisk)
+		}
 	}
 
 	accessMode := []k8sv1.PersistentVolumeAccessMode{k8sv1.ReadWriteOnce}
