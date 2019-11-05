@@ -28,6 +28,7 @@ import (
 	cdiClientset "kubevirt.io/containerized-data-importer/pkg/client/clientset/versioned"
 	v1 "kubevirt.io/kubevirt/pkg/api/v1"
 	"kubevirt.io/kubevirt/pkg/kubecli"
+	networkv1 "github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/apis/k8s.cni.cncf.io/v1"
 )
 
 type DiskParams struct {
@@ -1361,4 +1362,8 @@ func GetLiveMigrateStatus(c kubecli.KubevirtClient, vmName, ns string) (string, 
 		}
 	}
 	return "", nil
+}
+
+func GetVMNetwork(c kubecli.KubevirtClient, name, ns string) (*networkv1.NetworkAttachmentDefinition, error) {
+	return c.NetworkClient().K8sCniCncfIoV1().NetworkAttachmentDefinitions(ns).Get(name, metav1.GetOptions{})
 }
