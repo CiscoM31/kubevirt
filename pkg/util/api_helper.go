@@ -488,6 +488,11 @@ func AttachDisk(c kubecli.KubevirtClient, vm *v1.VirtualMachine, diskParams Disk
 		}
 	}
 
+	_, err := resource.ParseQuantity(diskParams.Capacity)
+	if err != nil {
+		return fmt.Errorf("Invalid disk Capacity: %v, error: %s", diskParams.Capacity, err.Error())
+	}
+
 	vmSpec := &vm.Spec.Template.Spec
 	vmSpec.Domain.Devices.Disks = append(vmSpec.Domain.Devices.Disks, disk)
 
@@ -1232,6 +1237,12 @@ func RemoveDVOwnerLabel(dvName, owner, ns string) error {
 func CreateDataDisk(params DiskParams, ns string) error {
 	var dv *cdiv1.DataVolume
 	var err error
+
+	_, err = resource.ParseQuantity(params.Capacity)
+	if err != nil {
+		return fmt.Errorf("Invalid disk Capacity: %s, %s", params.Capacity, err.Error())
+	}
+
 	if params.SfilePath != "" {
 		// check if its HTTP
 		_, err = url.ParseRequestURI(params.SfilePath)
