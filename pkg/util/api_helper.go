@@ -1375,6 +1375,24 @@ func GetLiveMigrateStatus(c kubecli.KubevirtClient, vmName, ns string) (string, 
 	return "", nil
 }
 
+// Find all completed pods and delete them. We don't want them to hang around
+func CleanupCompletedVMPODs(c kubecli.KubevirtClient, ns string) (error, []string) {
+	label := map[string]string{"status.phase": "Succeeded"}
+    var vms []string
+
+	//filter our request to find pods for this VM
+	list, err := c.CoreV1().Pods(ns).List(metav1.ListOptions{FieldSelector: labels.Set(label).String()})
+	if err != nil {
+		return err, nil
+	}
+
+	for _, pod := range list.Items {
+		c.CoreV1().Pods(ns).Delete(pod.Name, &metav1.DeleteOptions{})
+		vms = append(vms, pod.Name)
+	}
+	return nil, vms
+}
+
 func GetVMNetwork(c kubecli.KubevirtClient, name, ns string) (*networkv1.NetworkAttachmentDefinition, error) {
 	return c.NetworkClient().K8sCniCncfIoV1().NetworkAttachmentDefinitions(ns).Get(name, metav1.GetOptions{})
 }
