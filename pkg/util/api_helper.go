@@ -778,24 +778,30 @@ func GetPVC(c kubecli.KubevirtClient, name string) (*k8sv1.PersistentVolumeClaim
 }
 
 // Assign affinity and anti affinity labels
-func AddAppAffinityLables(vmi *v1.VirtualMachine, affinityLabel, antiAffinityLabel map[string]string) error {
+func AddAppAffinityLables(vmi *v1.VirtualMachine, affinityLabel, antiAffinityLabel [][]string) error {
 
 	affLables := k8sv1.Affinity{}
 
-	if affinityLabel != nil {
+	if affinityLabel != nil && len(affinityLabel) != 0 {
 		podAff := k8sv1.PodAffinity{}
-		for idx, val := range affinityLabel {
-			podTerm := getAffinityTerm(idx, val)
+		for _, label := range affinityLabel {
+			if len(label) < 2 {
+				return fmt.Errorf("invalid Affinity labels :%v", label)
+			}
+			podTerm := getAffinityTerm(label[0], label[1])
 			podAff.RequiredDuringSchedulingIgnoredDuringExecution =
 				append(podAff.RequiredDuringSchedulingIgnoredDuringExecution, podTerm)
 		}
 		affLables.PodAffinity = &podAff
 	}
 
-	if antiAffinityLabel != nil {
+	if antiAffinityLabel != nil && len(antiAffinityLabel) != 0 {
 		podAntiAff := k8sv1.PodAntiAffinity{}
-		for idx, val := range antiAffinityLabel {
-			podTerm := getAffinityTerm(idx, val)
+		for _, label := range antiAffinityLabel {
+			if len(label) < 2 {
+				return fmt.Errorf("invalid AntiAffinity labels :%v", label)
+			}
+			podTerm := getAffinityTerm(label[0], label[1])
 			podAntiAff.RequiredDuringSchedulingIgnoredDuringExecution =
 				append(podAntiAff.RequiredDuringSchedulingIgnoredDuringExecution, podTerm)
 		}
@@ -905,6 +911,7 @@ var filterDb = [...]EventFilter{
 	{"Import into", ""},
 	{"Created DataVolume", ""},
 	{"Failed to import", "Failed to import image"},
+	{"Unable to connect", ""},
 	{"Successfully imported", "Successfully imported image"},
 	{"Successfully cloned ", ""},
 	{"Cloning from ", ""},
