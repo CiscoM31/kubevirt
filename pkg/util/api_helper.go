@@ -56,14 +56,14 @@ const (
 func NewVM(namespace string, vmName string) *v1.VirtualMachine {
 	vm := &v1.VirtualMachine{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      vmName,
+			Name:      strings.ToLower(vmName),
 			Namespace: namespace,
 		},
 		Spec: v1.VirtualMachineSpec{
 			Template: &v1.VirtualMachineInstanceTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
 					Labels:    map[string]string{"name": vmName},
-					Name:      vmName,
+					Name:      strings.ToLower(vmName),
 					Namespace: namespace,
 				},
 			},
@@ -299,10 +299,13 @@ func NewDataVolumeWithHTTPImport(params *DiskParams) *cdiv1.DataVolume {
 		accessMode = []k8sv1.PersistentVolumeAccessMode{k8sv1.ReadWriteMany}
 	}
 
+	labels := map[string]string{DISKNAME: params.Name}
+
 	return &cdiv1.DataVolume{
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace: params.NameSpace,
-			Name:      params.Name,
+			Name:      strings.ToLower(params.Name),
+			Labels:    labels,
 		},
 		Spec: cdiv1.DataVolumeSpec{
 			Source: cdiv1.DataVolumeSource{
@@ -351,6 +354,8 @@ func NewDataVolumeWithClone(params DiskParams) (*cdiv1.DataVolume, error) {
 		accessMode = []k8sv1.PersistentVolumeAccessMode{k8sv1.ReadWriteMany}
 	}
 
+	labels := map[string]string{DISKNAME: params.Name}
+
 	mode := k8sv1.PersistentVolumeFilesystem
 	if params.VolumeBlockMode {
 		mode = k8sv1.PersistentVolumeBlock
@@ -361,7 +366,8 @@ func NewDataVolumeWithClone(params DiskParams) (*cdiv1.DataVolume, error) {
 	return &cdiv1.DataVolume{
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace: params.NameSpace,
-			Name:      params.Name,
+			Name:      strings.ToLower(params.Name),
+			Labels:    labels,
 		},
 		Spec: cdiv1.DataVolumeSpec{
 			Source: cdiv1.DataVolumeSource{
@@ -395,10 +401,13 @@ func NewDataVolumeEmptyDisk(params DiskParams) *cdiv1.DataVolume {
 		accessMode = []k8sv1.PersistentVolumeAccessMode{k8sv1.ReadWriteMany}
 	}
 
+	labels := map[string]string{DISKNAME: params.Name}
+
 	return &cdiv1.DataVolume{
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace: params.NameSpace,
-			Name:      params.Name,
+			Name:      strings.ToLower(params.Name),
+			Labels: labels,
 		},
 		Spec: cdiv1.DataVolumeSpec{
 			Source: cdiv1.DataVolumeSource{
@@ -471,7 +480,7 @@ func AttachCloudInitDisk(c kubecli.KubevirtClient, vm *v1.VirtualMachine, config
 
 func AttachDisk(c kubecli.KubevirtClient, vm *v1.VirtualMachine, diskParams DiskParams) error {
 	disk := v1.Disk{}
-	disk.Name = diskParams.Name
+	disk.Name = strings.ToLower(diskParams.Name)
 	disk.BootOrder = &diskParams.Order
 
 	dt := "sata"
@@ -497,10 +506,10 @@ func AttachDisk(c kubecli.KubevirtClient, vm *v1.VirtualMachine, diskParams Disk
 	vmSpec.Domain.Devices.Disks = append(vmSpec.Domain.Devices.Disks, disk)
 
 	vol := v1.Volume{}
-	vol.Name = diskParams.Name
+	vol.Name = strings.ToLower(diskParams.Name)
 	var pvcName string
 	if diskParams.HxVolName == "" {
-		pvcName = fmt.Sprintf("%s-%s", diskParams.Name, "pvc")
+		pvcName = fmt.Sprintf("%s-%s", strings.ToLower(diskParams.Name), "pvc")
 		if diskParams.VolumeHandle == "" {
 			// data volume needs to be configured if Sfilepath exists
 			if diskParams.SfilePath != "" {
@@ -1091,6 +1100,7 @@ const (
 	DISKOWNER_LABEL = "DiskOwner"
 	DISKTYPE_LABEL  = "DiskType"
 	DISKTYPE_DATA   = "DataDisk"
+	DISKNAME        = "DiskName"
 )
 
 // Obtain the ref to the kubevirt client object
@@ -1271,6 +1281,7 @@ func CreateDataDisk(params DiskParams, ns string) error {
 	}
 
 	SetDVLabels(dv, DISKTYPE_LABEL, DISKTYPE_DATA)
+	SetDVLabels(dv, DISKNAME, params.Name)
 
 	c, err := GetCDIClient()
 	if err != nil {
