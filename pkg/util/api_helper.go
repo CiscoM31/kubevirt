@@ -24,15 +24,16 @@ import (
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/tools/clientcmd"
 
+	networkv1 "github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/apis/k8s.cni.cncf.io/v1"
+
 	cdiv1 "kubevirt.io/containerized-data-importer/pkg/apis/core/v1alpha1"
 	cdiClientset "kubevirt.io/containerized-data-importer/pkg/client/clientset/versioned"
 	v1 "kubevirt.io/kubevirt/pkg/api/v1"
 	"kubevirt.io/kubevirt/pkg/kubecli"
-	networkv1 "github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/apis/k8s.cni.cncf.io/v1"
 )
 
 type DiskParams struct {
-	Name, VolName, Class, FilePath, Bus string
+	Name, VolName, Class, Bus           string
 	Svolume, SfilePath                  string
 	Evolume, EfilePath                  string
 	DataDisk                            string
@@ -407,7 +408,7 @@ func NewDataVolumeEmptyDisk(params DiskParams) *cdiv1.DataVolume {
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace: params.NameSpace,
 			Name:      strings.ToLower(params.Name),
-			Labels: labels,
+			Labels:    labels,
 		},
 		Spec: cdiv1.DataVolumeSpec{
 			Source: cdiv1.DataVolumeSource{
@@ -497,11 +498,6 @@ func AttachDisk(c kubecli.KubevirtClient, vm *v1.VirtualMachine, diskParams Disk
 		}
 	}
 
-	_, err := resource.ParseQuantity(diskParams.Capacity)
-	if err != nil {
-		return fmt.Errorf("Invalid disk Capacity: %v, error: %s", diskParams.Capacity, err.Error())
-	}
-
 	vmSpec := &vm.Spec.Template.Spec
 	vmSpec.Domain.Devices.Disks = append(vmSpec.Domain.Devices.Disks, disk)
 
@@ -513,8 +509,14 @@ func AttachDisk(c kubecli.KubevirtClient, vm *v1.VirtualMachine, diskParams Disk
 		if diskParams.VolumeHandle == "" {
 			// data volume needs to be configured if Sfilepath exists
 			if diskParams.SfilePath != "" {
+
+				_, err := resource.ParseQuantity(diskParams.Capacity)
+				if err != nil {
+					return fmt.Errorf("Invalid disk Capacity: %v, error: %s", diskParams.Capacity, err.Error())
+				}
+
 				// check if its HTTP
-				_, err := url.ParseRequestURI(diskParams.SfilePath)
+				_, err = url.ParseRequestURI(diskParams.SfilePath)
 				if err == nil {
 					// HTTP source datavolume
 					dv := NewDataVolumeWithHTTPImport(&diskParams)
@@ -553,9 +555,15 @@ func AttachDisk(c kubecli.KubevirtClient, vm *v1.VirtualMachine, diskParams Disk
 				}
 				vmSpec.Volumes = append(vmSpec.Volumes, vol)
 			} else {
+
+				_, err := resource.ParseQuantity(diskParams.Capacity)
+				if err != nil {
+					return fmt.Errorf("Invalid disk Capacity: %v, error: %s", diskParams.Capacity, err.Error())
+				}
+
 				//empty disk
 				dv := NewDataVolumeEmptyDisk(diskParams)
-				err := SetDVOwnerLabel(dv, vm.Name)
+				err = SetDVOwnerLabel(dv, vm.Name)
 				if err != nil {
 					return err
 				}
@@ -759,10 +767,10 @@ func GetPv(c kubecli.KubevirtClient, name string) (*k8sv1.PersistentVolume, erro
 	return pv, err
 }
 
-func GetPvDetails(c kubecli.KubevirtClient, name string) (bool, int32, int64, error) {
+func GetPvDetails(c kubecli.KubevirtClient, name string) (string, int32, int64, error) {
 	pv, err := c.CoreV1().PersistentVolumes().Get(name, metav1.GetOptions{})
 	if err != nil || pv == nil {
-		return false, 0, 0, err
+		return "", 0, 0, err
 	}
 	mode := k8sv1.PersistentVolumeFilesystem
 	if pv.Spec.VolumeMode != nil {
@@ -771,10 +779,10 @@ func GetPvDetails(c kubecli.KubevirtClient, name string) (bool, int32, int64, er
 	rs := pv.Spec.Capacity["storage"]
 	storage, _ := (&rs).AsInt64()
 	if pv.Spec.ISCSI == nil {
-		return mode == k8sv1.PersistentVolumeBlock, 0, storage, nil
+		return string(mode), 0, storage, nil
 	}
 
-	return mode == k8sv1.PersistentVolumeBlock, pv.Spec.ISCSI.Lun, storage, nil
+	return string(mode), pv.Spec.ISCSI.Lun, storage, nil
 }
 
 // Return PVC reference
@@ -1396,7 +1404,7 @@ func GetLiveMigrateStatus(c kubecli.KubevirtClient, vmName, ns string) (string, 
 // Find all completed pods and delete them. We don't want them to hang around
 func CleanupCompletedVMPODs(c kubecli.KubevirtClient, ns string) (error, []string) {
 	label := map[string]string{"status.phase": "Succeeded"}
-    var vms []string
+	var vms []string
 
 	//filter our request to find pods for this VM
 	list, err := c.CoreV1().Pods(ns).List(metav1.ListOptions{FieldSelector: labels.Set(label).String()})
