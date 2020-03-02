@@ -300,7 +300,7 @@ func NewDataVolumeWithHTTPImport(params *DiskParams) *cdiv1.DataVolume {
 	mode := k8sv1.PersistentVolumeFilesystem
 	if params.VolumeBlockMode {
 		mode = k8sv1.PersistentVolumeBlock
-		//for block mode, we will default to ReadWriteMan to enable migration
+		//for block mode, we will default to ReadWriteMany to enable migration
 		accessMode = []k8sv1.PersistentVolumeAccessMode{k8sv1.ReadWriteMany}
 	}
 
@@ -921,6 +921,7 @@ var filterDb = [...]EventFilter{
 	{"System OOM encountered", "System is experiencing out of memory condition"},
 	{"Import into", ""},
 	{"Created DataVolume", ""},
+	{"Deleted DataVolume", "Deleted vdisk"},
 	{"Failed to import", "Failed to import image"},
 	{"Unable to connect", ""},
 	{"Successfully imported", "Successfully imported image"},
