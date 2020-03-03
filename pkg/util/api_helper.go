@@ -1440,8 +1440,11 @@ func CleanupCompletedVMPODs(c kubecli.KubevirtClient, ns string) (error, []strin
 	}
 
 	for _, pod := range list.Items {
-		c.CoreV1().Pods(ns).Delete(pod.Name, &metav1.DeleteOptions{})
-		vms = append(vms, pod.Name)
+		//make sure only the completed VM virt-launcher pods are cleaned up
+		if strings.Contains(pod.Name, "virt-launcher") {
+			c.CoreV1().Pods(ns).Delete(pod.Name, &metav1.DeleteOptions{})
+			vms = append(vms, pod.Name)
+		}
 	}
 	return nil, vms
 }
