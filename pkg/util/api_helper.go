@@ -789,19 +789,25 @@ func GetPVC(c kubecli.KubevirtClient, name string) (*k8sv1.PersistentVolumeClaim
 }
 
 // Assign affinity and anti affinity labels
-func AddAppAffinityLables(vmi *v1.VirtualMachine, affinityLabel, antiAffinityLabel [][]string) error {
+func AddAppAffinityLabels(vmi *v1.VirtualMachine, affinityLabel, antiAffinityLabel [][]string) error {
 
 	affLables := k8sv1.Affinity{}
 
 	if affinityLabel != nil && len(affinityLabel) != 0 {
 		podAff := k8sv1.PodAffinity{}
 		for _, label := range affinityLabel {
-			if len(label) < 2 {
+			if len(label) < 3 {
 				return fmt.Errorf("invalid Affinity labels :%v", label)
 			}
-			podTerm := getAffinityTerm(label[0], label[1])
-			podAff.RequiredDuringSchedulingIgnoredDuringExecution =
-				append(podAff.RequiredDuringSchedulingIgnoredDuringExecution, podTerm)
+			if label[2] == "required" {
+				podTerm := getAffinityTerm(label[0], label[1])
+				podAff.RequiredDuringSchedulingIgnoredDuringExecution =
+					append(podAff.RequiredDuringSchedulingIgnoredDuringExecution, podTerm)
+			} else {
+				podTerm := getWeightedAffinityTerm(label[0], label[1])
+				podAff.PreferredDuringSchedulingIgnoredDuringExecution =
+					append(podAff.PreferredDuringSchedulingIgnoredDuringExecution, podTerm)
+			}
 		}
 		affLables.PodAffinity = &podAff
 	}
@@ -809,12 +815,18 @@ func AddAppAffinityLables(vmi *v1.VirtualMachine, affinityLabel, antiAffinityLab
 	if antiAffinityLabel != nil && len(antiAffinityLabel) != 0 {
 		podAntiAff := k8sv1.PodAntiAffinity{}
 		for _, label := range antiAffinityLabel {
-			if len(label) < 2 {
+			if len(label) < 3 {
 				return fmt.Errorf("invalid AntiAffinity labels :%v", label)
 			}
-			podTerm := getAffinityTerm(label[0], label[1])
-			podAntiAff.RequiredDuringSchedulingIgnoredDuringExecution =
-				append(podAntiAff.RequiredDuringSchedulingIgnoredDuringExecution, podTerm)
+			if label[2] == "required" {
+				podTerm := getAffinityTerm(label[0], label[1])
+				podAntiAff.RequiredDuringSchedulingIgnoredDuringExecution =
+					append(podAntiAff.RequiredDuringSchedulingIgnoredDuringExecution, podTerm)
+			} else {
+				podTerm := getWeightedAffinityTerm(label[0], label[1])
+				podAntiAff.PreferredDuringSchedulingIgnoredDuringExecution =
+					append(podAntiAff.PreferredDuringSchedulingIgnoredDuringExecution, podTerm)
+			}
 		}
 		affLables.PodAntiAffinity = &podAntiAff
 	}
@@ -841,6 +853,16 @@ func getAffinityTerm(key, val string) k8sv1.PodAffinityTerm {
 	podTerm := k8sv1.PodAffinityTerm{LabelSelector: &labelSel, TopologyKey: "kubernetes.io/hostname"}
 
 	return podTerm
+}
+
+func getWeightedAffinityTerm(key, val string) k8sv1.WeightedPodAffinityTerm {
+
+	labelSelReq := metav1.LabelSelectorRequirement{Key: key, Operator: metav1.LabelSelectorOpIn,
+		Values: []string{val}}
+	labelSel := metav1.LabelSelector{MatchExpressions: []metav1.LabelSelectorRequirement{labelSelReq}}
+	podTerm := k8sv1.PodAffinityTerm{LabelSelector: &labelSel, TopologyKey: "kubernetes.io/hostname"}
+	wPodTerm := k8sv1.WeightedPodAffinityTerm{Weight: 1, PodAffinityTerm: podTerm}
+	return wPodTerm
 }
 
 // drain pods from node and cardon it
