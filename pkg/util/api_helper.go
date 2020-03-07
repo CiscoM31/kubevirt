@@ -483,13 +483,11 @@ func AttachDisk(c kubecli.KubevirtClient, vm *v1.VirtualMachine, diskParams Disk
 		dt = diskParams.Bus
 	}
 
-	if !diskParams.VolumeBlockMode {
-		if diskParams.IsCdrom == true {
-			readOnly := true
-			disk.CDRom = &v1.CDRomTarget{Bus: dt, ReadOnly: &readOnly}
-		} else {
-			disk.Disk = &v1.DiskTarget{Bus: dt}
-		}
+	if diskParams.IsCdrom == true {
+		readOnly := true
+		disk.CDRom = &v1.CDRomTarget{Bus: dt, ReadOnly: &readOnly}
+	} else {
+		disk.Disk = &v1.DiskTarget{Bus: dt}
 	}
 
 	vmSpec := &vm.Spec.Template.Spec
@@ -659,18 +657,7 @@ func GetVMI(c kubecli.KubevirtClient, vmname, ns string) (*v1.VirtualMachineInst
 }
 
 func GetVM(c kubecli.KubevirtClient, vmname, ns string) (*v1.VirtualMachine, error) {
-	list, err := GetVMList(c, ns)
-	if err != nil {
-		return nil, err
-	}
-	for _, vm := range list.Items {
-		if vm.Name == vmname {
-			return &vm, nil
-		}
-	}
-
-	errStr := fmt.Sprintf("VM %s not found", vmname)
-	return nil, errors2.New(errStr)
+	return c.VirtualMachine(ns).Get(vmname, &metav1.GetOptions{})
 }
 
 func GetVMPodRef(c kubecli.KubevirtClient, vmName, ns string) (string, error) {
