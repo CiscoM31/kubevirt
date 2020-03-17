@@ -1416,13 +1416,16 @@ func GetLiveMigrateStatus(c kubecli.KubevirtClient, vmName, ns string) (string, 
 	return "", nil
 }
 
-// Find all completed pods and delete them. We don't want them to hang around
+// Find all completed virt-launcher pods and delete them. We don't want them to hang around
 func CleanupCompletedVMPODs(c kubecli.KubevirtClient, ns string) (error, []string) {
-	label := map[string]string{"status.phase": "Succeeded"}
+	fSelector := map[string]string{"status.phase": "Succeeded"}
+	lSelector := map[string]string{"kubevirt.io": "virt-launcher"}
 	var vms []string
 
-	//filter our request to find pods for this VM
-	list, err := c.CoreV1().Pods(ns).List(metav1.ListOptions{FieldSelector: labels.Set(label).String()})
+	// the old live migrated VM will leave behind a virt-launcher POD that
+	// is in succeeded state. Filter our request to find those and then clean them up
+	list, err := c.CoreV1().Pods(ns).List(metav1.ListOptions{FieldSelector:
+		labels.Set(fSelector).String(), LabelSelector: labels.Set(lSelector).String()})
 	if err != nil {
 		return err, nil
 	}
