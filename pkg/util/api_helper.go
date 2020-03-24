@@ -33,19 +33,19 @@ import (
 )
 
 type DiskParams struct {
-	Name, VolName, Class, FilePath, Bus string
-	Svolume, SfilePath                  string
-	Evolume, EfilePath                  string
-	DataDisk                            string
-	Capacity, Format                    string
-	VolumeHandle                        string
-	IsCdrom                             bool
-	VolumeBlockMode                     bool
-	CloneFromDisk                       string
-	HxVolName                           string
-	Order                               uint
-	Shared                              bool
-	NameSpace                           string
+	Name, VolName, Class, Bus string
+	Svolume, SfilePath        string
+	Evolume, EfilePath        string
+	DataDisk                  string
+	Capacity, Format          string
+	VolumeHandle              string
+	IsCdrom                   bool
+	VolumeBlockMode           bool
+	CloneFromDisk             string
+	HxVolName                 string
+	Order                     uint
+	AccessMode                string
+	NameSpace                 string
 }
 
 const (
@@ -99,17 +99,13 @@ func NewReplicaSetFromVMI(vmi *v1.VirtualMachineInstance, replicas int32) *v1.Vi
 // be used only for a case where the disks are being recovered from a
 // lost Kubernetes install. The volume Handle from previous creation
 // will enable us to recover this disk from StorFS
-func CreateCSIPv(client kubecli.KubevirtClient, name string, params DiskParams,
-	readOnly bool) (*k8sv1.PersistentVolume, error) {
+func CreateCSIPv(client kubecli.KubevirtClient, name string, params DiskParams) (*k8sv1.PersistentVolume, error) {
 	quantity, err := resource.ParseQuantity(params.Capacity)
 	if err != nil {
 		return nil, err
 	}
 
-	accessMode := k8sv1.ReadWriteMany
-	if readOnly {
-		accessMode = k8sv1.ReadOnlyMany
-	}
+	accessMode := VDiskAccessModetoPVAccessMode(params.AccessMode)
 
 	mode := k8sv1.PersistentVolumeFilesystem
 	if params.VolumeBlockMode {
@@ -120,7 +116,7 @@ func CreateCSIPv(client kubecli.KubevirtClient, name string, params DiskParams,
 			Name: name,
 		},
 		Spec: k8sv1.PersistentVolumeSpec{
-			AccessModes: []k8sv1.PersistentVolumeAccessMode{accessMode},
+			AccessModes: accessMode,
 			Capacity: k8sv1.ResourceList{
 				"storage": quantity,
 			},
@@ -286,17 +282,25 @@ func SetResources(vm *v1.VirtualMachine, cpu, memory, cpuModel string) error {
 	return nil
 }
 
+func VDiskAccessModetoPVAccessMode(mode string) []k8sv1.PersistentVolumeAccessMode {
+	switch mode {
+	case "ReadWriteOnce":
+		return 	[]k8sv1.PersistentVolumeAccessMode{k8sv1.ReadWriteOnce}
+	case "ReadWriteMany":
+		return 	[]k8sv1.PersistentVolumeAccessMode{k8sv1.ReadWriteMany}
+	case "ReadOnlyMany":
+		return []k8sv1.PersistentVolumeAccessMode{k8sv1.ReadOnlyMany}
+	}
+	return []k8sv1.PersistentVolumeAccessMode{k8sv1.ReadWriteOnce}
+}
+
 // NewDataVolumeWithHTTPImport initializes a DataVolume struct with HTTP annotations
 func NewDataVolumeWithHTTPImport(params *DiskParams) *cdiv1.DataVolume {
-	accessMode := []k8sv1.PersistentVolumeAccessMode{k8sv1.ReadWriteOnce}
-	if params.Shared {
-		accessMode = []k8sv1.PersistentVolumeAccessMode{k8sv1.ReadWriteMany}
-	}
-
+	accessMode := VDiskAccessModetoPVAccessMode(params.AccessMode)
 	mode := k8sv1.PersistentVolumeFilesystem
 	if params.VolumeBlockMode {
 		mode = k8sv1.PersistentVolumeBlock
-		//for block mode, we will default to ReadWriteMan to enable migration
+		//for block mode, we will default to ReadWriteMany to enable migration
 		accessMode = []k8sv1.PersistentVolumeAccessMode{k8sv1.ReadWriteMany}
 	}
 
@@ -350,18 +354,11 @@ func NewDataVolumeWithClone(params DiskParams) (*cdiv1.DataVolume, error) {
 		}
 	}
 
-	accessMode := []k8sv1.PersistentVolumeAccessMode{k8sv1.ReadWriteOnce}
-	if params.Shared {
-		accessMode = []k8sv1.PersistentVolumeAccessMode{k8sv1.ReadWriteMany}
-	}
-
+	accessMode := VDiskAccessModetoPVAccessMode(params.AccessMode)
 	labels := map[string]string{DISKNAME: params.Name}
-
 	mode := k8sv1.PersistentVolumeFilesystem
 	if params.VolumeBlockMode {
 		mode = k8sv1.PersistentVolumeBlock
-		//for block mode, we will default to ReadWriteMan to enable migration
-		accessMode = []k8sv1.PersistentVolumeAccessMode{k8sv1.ReadWriteMany}
 	}
 
 	return &cdiv1.DataVolume{
@@ -390,10 +387,7 @@ func NewDataVolumeWithClone(params DiskParams) (*cdiv1.DataVolume, error) {
 
 // NewDataVolumeWithHTTPImport initializes a DataVolume struct with HTTP annotations
 func NewDataVolumeEmptyDisk(params DiskParams) *cdiv1.DataVolume {
-	accessMode := []k8sv1.PersistentVolumeAccessMode{k8sv1.ReadWriteOnce}
-	if params.Shared {
-		accessMode = []k8sv1.PersistentVolumeAccessMode{k8sv1.ReadWriteMany}
-	}
+	accessMode := VDiskAccessModetoPVAccessMode(params.AccessMode)
 
 	mode := k8sv1.PersistentVolumeFilesystem
 	if params.VolumeBlockMode {
@@ -489,18 +483,11 @@ func AttachDisk(c kubecli.KubevirtClient, vm *v1.VirtualMachine, diskParams Disk
 		dt = diskParams.Bus
 	}
 
-	if !diskParams.VolumeBlockMode {
-		if diskParams.IsCdrom == true {
-			readOnly := true
-			disk.CDRom = &v1.CDRomTarget{Bus: dt, ReadOnly: &readOnly}
-		} else {
-			disk.Disk = &v1.DiskTarget{Bus: dt}
-		}
-	}
-
-	_, err := resource.ParseQuantity(diskParams.Capacity)
-	if err != nil {
-		return fmt.Errorf("Invalid disk Capacity: %v, error: %s", diskParams.Capacity, err.Error())
+	if diskParams.IsCdrom == true {
+		readOnly := true
+		disk.CDRom = &v1.CDRomTarget{Bus: dt, ReadOnly: &readOnly}
+	} else {
+		disk.Disk = &v1.DiskTarget{Bus: dt}
 	}
 
 	vmSpec := &vm.Spec.Template.Spec
@@ -514,8 +501,14 @@ func AttachDisk(c kubecli.KubevirtClient, vm *v1.VirtualMachine, diskParams Disk
 		if diskParams.VolumeHandle == "" {
 			// data volume needs to be configured if Sfilepath exists
 			if diskParams.SfilePath != "" {
+
+				_, err := resource.ParseQuantity(diskParams.Capacity)
+				if err != nil {
+					return fmt.Errorf("Invalid disk Capacity: %v, error: %s", diskParams.Capacity, err.Error())
+				}
+
 				// check if its HTTP
-				_, err := url.ParseRequestURI(diskParams.SfilePath)
+				_, err = url.ParseRequestURI(diskParams.SfilePath)
 				if err == nil {
 					// HTTP source datavolume
 					dv := NewDataVolumeWithHTTPImport(&diskParams)
@@ -554,9 +547,15 @@ func AttachDisk(c kubecli.KubevirtClient, vm *v1.VirtualMachine, diskParams Disk
 				}
 				vmSpec.Volumes = append(vmSpec.Volumes, vol)
 			} else {
+
+				_, err := resource.ParseQuantity(diskParams.Capacity)
+				if err != nil {
+					return fmt.Errorf("Invalid disk Capacity: %v, error: %s", diskParams.Capacity, err.Error())
+				}
+
 				//empty disk
 				dv := NewDataVolumeEmptyDisk(diskParams)
-				err := SetDVOwnerLabel(dv, vm.Name)
+				err = SetDVOwnerLabel(dv, vm.Name)
 				if err != nil {
 					return err
 				}
@@ -571,7 +570,7 @@ func AttachDisk(c kubecli.KubevirtClient, vm *v1.VirtualMachine, diskParams Disk
 			pvc, err := GetPVC(c, pvcName)
 			if err != nil || pvc == nil {
 				pvName := fmt.Sprintf("%s-%s", diskParams.Name, "pv")
-				_, err = CreateCSIPv(c, pvName, diskParams, false)
+				_, err = CreateCSIPv(c, pvName, diskParams)
 				fmt.Printf("Creating CSI PV for %s", diskParams.Name)
 				if err != nil {
 					fmt.Printf("Failed to create CSI PV for %s, err: %v", diskParams.Name, err)
@@ -658,18 +657,7 @@ func GetVMI(c kubecli.KubevirtClient, vmname, ns string) (*v1.VirtualMachineInst
 }
 
 func GetVM(c kubecli.KubevirtClient, vmname, ns string) (*v1.VirtualMachine, error) {
-	list, err := GetVMList(c, ns)
-	if err != nil {
-		return nil, err
-	}
-	for _, vm := range list.Items {
-		if vm.Name == vmname {
-			return &vm, nil
-		}
-	}
-
-	errStr := fmt.Sprintf("VM %s not found", vmname)
-	return nil, errors2.New(errStr)
+	return c.VirtualMachine(ns).Get(vmname, &metav1.GetOptions{})
 }
 
 func GetVMPodRef(c kubecli.KubevirtClient, vmName, ns string) (string, error) {
@@ -760,10 +748,10 @@ func GetPv(c kubecli.KubevirtClient, name string) (*k8sv1.PersistentVolume, erro
 	return pv, err
 }
 
-func GetPvDetails(c kubecli.KubevirtClient, name string) (bool, int32, int64, error) {
+func GetPvDetails(c kubecli.KubevirtClient, name string) (string, int32, int64, error) {
 	pv, err := c.CoreV1().PersistentVolumes().Get(name, metav1.GetOptions{})
 	if err != nil || pv == nil {
-		return false, 0, 0, err
+		return "", 0, 0, err
 	}
 	mode := k8sv1.PersistentVolumeFilesystem
 	if pv.Spec.VolumeMode != nil {
@@ -772,10 +760,10 @@ func GetPvDetails(c kubecli.KubevirtClient, name string) (bool, int32, int64, er
 	rs := pv.Spec.Capacity["storage"]
 	storage, _ := (&rs).AsInt64()
 	if pv.Spec.ISCSI == nil {
-		return mode == k8sv1.PersistentVolumeBlock, 0, storage, nil
+		return string(mode), 0, storage, nil
 	}
 
-	return mode == k8sv1.PersistentVolumeBlock, pv.Spec.ISCSI.Lun, storage, nil
+	return string(mode), pv.Spec.ISCSI.Lun, storage, nil
 }
 
 // Return PVC reference
@@ -942,6 +930,7 @@ var filterDb = [...]EventFilter{
 	{"System OOM encountered", "System is experiencing out of memory condition"},
 	{"Import into", ""},
 	{"Created DataVolume", ""},
+	{"Deleted DataVolume", "Deleted vdisk"},
 	{"Failed to import", "Failed to import image"},
 	{"Unable to connect", ""},
 	{"Successfully imported", "Successfully imported image"},
@@ -1273,8 +1262,8 @@ func RemoveDVOwnerLabel(dvName, owner, ns string) error {
 	return fmt.Errorf("failed to find matching label on dv:%v user:%v", dv.Name, owner)
 }
 
-// Create a Disk with a DataVolume
-func CreateDataDisk(params DiskParams, ns string) error {
+// Create the DataVolume for the vdisk
+func CreateDataVolume(params DiskParams, ns string) error {
 	var dv *cdiv1.DataVolume
 	var err error
 
@@ -1327,6 +1316,7 @@ func ListDVs(ns string) ([]cdiv1.DataVolume, error) {
 	return dvList.Items, err
 }
 
+// Return the disk with right dv Name
 func GetDiskDV(name, ns string) (*cdiv1.DataVolume, error) {
 	c, err := GetCDIClient()
 	if err != nil {
@@ -1338,6 +1328,13 @@ func GetDiskDV(name, ns string) (*cdiv1.DataVolume, error) {
 		return nil, fmt.Errorf("Could not find disk %v, err:%v", name, err)
 	}
 
+	labels := dv.ObjectMeta.GetObjectMeta().GetLabels()
+	if labels != nil {
+		if name, ok := labels[DISKNAME]; ok {
+			dv.Name = name
+		}
+	}
+
 	return dv, nil
 }
 
@@ -1347,6 +1344,8 @@ func DeleteDataDisk(diskName, ns string) error {
 	if err != nil {
 		return err
 	}
+
+	diskName = strings.ToLower(diskName)
 
 	dv, err := c.CdiV1alpha1().DataVolumes(ns).Get(diskName, metav1.GetOptions{})
 	if err != nil || dv == nil {
@@ -1431,8 +1430,11 @@ func CleanupCompletedVMPODs(c kubecli.KubevirtClient, ns string) (error, []strin
 	}
 
 	for _, pod := range list.Items {
-		c.CoreV1().Pods(ns).Delete(pod.Name, &metav1.DeleteOptions{})
-		vms = append(vms, pod.Name)
+		//make sure only the completed VM virt-launcher pods are cleaned up
+		if strings.Contains(pod.Name, "virt-launcher") {
+			c.CoreV1().Pods(ns).Delete(pod.Name, &metav1.DeleteOptions{})
+			vms = append(vms, pod.Name)
+		}
 	}
 	return nil, vms
 }
