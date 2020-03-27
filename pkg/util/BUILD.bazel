@@ -3,10 +3,26 @@ load("@io_bazel_rules_go//go:def.bzl", "go_library")
 go_library(
     name = "go_default_library",
     srcs = [
+        "api_helper.go",
         "hw_helper.go",
         "util.go",
     ],
     importpath = "kubevirt.io/kubevirt/pkg/util",
     visibility = ["//visibility:public"],
-    deps = ["//staging/src/kubevirt.io/client-go/api/v1:go_default_library"],
+    deps = [
+        "//staging/src/kubevirt.io/client-go/api/v1:go_default_library",
+        "//staging/src/kubevirt.io/client-go/generated/containerized-data-importer/clientset/versioned:go_default_library",
+        "//staging/src/kubevirt.io/client-go/kubecli:go_default_library",
+        "//vendor/github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/apis/k8s.cni.cncf.io/v1:go_default_library",
+        "//vendor/k8s.io/api/core/v1:go_default_library",
+        "//vendor/k8s.io/apimachinery/pkg/api/errors:go_default_library",
+        "//vendor/k8s.io/apimachinery/pkg/api/resource:go_default_library",
+        "//vendor/k8s.io/apimachinery/pkg/apis/meta/v1:go_default_library",
+        "//vendor/k8s.io/apimachinery/pkg/labels:go_default_library",
+        "//vendor/k8s.io/apimachinery/pkg/runtime/schema:go_default_library",
+        "//vendor/k8s.io/apimachinery/pkg/util/rand:go_default_library",
+        "//vendor/k8s.io/apimachinery/pkg/util/wait:go_default_library",
+        "//vendor/k8s.io/client-go/tools/clientcmd:go_default_library",
+        "//vendor/kubevirt.io/containerized-data-importer/pkg/apis/core/v1alpha1:go_default_library",
+    ],
 )
