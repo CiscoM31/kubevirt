@@ -67,13 +67,13 @@ require (
 	k8s.io/client-go v12.0.0+incompatible
 	k8s.io/kube-aggregator v0.16.4
 	k8s.io/utils v0.0.0-20190801114015-581e00157fb1
-	kubevirt.io/client-go v0.0.0-00010101000000-000000000000
-	kubevirt.io/containerized-data-importer v1.10.9
 	kubevirt.io/qe-tools v0.1.3-0.20190512140058-934db0579e0c
 	sigs.k8s.io/controller-runtime v0.1.9 // indirect
 )
 
 replace (
+	kubevirt.io/client-go => /triton/src/vendor/kubevirt.io/client-go
+	kubevirt.io/containerized-data-importer /triton/src/vendor/kubevirt.io/containerized-data-importer
 	github.com/Azure/go-autorest => github.com/Azure/go-autorest v11.0.0+incompatible
 	github.com/coreos/prometheus-operator => github.com/coreos/prometheus-operator v0.0.0-20181206002233-dd6f23e7207c
 	github.com/go-kit/kit => github.com/go-kit/kit v0.3.0
