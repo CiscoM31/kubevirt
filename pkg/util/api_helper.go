@@ -51,7 +51,7 @@ type DiskParams struct {
 const (
 	pvcCreatedByVM = "vmCreated"
 	pvcCDICreated  = "cdi.kubevirt.io/storage.import.source"
-	CloudInitName  = "CloudInitDisk"
+	CloudInitName  = "cloudinitdisk"
 )
 
 func NewVM(namespace string, vmName string) *v1.VirtualMachine {
