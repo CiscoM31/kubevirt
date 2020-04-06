@@ -201,7 +201,7 @@ func NewApiServerDeployment(namespace string, repository string, imagePrefix str
 	pod := &deployment.Spec.Template.Spec
 	pod.ServiceAccountName = rbac.ApiServiceAccountName
 	pod.SecurityContext = &corev1.PodSecurityContext{
-		RunAsNonRoot: boolPtr(true),
+		RunAsNonRoot: boolPtr(false),
 	}
 
 	container := &deployment.Spec.Template.Spec.Containers[0]
@@ -256,7 +256,7 @@ func NewControllerDeployment(namespace string, repository string, imagePrefix st
 	pod := &deployment.Spec.Template.Spec
 	pod.ServiceAccountName = rbac.ControllerServiceAccountName
 	pod.SecurityContext = &corev1.PodSecurityContext{
-		RunAsNonRoot: boolPtr(true),
+		RunAsNonRoot: boolPtr(false),
 	}
 
 	launcherVersion = AddVersionSeparatorPrefix(launcherVersion)
@@ -539,7 +539,7 @@ func NewOperatorDeployment(namespace string, repository string, imagePrefix stri
 						},
 					},
 					SecurityContext: &corev1.PodSecurityContext{
-						RunAsNonRoot: boolPtr(true),
+						RunAsNonRoot: boolPtr(false),
 					},
 				},
 			},
