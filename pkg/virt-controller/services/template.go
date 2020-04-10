@@ -512,21 +512,42 @@ func (t *templateService) RenderLaunchManifest(vmi *v1.VirtualMachineInstance) (
 			serviceAccountName = volume.ServiceAccount.ServiceAccountName
 		}
 
-		if volume.CloudInitNoCloud != nil && volume.CloudInitNoCloud.UserDataSecretRef != nil {
-			// attach a secret referenced by the user
-			volumes = append(volumes, k8sv1.Volume{
-				Name: volume.Name,
-				VolumeSource: k8sv1.VolumeSource{
-					Secret: &k8sv1.SecretVolumeSource{
-						SecretName: volume.CloudInitNoCloud.UserDataSecretRef.Name,
+		if volume.CloudInitNoCloud != nil {
+			if volume.CloudInitNoCloud.UserDataSecretRef != nil {
+				// attach a secret referenced by the user
+				volumes = append(volumes, k8sv1.Volume{
+					Name: volume.Name+"-udata",
+					VolumeSource: k8sv1.VolumeSource{
+						Secret: &k8sv1.SecretVolumeSource{
+							SecretName: volume.CloudInitNoCloud.UserDataSecretRef.Name,
+						},
 					},
-				},
-			})
-			volumeMounts = append(volumeMounts, k8sv1.VolumeMount{
-				Name:      volume.Name,
-				MountPath: filepath.Join(config.SecretSourceDir, volume.Name),
-				ReadOnly:  true,
-			})
+				})
+				volumeMounts = append(volumeMounts, k8sv1.VolumeMount{
+					Name:      volume.Name+"-udata",
+					MountPath: filepath.Join(config.SecretSourceDir, volume.Name, "userdata"),
+					SubPath: "userdata",
+					ReadOnly:  true,
+
+				})
+			}
+			if volume.CloudInitNoCloud.NetworkDataSecretRef != nil {
+				// attach a secret referenced by the networkdata
+				volumes = append(volumes, k8sv1.Volume{
+					Name: volume.Name+"-ndata",
+					VolumeSource: k8sv1.VolumeSource{
+						Secret: &k8sv1.SecretVolumeSource{
+							SecretName: volume.CloudInitNoCloud.NetworkDataSecretRef.Name,
+						},
+					},
+				})
+				volumeMounts = append(volumeMounts, k8sv1.VolumeMount{
+					Name:      volume.Name+"-ndata",
+					MountPath: filepath.Join(config.SecretSourceDir, volume.Name, "networkdata"),
+					SubPath: "networkdata",
+					ReadOnly:  true,
+				})
+			}
 		}
 
 		if volume.CloudInitConfigDrive != nil && volume.CloudInitConfigDrive.UserDataSecretRef != nil {
