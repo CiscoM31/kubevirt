@@ -30,6 +30,7 @@ import (
 	cdiClientset "kubevirt.io/client-go/generated/containerized-data-importer/clientset/versioned"
 	"kubevirt.io/client-go/kubecli"
 	cdiv1 "kubevirt.io/containerized-data-importer/pkg/apis/core/v1alpha1"
+	"encoding/base64"
 )
 
 type DiskParams struct {
@@ -438,20 +439,136 @@ type CloudConfig struct {
 	NetworkData          string
 }
 
-func NewCloudInitConfig(config *CloudConfig) *v1.CloudInitNoCloudSource {
+func NewCloudInitConfig(c kubecli.KubevirtClient, vmName, ns string, config *CloudConfig) (*v1.CloudInitNoCloudSource, error) {
+	usersecret := k8sv1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+		Name:      vmName+"-ciud",
+		Namespace: ns,
+	},
+		Type: "Opaque",
+	}
+
+	nwsecret := k8sv1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      vmName+"-cind",
+			Namespace: ns,
+		},
+		Type: "Opaque",
+	}
+
+	if config.UserDataBase64 != "" {
+		uData, err := base64.StdEncoding.DecodeString(config.UserDataBase64)
+		if err != nil {
+			return nil, err
+		}
+		usersecret.Data = map[string][]byte{
+			"userdata": uData,
+		}
+		usersecret.Labels = map[string]string{"dataType": "base64"}
+	} else if config.UserData != "" {
+		usersecret.Data = map[string][]byte{
+			"userdata": []byte(config.UserData),
+		}
+		usersecret.Labels = map[string]string{"dataType": "string"}
+	}
+
+	if config.NetworkDataBase64 != "" {
+		nwData, err := base64.StdEncoding.DecodeString(config.NetworkDataBase64)
+		if err != nil {
+			return nil, err
+		}
+		nwsecret.Data = map[string][]byte{
+			"networkdata": nwData,
+		}
+		nwsecret.Labels = map[string]string{"dataType": "base64"}
+	} else if config.NetworkData != "" {
+		nwsecret.Data = map[string][]byte{
+			"networkdata": []byte(config.NetworkData),
+		}
+		nwsecret.Labels = map[string]string{"dataType": "string"}
+	}
+
+	_, err := c.CoreV1().Secrets(ns).Create(&usersecret)
+	if err != nil {
+		if errors.IsAlreadyExists(err) {
+			_, err = c.CoreV1().Secrets(ns).Update(&usersecret)
+			if err != nil {
+				return nil, err
+			}
+		} else {
+			return nil, err
+		}
+	}
+	_, err = c.CoreV1().Secrets(ns).Create(&nwsecret)
+	if err != nil {
+		if errors.IsAlreadyExists(err) {
+			_, err = c.CoreV1().Secrets(ns).Update(&nwsecret)
+			if err != nil {
+				return nil, err
+			}
+		} else {
+			return nil, err
+		}
+	}
+
 	cloudInit := &v1.CloudInitNoCloudSource{
-		UserDataBase64:    config.UserDataBase64,
-		UserData:          config.UserData,
-		NetworkDataBase64: config.NetworkDataBase64,
-		NetworkData:       config.NetworkData,
+		UserDataSecretRef: &k8sv1.LocalObjectReference{Name: usersecret.Name},
+		NetworkDataSecretRef: &k8sv1.LocalObjectReference{Name: nwsecret.Name},
 	}
-	if config.UserDataSecretRef != "" {
-		cloudInit.UserDataSecretRef = &k8sv1.LocalObjectReference{Name: config.UserDataSecretRef}
+	return cloudInit, nil
+}
+
+func GetCloudInitUserData(c kubecli.KubevirtClient, ns, secret string) (string, string, error) {
+	sec, err := c.CoreV1().Secrets(ns).Get(secret, metav1.GetOptions{})
+	if err != nil {
+		return "", "", err
 	}
-	if config.NetworkDataSecretRef != "" {
-		cloudInit.NetworkDataSecretRef = &k8sv1.LocalObjectReference{Name: config.NetworkDataSecretRef}
+	labels := sec.ObjectMeta.GetLabels()
+	if labels == nil {
+		return "", "", fmt.Errorf("get CI Userdata invalid labels")
 	}
-	return cloudInit
+	if dType, ok := labels["dataType"]; ok {
+		if dType == "string" {
+			if ud, k := sec.Data["userdata"]; k {
+				return string(ud), "", nil
+			}
+			return "", "", fmt.Errorf("invalid userdata on secret")
+		} else if dType == "base64"{
+			if ud, k := sec.Data["userdata"]; k {
+				ud64 := base64.StdEncoding.EncodeToString(ud)
+				return "", ud64, nil
+			}
+			return "", "", fmt.Errorf("invalid userdata on secret")
+		}
+	}
+	return "", "", fmt.Errorf("failed to find CI data type label")
+}
+
+func GetCloudInitNetworkData(c kubecli.KubevirtClient, ns, secret string) (string, string, error) {
+
+	sec, err := c.CoreV1().Secrets(ns).Get(secret, metav1.GetOptions{})
+	if err != nil {
+		return "", "", err
+	}
+	labels := sec.ObjectMeta.GetLabels()
+	if labels == nil {
+		return "", "", fmt.Errorf("get CI NetworkData invalid labels")
+	}
+	if dType, ok := labels["dataType"]; ok {
+		if dType == "string" {
+			if nd, k := sec.Data["networkdata"]; k {
+				return string(nd), "", nil
+			}
+			return "", "", fmt.Errorf("invalid userdata on secret")
+		} else if dType == "base64"{
+			if nd, k := sec.Data["networkdata"]; k {
+				nd64 := base64.StdEncoding.EncodeToString(nd)
+				return "", nd64, nil
+			}
+			return "", "", fmt.Errorf("invalid userdata on secret")
+		}
+	}
+	return "", "", fmt.Errorf("failed to find CI data type label")
 }
 
 // Attach a CloudInit disk with the given cloud config
@@ -465,7 +582,11 @@ func AttachCloudInitDisk(c kubecli.KubevirtClient, vm *v1.VirtualMachine, config
 	vol := v1.Volume{Name: CloudInitName}
 
 	if config.ConfigType == CloudConfigTypeNoCloud {
-		vol.CloudInitNoCloud = NewCloudInitConfig(config)
+		cloudInitNoCloud,err := NewCloudInitConfig(c, vm.Name, vm.Namespace, config)
+		if err != nil {
+			return err
+		}
+		vol.VolumeSource = v1.VolumeSource{CloudInitNoCloud: cloudInitNoCloud}
 	} else {
 		// FIXME - needs next version of kubevirt
 	}
