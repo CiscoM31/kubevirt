@@ -36,6 +36,7 @@ import (
 type DiskParams struct {
 	Name, VolName, Class, Bus string
 	Svolume, SfilePath        string
+	SourceCerts               string
 	Evolume, EfilePath        string
 	DataDisk                  string
 	Capacity, Format          string
@@ -53,6 +54,7 @@ const (
 	pvcCreatedByVM = "vmCreated"
 	pvcCDICreated  = "cdi.kubevirt.io/storage.import.source"
 	CloudInitName  = "cloudinitdisk"
+	DefaultTLSCert  = "default-tls-cert"
 )
 
 func NewVM(namespace string, vmName string) *v1.VirtualMachine {
@@ -293,6 +295,40 @@ func VDiskAccessModetoPVAccessMode(mode string) []k8sv1.PersistentVolumeAccessMo
 		return []k8sv1.PersistentVolumeAccessMode{k8sv1.ReadOnlyMany}
 	}
 	return []k8sv1.PersistentVolumeAccessMode{k8sv1.ReadWriteOnce}
+}
+
+func CreateCertConfigMap(client kubecli.KubevirtClient, certMap *k8sv1.ConfigMap) error {
+	if certMap == nil {
+		return nil
+	}
+	_, err := client.CoreV1().ConfigMaps(certMap.Namespace).Create(certMap)
+	if errors.IsAlreadyExists(err) {
+		_, err = client.CoreV1().ConfigMaps(certMap.Namespace).Update(certMap)
+	}
+	return err
+}
+
+func DeleteCertConfigMap(c kubecli.KubevirtClient, name, ns string) error {
+	return c.CoreV1().ConfigMaps(ns).Delete(name, &metav1.DeleteOptions{})
+}
+
+func NewCertConfigMap(params *DiskParams) *k8sv1.ConfigMap {
+	if params.SourceCerts != "" {
+		cert, err := base64.StdEncoding.DecodeString(params.SourceCerts)
+		if err != nil {
+			return  nil
+		}
+		return &k8sv1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{
+				Namespace: params.NameSpace,
+				Name:      strings.ToLower(params.Name),
+			},
+			Data: map[string]string{
+				"ca.pem": string(cert),
+			},
+		}
+	}
+	return nil
 }
 
 // NewDataVolumeWithHTTPImport initializes a DataVolume struct with HTTP annotations
@@ -633,7 +669,23 @@ func AttachDisk(c kubecli.KubevirtClient, vm *v1.VirtualMachine, diskParams Disk
 				if err == nil {
 					// HTTP source datavolume
 					dv := NewDataVolumeWithHTTPImport(&diskParams)
-					err := SetDVOwnerLabel(dv, vm.Name)
+
+					if diskParams.SourceCerts != "" {
+						cert := NewCertConfigMap(&diskParams)
+						err := CreateCertConfigMap(c, cert)
+						if err != nil {
+							return fmt.Errorf("failed to create cert configmap: %v", err)
+						}
+						dv.Spec.Source.HTTP.CertConfigMap = cert.Name
+					} else {
+						// lets look for default certs if available, we'll try to them
+						_, err := c.CoreV1().ConfigMaps(DefaultNs).Get(DefaultTLSCert, metav1.GetOptions{})
+						if err == nil {
+							dv.Spec.Source.HTTP.CertConfigMap = DefaultTLSCert
+						}
+					}
+
+					err = SetDVOwnerLabel(dv, vm.Name)
 					if err != nil {
 						return err
 					}
@@ -1384,7 +1436,7 @@ func RemoveDVOwnerLabel(dvName, owner, ns string) error {
 }
 
 // Create the DataVolume for the vdisk
-func CreateDataVolume(params DiskParams, ns string) error {
+func CreateDataVolume(params DiskParams, kc kubecli.KubevirtClient, ns string) error {
 	var dv *cdiv1.DataVolume
 	var err error
 
@@ -1398,6 +1450,21 @@ func CreateDataVolume(params DiskParams, ns string) error {
 		_, err = url.ParseRequestURI(params.SfilePath)
 		if err == nil {
 			dv = NewDataVolumeWithHTTPImport(&params)
+
+			if params.SourceCerts != "" {
+				cert := NewCertConfigMap(&params)
+				err := CreateCertConfigMap(kc, cert)
+				if err != nil {
+					return fmt.Errorf("failed to create cert configmap: %v", err)
+				}
+				dv.Spec.Source.HTTP.CertConfigMap = cert.Name
+			} else {
+				// lets look for default certs if available, we'll try to the
+				_, err := kc.CoreV1().ConfigMaps(DefaultNs).Get(DefaultTLSCert, metav1.GetOptions{})
+				if err == nil {
+					dv.Spec.Source.HTTP.CertConfigMap = DefaultTLSCert
+				}
+			}
 		} else {
 			return err
 		}
@@ -1460,7 +1527,7 @@ func GetDiskDV(name, ns string) (*cdiv1.DataVolume, error) {
 }
 
 // Delete a DataDisk
-func DeleteDataDisk(diskName, ns string) error {
+func DeleteDataDisk(kv kubecli.KubevirtClient, diskName, ns string) error {
 	c, err := GetCDIClient()
 	if err != nil {
 		return err
@@ -1480,6 +1547,9 @@ func DeleteDataDisk(diskName, ns string) error {
 		}
 	}
 
+	if dv.Spec.Source.HTTP != nil && dv.Spec.Source.HTTP.CertConfigMap != "" {
+		kv.CoreV1().ConfigMaps(ns).Delete(dv.Spec.Source.HTTP.CertConfigMap, &metav1.DeleteOptions{})
+	}
 	return c.CdiV1alpha1().DataVolumes(ns).Delete(diskName, &metav1.DeleteOptions{})
 }
 
