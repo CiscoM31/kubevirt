@@ -1603,6 +1603,32 @@ func LiveMigrateVM(c kubecli.KubevirtClient, vmName, ns string) error {
 	return err
 }
 
+// Cancel live migration on the given VM
+func CancelLiveMigrateVM(c kubecli.KubevirtClient, vmName, ns string) error {
+	if c == nil {
+		return fmt.Errorf("Invalid kubevirt client")
+	}
+
+	migrate := &v1.VirtualMachineInstanceMigration{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      vmName + "-migration",
+			Namespace: ns,
+		},
+		Spec: v1.VirtualMachineInstanceMigrationSpec{VMIName: vmName},
+	}
+
+	jobs, err := c.VirtualMachineInstanceMigration(ns).List(&metav1.ListOptions{})
+	if err != nil {
+		return err
+	}
+	if len(jobs.Items) == 0 {
+		return fmt.Errorf("No migration job in progress to cancel")
+	}
+
+	c.VirtualMachineInstanceMigration(ns).Delete(migrate.Name, &metav1.DeleteOptions{})
+	return err
+}
+
 // Get live migration status
 func GetLiveMigrateStatus(c kubecli.KubevirtClient, vmName, ns string) (string, error) {
 	if c == nil {
@@ -1652,7 +1678,7 @@ func GetVMNetwork(c kubecli.KubevirtClient, name, ns string) (*networkv1.Network
 	return c.NetworkClient().K8sCniCncfIoV1().NetworkAttachmentDefinitions(ns).Get(name, metav1.GetOptions{})
 }
 
-
+// setup Kubevirt unschedulable taint
 func SetNodeKVUnSchedulable(c kubecli.KubevirtClient, nodeName string, set bool) error {
 	node, err := c.CoreV1().Nodes().Get(nodeName, metav1.GetOptions{})
 	if err != nil {
@@ -1671,8 +1697,9 @@ func SetNodeKVUnSchedulable(c kubecli.KubevirtClient, nodeName string, set bool)
 			Effect: k8sv1.TaintEffectNoSchedule,
 		})
 	} else {
+		// remove the taint.
 		oldTaints := new.Spec.Taints
-		new.Spec.Taints = make([]k8sv1.Taint, 0)
+		new.Spec.Taints = []k8sv1.Taint{}
 		for _, taint := range oldTaints {
 			if taint.Key != "kubevirt.io/drain" {
 				new.Spec.Taints = append(new.Spec.Taints, taint)
@@ -1693,4 +1720,71 @@ func SetNodeKVUnSchedulable(c kubecli.KubevirtClient, nodeName string, set bool)
 		return err
 	}
 	return nil
+}
+
+func AbortPendingEvictionMigrations(c kubecli.KubevirtClient, nodeName string) error {
+	migs, err := c.VirtualMachineInstanceMigration(DefaultNs).List(&metav1.ListOptions{})
+	if err != nil {
+		return err
+	}
+
+	// Get all VMIs on node  that is aborting eviction
+	vmis, err := GetVMIsOnNode(c, nodeName, DefaultNs)
+	if err !=  nil {
+		return err
+	}
+	vmiMap := make(map[string]v1.VirtualMachineInstance)
+	for _, vmi := range vmis.Items {
+		vmiMap[vmi.Name] = vmi
+	}
+
+	var er error
+	for _, mig := range migs.Items {
+		_, existsOnNode := vmiMap[mig.Spec.VMIName]
+		// is not running or done, clean it up
+		if (mig.Status.Phase == v1.MigrationScheduling ||
+			mig.Status.Phase == v1.MigrationScheduled ||
+			mig.Status.Phase == v1.MigrationPending ||
+			mig.Status.Phase == v1.MigrationFailed ||
+			mig.Status.Phase == v1.MigrationSucceeded ||
+			mig.Status.Phase == v1.MigrationPhaseUnset) && existsOnNode {
+			mig.Finalizers = make([]string, 0)
+			_, err := c.VirtualMachineInstanceMigration(DefaultNs).Update(&mig)
+			if err != nil {
+				er = err
+				fmt.Printf("Failed to update migration object: %v, VMI:%v, err:%v", mig.Name, mig.Spec.VMIName, err)
+			}
+			err = c.VirtualMachineInstanceMigration(DefaultNs).Delete(mig.Name, &metav1.DeleteOptions{})
+			if err != nil {
+				er = err
+				fmt.Printf("Failed to clean up migration object: %v, VMI:%v, err:%v", mig.Name, mig.Spec.VMIName, err)
+			} else {
+				fmt.Printf("Cleaned up eviction migration for VMI: %v/%v\n", mig.Spec.VMIName, mig.Name)
+			}
+
+		}
+	}
+
+	podList, err := GetVirtPodList(c, nodeName, DefaultNs)
+	if err != nil {
+		return err
+	}
+
+	// Cleanup any pods that are left behind. If VM cannot be
+	// migrated, virt-launch pods are left in pending state. clean
+	// them up as we are aborting.
+	for _, pod := range podList.Items {
+		if jobName, ok := pod.Annotations["kubevirt.io/migrationJobName"]; ok {
+			if strings.Contains(jobName, "kubevirt-evacuation") {
+				err = c.CoreV1().Pods(DefaultNs).Delete(pod.Name, &metav1.DeleteOptions{})
+				if err != nil {
+					fmt.Print("Failed to clean up eviction migration pod: %v, err: %v", pod.Name, err)
+				} else {
+					fmt.Printf("Eviction migration POD:%v cleanup\n", pod.Name)
+				}
+			}
+		}
+	}
+
+	return er
 }
