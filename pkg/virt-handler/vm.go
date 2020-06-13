@@ -299,6 +299,7 @@ func (d *VirtualMachineController) updateVMIStatus(vmi *v1.VirtualMachineInstanc
 
 	// Don't update the VirtualMachineInstance if it is already in a final state
 	if vmi.IsFinal() {
+		log.Log.Infof("VMI state is final. not updating  anymore.")
 		return nil
 	}
 
@@ -477,15 +478,18 @@ func (d *VirtualMachineController) updateVMIStatus(vmi *v1.VirtualMachineInstanc
 		if !reflect.DeepEqual(oldStatus, vmi.Status) {
 			_, err = d.clientset.VirtualMachineInstance(vmi.ObjectMeta.Namespace).Update(vmi)
 			if err != nil {
+				log.Log.Infof("VMI failed to update: phase: %v", vmi.Status.Phase)
 				return err
 			}
 		}
+		log.Log.Infof("VMI domain migrated %v", vmi.Status.Phase)
 		return nil
 	}
 
 	// Calculate the new VirtualMachineInstance state based on what libvirt reported
 	err = d.setVmPhaseForStatusReason(domain, vmi)
 	if err != nil {
+		log.Log.Infof("VMI failed to setVMPhase: phase: %v", vmi.Status.Phase)
 		return err
 	}
 
@@ -576,11 +580,13 @@ func (d *VirtualMachineController) updateVMIStatus(vmi *v1.VirtualMachineInstanc
 	if !reflect.DeepEqual(oldStatus, vmi.Status) {
 		_, err = d.clientset.VirtualMachineInstance(vmi.ObjectMeta.Namespace).Update(vmi)
 		if err != nil {
+			log.Log.Infof("VMI failed to update KB object: phase: %v", vmi.Status.Phase)
 			return err
 		}
 	}
 
 	if oldStatus.Phase != vmi.Status.Phase {
+		log.Log.Infof("VMI sending event phase: %v", vmi.Status.Phase)
 		switch vmi.Status.Phase {
 		case v1.Running:
 			d.recorder.Event(vmi, k8sv1.EventTypeNormal, v1.Started.String(), "VirtualMachineInstance started.")
@@ -1555,6 +1561,7 @@ func (d *VirtualMachineController) setVmPhaseForStatusReason(domain *api.Domain,
 	if err != nil {
 		return err
 	}
+	log.Log.Infof("VMI set phase: %v", phase)
 	vmi.Status.Phase = phase
 	return nil
 }
