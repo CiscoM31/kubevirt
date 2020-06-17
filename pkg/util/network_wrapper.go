@@ -4,13 +4,13 @@ import (
 	"errors"
 	"fmt"
 
-	"kubevirt.io/client-go/kubecli"
-	networkclient "kubevirt.io/client-go/generated/network-attachment-definition-client/clientset/versioned"
 	nettypes "github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/apis/k8s.cni.cncf.io/v1"
+
+	networkclient "kubevirt.io/client-go/generated/network-attachment-definition-client/clientset/versioned"
+	"kubevirt.io/client-go/kubecli"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
-
 
 const (
 	DefaultNs string = "default"
@@ -18,7 +18,7 @@ const (
 
 type ClientInfo struct {
 	//Client    kubernetes.Interface
-	NetClient   networkclient.Interface //
+	NetClient networkclient.Interface //
 	//EventBroadcaster record.EventBroadcaster
 	//EventRecorder    record.EventRecorder
 }
@@ -102,7 +102,6 @@ func DeleteNetAttachDef(ns string, name string) error {
 func (c *ClientInfo) DeleteNetAttachDef(ns string, name string) error {
 	return c.NetClient.K8sCniCncfIoV1().NetworkAttachmentDefinitions(ns).Delete(name, &metav1.DeleteOptions{})
 }
-
 
 /*
 

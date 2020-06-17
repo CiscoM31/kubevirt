@@ -7,14 +7,16 @@ import (
 	"encoding/json"
 	errors2 "errors"
 	"fmt"
-	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/apimachinery/pkg/util/strategicpatch"
+	"log"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
+
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/strategicpatch"
 
 	k8sv1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -29,11 +31,12 @@ import (
 
 	networkv1 "github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/apis/k8s.cni.cncf.io/v1"
 
+	"encoding/base64"
+
 	v1 "kubevirt.io/client-go/api/v1"
 	cdiClientset "kubevirt.io/client-go/generated/containerized-data-importer/clientset/versioned"
 	"kubevirt.io/client-go/kubecli"
 	cdiv1 "kubevirt.io/containerized-data-importer/pkg/apis/core/v1alpha1"
-	"encoding/base64"
 )
 
 type DiskParams struct {
@@ -57,7 +60,7 @@ const (
 	pvcCreatedByVM = "vmCreated"
 	pvcCDICreated  = "cdi.kubevirt.io/storage.import.source"
 	CloudInitName  = "cloudinitdisk"
-	DefaultTLSCert  = "default-tls-cert"
+	DefaultTLSCert = "default-tls-cert"
 )
 
 func NewVM(namespace string, vmName string) *v1.VirtualMachine {
@@ -319,7 +322,7 @@ func NewCertConfigMap(params *DiskParams) *k8sv1.ConfigMap {
 	if params.SourceCerts != "" {
 		cert, err := base64.StdEncoding.DecodeString(params.SourceCerts)
 		if err != nil {
-			return  nil
+			return nil
 		}
 		return &k8sv1.ConfigMap{
 			ObjectMeta: metav1.ObjectMeta{
@@ -481,15 +484,15 @@ type CloudConfig struct {
 func NewCloudInitConfig(c kubecli.KubevirtClient, vmName, ns string, config *CloudConfig) (*v1.CloudInitNoCloudSource, error) {
 	usersecret := k8sv1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
-		Name:      vmName+"-ciud",
-		Namespace: ns,
-	},
+			Name:      vmName + "-ciud",
+			Namespace: ns,
+		},
 		Type: "Opaque",
 	}
 
 	nwsecret := k8sv1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      vmName+"-cind",
+			Name:      vmName + "-cind",
 			Namespace: ns,
 		},
 		Type: "Opaque",
@@ -576,7 +579,7 @@ func GetCloudInitUserData(c kubecli.KubevirtClient, ns, secret string) (string, 
 				return string(ud), "", nil
 			}
 			return "", "", fmt.Errorf("invalid userdata on secret")
-		} else if dType == "base64"{
+		} else if dType == "base64" {
 			if ud, k := sec.Data["userdata"]; k {
 				ud64 := base64.StdEncoding.EncodeToString(ud)
 				return "", ud64, nil
@@ -603,7 +606,7 @@ func GetCloudInitNetworkData(c kubecli.KubevirtClient, ns, secret string) (strin
 				return string(nd), "", nil
 			}
 			return "", "", fmt.Errorf("invalid userdata on secret")
-		} else if dType == "base64"{
+		} else if dType == "base64" {
 			if nd, k := sec.Data["networkdata"]; k {
 				nd64 := base64.StdEncoding.EncodeToString(nd)
 				return "", nd64, nil
@@ -625,7 +628,7 @@ func AttachCloudInitDisk(c kubecli.KubevirtClient, vm *v1.VirtualMachine, config
 	vol := v1.Volume{Name: CloudInitName}
 
 	if config.ConfigType == CloudConfigTypeNoCloud {
-		cloudInitNoCloud,err := NewCloudInitConfig(c, vm.Name, vm.Namespace, config)
+		cloudInitNoCloud, err := NewCloudInitConfig(c, vm.Name, vm.Namespace, config)
 		if err != nil {
 			return err
 		}
@@ -852,16 +855,16 @@ func GetVM(c kubecli.KubevirtClient, vmname, ns string) (*v1.VirtualMachine, err
 	return c.VirtualMachine(ns).Get(vmname, &metav1.GetOptions{})
 }
 
-func GetVMPodRef(c kubecli.KubevirtClient, vmName, ns string) (string, error) {
+func GetVMPod(c kubecli.KubevirtClient, vmName, ns string) (vmPod *k8sv1.Pod, err error) {
 	label := map[string]string{"name": vmName}
 
+	var list *k8sv1.PodList
 	//filter our request to find pods for this VM
-	list, err := c.CoreV1().Pods(ns).List(metav1.ListOptions{LabelSelector: labels.Set(label).String()})
+	list, err = c.CoreV1().Pods(ns).List(metav1.ListOptions{LabelSelector: labels.Set(label).String()})
 	if err != nil {
-		return "", err
+		return
 	}
 
-	vmref := ""
 	var ts *time.Time
 	for _, pod := range list.Items {
 		// look for the oldest running pod. That is the pod that the VM is on
@@ -871,17 +874,33 @@ func GetVMPodRef(c kubecli.KubevirtClient, vmName, ns string) (string, error) {
 			if ts == nil {
 				t := pod.GetCreationTimestamp().Time
 				ts = &t
-				vmref = strings.TrimLeft(pod.Name, "virt-launcher-")
+				vmPod = &pod
 			} else {
 				// is there an older pod
 				if pod.GetCreationTimestamp().Time.Sub(*ts) < 0 {
 					t := pod.GetCreationTimestamp().Time
 					ts = &t
-					vmref = strings.TrimLeft(pod.Name, "virt-launcher-")
+					vmPod = &pod
 				}
 			}
 		}
 	}
+
+	if vmPod == nil {
+		err = fmt.Errorf("Pod for VM %s not found in namespace %s. List of matching VMs found = %d", vmName, ns, len(list.Items))
+	}
+
+	return vmPod, err
+}
+
+func GetVMPodRef(c kubecli.KubevirtClient, vmName, ns string) (string, error) {
+
+	vmPod, err := GetVMPod(c, vmName, ns)
+	if err != nil {
+		return "", err
+	}
+
+	vmref := strings.TrimLeft(vmPod.Name, "virt-launcher-")
 	if vmref != "" {
 		return vmref, nil
 	}
@@ -1042,6 +1061,86 @@ func getWeightedAffinityTerm(key, val string) k8sv1.WeightedPodAffinityTerm {
 	podTerm := k8sv1.PodAffinityTerm{LabelSelector: &labelSel, TopologyKey: "kubernetes.io/hostname"}
 	wPodTerm := k8sv1.WeightedPodAffinityTerm{Weight: 1, PodAffinityTerm: podTerm}
 	return wPodTerm
+}
+
+func CreateDryRunPods(c kubecli.KubevirtClient, hostname, image string) ([]string, error) {
+
+	failedVMList := []string{}
+	dryRunPodsList := []*k8sv1.Pod{}
+
+	defer func() {
+		var e error
+		for _, p := range dryRunPodsList {
+			e = c.CoreV1().Pods(DefaultNs).Delete(p.Name, &metav1.DeleteOptions{})
+			if e != nil {
+				log.Printf("Failed to cleanup dryrun pod %s. Error = %s", p.Name, e.Error())
+			} else {
+				log.Printf("Deleted dryrun pod: %s succesfully", p.Name)
+			}
+		}
+	}()
+
+	vmiList, err := GetVMIList(c, DefaultNs)
+	if err != nil {
+		return failedVMList, err
+	}
+
+	for _, vmi := range vmiList.Items {
+		if strings.Contains(vmi.Name, "dryrunpod") {
+			continue
+		}
+
+		var p *k8sv1.Pod
+		p, err = GetVMPod(c, vmi.Name, vmi.Namespace)
+		if err != nil {
+			return failedVMList, err
+		}
+
+		if !strings.Contains(strings.ToLower(p.Spec.NodeName), hostname) {
+			log.Printf("Skipping VM running on node %s, since it isn't running on the target host %s", p.Spec.NodeName, hostname)
+			continue
+		}
+
+		dryRunPod := &k8sv1.Pod{}
+		dName := vmi.Name + "-dryrunpod"
+		dryRunPod.Name = dName
+
+		labels := dryRunPod.ObjectMeta.GetObjectMeta().GetLabels()
+		if labels == nil {
+			labels = map[string]string{}
+		}
+		labels["name"] = dName
+		dryRunPod.ObjectMeta.GetObjectMeta().SetLabels(labels)
+
+		dryRunPod.Spec = k8sv1.PodSpec{
+			Containers: []k8sv1.Container{
+				{
+					Name:  dName,
+					Image: image,
+					Command: []string{
+						"/bin/sh",
+						"-ec",
+						"count=0; until [ $count -eq 60 ]; do sleep 5; count=$((count+1)); done",
+					},
+					Resources: p.Spec.Containers[0].Resources,
+				},
+			},
+		}
+
+		log.Printf("Creating dryrun pod with name %s for VM %s", dryRunPod.Name, vmi.Name)
+
+		//create dryrun pod
+		_, err = c.CoreV1().Pods(vmi.Namespace).Create(dryRunPod)
+		if err != nil {
+			failedVMList = append(failedVMList, vmi.Name)
+			log.Printf("Failed to create dryrun pod for VM: %s. Error = %s", vmi.Name, err.Error())
+		} else {
+			dryRunPodsList = append(dryRunPodsList, dryRunPod)
+			log.Printf("Dryrun pod created for VM %s", vmi.Name)
+		}
+	}
+
+	return failedVMList, err
 }
 
 // drain pods from node and cardon it
@@ -1730,7 +1829,7 @@ func AbortPendingEvictionMigrations(c kubecli.KubevirtClient, nodeName string) e
 
 	// Get all VMIs on node  that is aborting eviction
 	vmis, err := GetVMIsOnNode(c, nodeName, DefaultNs)
-	if err !=  nil {
+	if err != nil {
 		return err
 	}
 	vmiMap := make(map[string]v1.VirtualMachineInstance)
@@ -1778,7 +1877,7 @@ func AbortPendingEvictionMigrations(c kubecli.KubevirtClient, nodeName string) e
 			if strings.Contains(jobName, "kubevirt-evacuation") {
 				err = c.CoreV1().Pods(DefaultNs).Delete(pod.Name, &metav1.DeleteOptions{})
 				if err != nil {
-					fmt.Print("Failed to clean up eviction migration pod: %v, err: %v", pod.Name, err)
+					fmt.Printf("Failed to clean up eviction migration pod: %s, err: %s", pod.Name, err.Error())
 				} else {
 					fmt.Printf("Eviction migration POD:%v cleanup\n", pod.Name)
 				}
