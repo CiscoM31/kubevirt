@@ -1566,7 +1566,7 @@ func DeleteDataDisk(kv kubecli.KubevirtClient, diskName, ns string) error {
 		}
 	}
 
-	if dv.Spec.Source.HTTP != nil && dv.Spec.Source.HTTP.CertConfigMap != "" {
+	if dv.Spec.Source.HTTP != nil && dv.Spec.Source.HTTP.CertConfigMap != "" && dv.Spec.Source.HTTP.CertConfigMap != DefaultTLSCert {
 		kv.CoreV1().ConfigMaps(ns).Delete(dv.Spec.Source.HTTP.CertConfigMap, &metav1.DeleteOptions{})
 	}
 	return c.CdiV1alpha1().DataVolumes(ns).Delete(diskName, &metav1.DeleteOptions{})
