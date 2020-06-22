@@ -4,8 +4,11 @@
 package util
 
 import (
+	"encoding/json"
 	errors2 "errors"
 	"fmt"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/strategicpatch"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -524,33 +527,37 @@ func NewCloudInitConfig(c kubecli.KubevirtClient, vmName, ns string, config *Clo
 		nwsecret.Labels = map[string]string{"dataType": "string"}
 	}
 
-	_, err := c.CoreV1().Secrets(ns).Create(&usersecret)
-	if err != nil {
-		if errors.IsAlreadyExists(err) {
-			_, err = c.CoreV1().Secrets(ns).Update(&usersecret)
-			if err != nil {
+	cloudInit := &v1.CloudInitNoCloudSource{}
+	if config.UserData != "" || config.UserDataBase64 != "" {
+		_, err := c.CoreV1().Secrets(ns).Create(&usersecret)
+		if err != nil {
+			if errors.IsAlreadyExists(err) {
+				_, err = c.CoreV1().Secrets(ns).Update(&usersecret)
+				if err != nil {
+					return nil, err
+				}
+			} else {
 				return nil, err
 			}
-		} else {
-			return nil, err
 		}
-	}
-	_, err = c.CoreV1().Secrets(ns).Create(&nwsecret)
-	if err != nil {
-		if errors.IsAlreadyExists(err) {
-			_, err = c.CoreV1().Secrets(ns).Update(&nwsecret)
-			if err != nil {
-				return nil, err
-			}
-		} else {
-			return nil, err
-		}
+		cloudInit.UserDataSecretRef = &k8sv1.LocalObjectReference{Name: usersecret.Name}
 	}
 
-	cloudInit := &v1.CloudInitNoCloudSource{
-		UserDataSecretRef: &k8sv1.LocalObjectReference{Name: usersecret.Name},
-		NetworkDataSecretRef: &k8sv1.LocalObjectReference{Name: nwsecret.Name},
+	if config.NetworkData != "" || config.NetworkDataBase64 != "" {
+		_, err := c.CoreV1().Secrets(ns).Create(&nwsecret)
+		if err != nil {
+			if errors.IsAlreadyExists(err) {
+				_, err = c.CoreV1().Secrets(ns).Update(&nwsecret)
+				if err != nil {
+					return nil, err
+				}
+			} else {
+				return nil, err
+			}
+		}
+		cloudInit.NetworkDataSecretRef = &k8sv1.LocalObjectReference{Name: nwsecret.Name}
 	}
+
 	return cloudInit, nil
 }
 
@@ -788,8 +795,20 @@ func GetVMList(c kubecli.KubevirtClient, ns string) (*v1.VirtualMachineList, err
 	return vms, err
 }
 
+func GetVMIsOnNode(c kubecli.KubevirtClient, node, ns string) (*v1.VirtualMachineInstanceList, error) {
+	selector := fmt.Sprintf("kubevirt.io/nodeName=%s", node)
+	vms, err := c.VirtualMachineInstance(ns).List(&metav1.ListOptions{LabelSelector: selector})
+	return vms, err
+}
+
 func GetPodList(c kubecli.KubevirtClient, ns string) (*k8sv1.PodList, error) {
 	pods, err := c.CoreV1().Pods(ns).List(metav1.ListOptions{})
+	return pods, err
+}
+
+func GetVirtPodList(c kubecli.KubevirtClient, nodeName, ns string) (*k8sv1.PodList, error) {
+	selector := fmt.Sprintf("kubevirt.io/nodeName=%s", nodeName)
+	pods, err := c.CoreV1().Pods(ns).List(metav1.ListOptions{LabelSelector: selector})
 	return pods, err
 }
 
@@ -1547,7 +1566,7 @@ func DeleteDataDisk(kv kubecli.KubevirtClient, diskName, ns string) error {
 		}
 	}
 
-	if dv.Spec.Source.HTTP != nil && dv.Spec.Source.HTTP.CertConfigMap != "" {
+	if dv.Spec.Source.HTTP != nil && dv.Spec.Source.HTTP.CertConfigMap != "" && dv.Spec.Source.HTTP.CertConfigMap != DefaultTLSCert {
 		kv.CoreV1().ConfigMaps(ns).Delete(dv.Spec.Source.HTTP.CertConfigMap, &metav1.DeleteOptions{})
 	}
 	return c.CdiV1alpha1().DataVolumes(ns).Delete(diskName, &metav1.DeleteOptions{})
@@ -1581,6 +1600,32 @@ func LiveMigrateVM(c kubecli.KubevirtClient, vmName, ns string) error {
 	}
 	c.VirtualMachineInstanceMigration(ns).Delete(migrate.Name, &metav1.DeleteOptions{})
 	_, err = c.VirtualMachineInstanceMigration(ns).Create(migrate)
+	return err
+}
+
+// Cancel live migration on the given VM
+func CancelLiveMigrateVM(c kubecli.KubevirtClient, vmName, ns string) error {
+	if c == nil {
+		return fmt.Errorf("Invalid kubevirt client")
+	}
+
+	migrate := &v1.VirtualMachineInstanceMigration{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      vmName + "-migration",
+			Namespace: ns,
+		},
+		Spec: v1.VirtualMachineInstanceMigrationSpec{VMIName: vmName},
+	}
+
+	jobs, err := c.VirtualMachineInstanceMigration(ns).List(&metav1.ListOptions{})
+	if err != nil {
+		return err
+	}
+	if len(jobs.Items) == 0 {
+		return fmt.Errorf("No migration job in progress to cancel")
+	}
+
+	c.VirtualMachineInstanceMigration(ns).Delete(migrate.Name, &metav1.DeleteOptions{})
 	return err
 }
 
@@ -1631,4 +1676,115 @@ func CleanupCompletedVMPODs(c kubecli.KubevirtClient, ns string) (error, []strin
 
 func GetVMNetwork(c kubecli.KubevirtClient, name, ns string) (*networkv1.NetworkAttachmentDefinition, error) {
 	return c.NetworkClient().K8sCniCncfIoV1().NetworkAttachmentDefinitions(ns).Get(name, metav1.GetOptions{})
+}
+
+// setup Kubevirt unschedulable taint
+func SetNodeKVUnSchedulable(c kubecli.KubevirtClient, nodeName string, set bool) error {
+	node, err := c.CoreV1().Nodes().Get(nodeName, metav1.GetOptions{})
+	if err != nil {
+		return err
+	}
+
+	old, err := json.Marshal(node)
+	if err != nil {
+		return err
+	}
+	new := node.DeepCopy()
+
+	if set {
+		new.Spec.Taints = append(new.Spec.Taints, k8sv1.Taint{
+			Key:    "kubevirt.io/drain",
+			Effect: k8sv1.TaintEffectNoSchedule,
+		})
+	} else {
+		// remove the taint.
+		oldTaints := new.Spec.Taints
+		new.Spec.Taints = []k8sv1.Taint{}
+		for _, taint := range oldTaints {
+			if taint.Key != "kubevirt.io/drain" {
+				new.Spec.Taints = append(new.Spec.Taints, taint)
+			}
+		}
+	}
+
+	newJson, err := json.Marshal(new)
+	if err != nil {
+		return err
+	}
+	patch, err := strategicpatch.CreateTwoWayMergePatch(old, newJson, node)
+	if err != nil {
+		return err
+	}
+	_, err = c.CoreV1().Nodes().Patch(node.Name, types.StrategicMergePatchType, patch)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func AbortPendingEvictionMigrations(c kubecli.KubevirtClient, nodeName string) error {
+	migs, err := c.VirtualMachineInstanceMigration(DefaultNs).List(&metav1.ListOptions{})
+	if err != nil {
+		return err
+	}
+
+	// Get all VMIs on node  that is aborting eviction
+	vmis, err := GetVMIsOnNode(c, nodeName, DefaultNs)
+	if err !=  nil {
+		return err
+	}
+	vmiMap := make(map[string]v1.VirtualMachineInstance)
+	for _, vmi := range vmis.Items {
+		vmiMap[vmi.Name] = vmi
+	}
+
+	var er error
+	for _, mig := range migs.Items {
+		_, existsOnNode := vmiMap[mig.Spec.VMIName]
+		// is not running or done, clean it up
+		if (mig.Status.Phase == v1.MigrationScheduling ||
+			mig.Status.Phase == v1.MigrationScheduled ||
+			mig.Status.Phase == v1.MigrationPending ||
+			mig.Status.Phase == v1.MigrationFailed ||
+			mig.Status.Phase == v1.MigrationSucceeded ||
+			mig.Status.Phase == v1.MigrationPhaseUnset) && existsOnNode {
+			mig.Finalizers = make([]string, 0)
+			_, err := c.VirtualMachineInstanceMigration(DefaultNs).Update(&mig)
+			if err != nil {
+				er = err
+				fmt.Printf("Failed to update migration object: %v, VMI:%v, err:%v", mig.Name, mig.Spec.VMIName, err)
+			}
+			err = c.VirtualMachineInstanceMigration(DefaultNs).Delete(mig.Name, &metav1.DeleteOptions{})
+			if err != nil {
+				er = err
+				fmt.Printf("Failed to clean up migration object: %v, VMI:%v, err:%v", mig.Name, mig.Spec.VMIName, err)
+			} else {
+				fmt.Printf("Cleaned up eviction migration for VMI: %v/%v\n", mig.Spec.VMIName, mig.Name)
+			}
+
+		}
+	}
+
+	podList, err := GetVirtPodList(c, nodeName, DefaultNs)
+	if err != nil {
+		return err
+	}
+
+	// Cleanup any pods that are left behind. If VM cannot be
+	// migrated, virt-launch pods are left in pending state. clean
+	// them up as we are aborting.
+	for _, pod := range podList.Items {
+		if jobName, ok := pod.Annotations["kubevirt.io/migrationJobName"]; ok {
+			if strings.Contains(jobName, "kubevirt-evacuation") {
+				err = c.CoreV1().Pods(DefaultNs).Delete(pod.Name, &metav1.DeleteOptions{})
+				if err != nil {
+					fmt.Print("Failed to clean up eviction migration pod: %v, err: %v", pod.Name, err)
+				} else {
+					fmt.Printf("Eviction migration POD:%v cleanup\n", pod.Name)
+				}
+			}
+		}
+	}
+
+	return er
 }
