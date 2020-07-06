@@ -1722,6 +1722,66 @@ func SetNodeKVUnSchedulable(c kubecli.KubevirtClient, nodeName string, set bool)
 	return nil
 }
 
+// Update a given datavolume
+func updateVMFromDefinition(c kubecli.KubevirtClient, def *v1.VirtualMachine) (error) {
+	err := wait.PollImmediate(dataVolumePollInterval, dataVolumeCreateTime, func() (bool, error) {
+		var err error
+		_, err = c.VirtualMachine(def.Namespace).Update(def)
+		if err == nil || apierrs.IsAlreadyExists(err) {
+			return true, nil
+		}
+		return false, err
+	})
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func setVMLabel(c kubecli.KubevirtClient, vm *v1.VirtualMachine, label, value string) error {
+	labels := vm.ObjectMeta.GetObjectMeta().GetLabels()
+	if labels == nil {
+		labels = map[string]string{}
+	}
+	labels[label] = value
+	vm.ObjectMeta.GetObjectMeta().SetLabels(labels)
+	return updateVMFromDefinition(c, vm)
+}
+
+// Remove VM label
+func removeVMLabel(c kubecli.KubevirtClient, vm *v1.VirtualMachine, label string) error {
+	labels := vm.ObjectMeta.GetObjectMeta().GetLabels()
+	if labels == nil {
+		fmt.Printf("Failed to find vm:%v labels", vm.Name)
+		return fmt.Errorf("failed to find vm:%v labels", vm.Name)
+	}
+	if _, ok := labels[label]; ok {
+			delete(labels, label)
+			vm.ObjectMeta.GetObjectMeta().SetLabels(labels)
+			return updateVMFromDefinition(c, vm)
+	}
+	return nil
+}
+
+func IsVMMarkedForDelete(vm *v1.VirtualMachine) bool {
+	labels := vm.ObjectMeta.GetObjectMeta().GetLabels()
+	if labels == nil {
+		return false
+	}
+	if _, ok := labels["AP_DELETE_VM"]; ok {
+		return true
+	}
+	return false
+}
+
+func VMAddDeleteLabel(c kubecli.KubevirtClient, vm *v1.VirtualMachine) error {
+	return setVMLabel(c, vm, "AP_DELETE_VM", "true")
+}
+
+func VMRemoveDeleteLabel(c kubecli.KubevirtClient, vm *v1.VirtualMachine) error {
+	return removeVMLabel(c, vm, "AP_DELETE_VM")
+}
+
 func AbortPendingEvictionMigrations(c kubecli.KubevirtClient, nodeName string) error {
 	migs, err := c.VirtualMachineInstanceMigration(DefaultNs).List(&metav1.ListOptions{})
 	if err != nil {
