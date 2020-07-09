@@ -1103,7 +1103,7 @@ var filterDb = [...]EventFilter{
 	{"Failed to open", ""},
 	{"Failed to copy", ""},
 	{"Unable to mount volumes", ""},
-	{"The VirtualMachineInstance crashed", ""},
+	{"The VirtualMachineInstance crashed", "Virtual Machine has been stopped"},
 	{"initialization failed for volume", ""},
 	{"NodeNotSchedulable", "node is in maintenance mode"},
 	{"NodeSchedulable", "node is in active state"},
@@ -1838,7 +1838,7 @@ func AbortPendingEvictionMigrations(c kubecli.KubevirtClient, nodeName string) e
 			if strings.Contains(jobName, "kubevirt-evacuation") {
 				err = c.CoreV1().Pods(DefaultNs).Delete(pod.Name, &metav1.DeleteOptions{})
 				if err != nil {
-					fmt.Print("Failed to clean up eviction migration pod: %v, err: %v", pod.Name, err)
+					fmt.Printf("Failed to clean up eviction migration pod: %v, err: %v", pod.Name, err)
 				} else {
 					fmt.Printf("Eviction migration POD:%v cleanup\n", pod.Name)
 				}
