@@ -386,8 +386,11 @@ func NewDataVolumeWithClone(params DiskParams) (*cdiv1.DataVolume, error) {
 			return nil, fmt.Errorf("Source disk %v to clone from could not be found", params.CloneFromDisk)
 		}
 
-		if dv.Spec.PVC.VolumeMode != nil && *dv.Spec.PVC.VolumeMode == k8sv1.PersistentVolumeBlock {
-			return nil, fmt.Errorf("Cloning from a disk %s which is in Block mode is not supported", params.CloneFromDisk)
+		if dv.Spec.PVC.VolumeMode != nil {
+			if *dv.Spec.PVC.VolumeMode == k8sv1.PersistentVolumeBlock && !params.VolumeBlockMode ||
+				*dv.Spec.PVC.VolumeMode == k8sv1.PersistentVolumeFilesystem && params.VolumeBlockMode {
+				return nil, fmt.Errorf("Cloning from a disk %s which is not same mode as disk %v is not supported", params.CloneFromDisk, params.Name)
+			}
 		}
 		if dv.Status.Phase != cdiv1.Succeeded {
 			return nil, fmt.Errorf("Source Disk %s is not in succeeded state. Cannot clone", params.CloneFromDisk)
@@ -871,13 +874,13 @@ func GetVMPodRef(c kubecli.KubevirtClient, vmName, ns string) (string, error) {
 			if ts == nil {
 				t := pod.GetCreationTimestamp().Time
 				ts = &t
-				vmref = strings.TrimLeft(pod.Name, "virt-launcher-")
+				vmref = strings.TrimPrefix(pod.Name, "virt-launcher-")
 			} else {
 				// is there an older pod
 				if pod.GetCreationTimestamp().Time.Sub(*ts) < 0 {
 					t := pod.GetCreationTimestamp().Time
 					ts = &t
-					vmref = strings.TrimLeft(pod.Name, "virt-launcher-")
+					vmref = strings.TrimPrefix(pod.Name, "virt-launcher-")
 				}
 			}
 		}
