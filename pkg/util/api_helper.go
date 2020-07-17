@@ -871,13 +871,13 @@ func GetVMPodRef(c kubecli.KubevirtClient, vmName, ns string) (string, error) {
 			if ts == nil {
 				t := pod.GetCreationTimestamp().Time
 				ts = &t
-				vmref = strings.TrimLeft(pod.Name, "virt-launcher-")
+				vmref = strings.TrimPrefix(pod.Name, "virt-launcher-")
 			} else {
 				// is there an older pod
 				if pod.GetCreationTimestamp().Time.Sub(*ts) < 0 {
 					t := pod.GetCreationTimestamp().Time
 					ts = &t
-					vmref = strings.TrimLeft(pod.Name, "virt-launcher-")
+					vmref = strings.TrimPrefix(pod.Name, "virt-launcher-")
 				}
 			}
 		}
