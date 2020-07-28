@@ -1725,7 +1725,7 @@ func SetNodeKVUnSchedulable(c kubecli.KubevirtClient, nodeName string, set bool)
 	return nil
 }
 
-// Update a given datavolume
+// Update a given VM
 func updateVMFromDefinition(c kubecli.KubevirtClient, def *v1.VirtualMachine) (error) {
 	err := wait.PollImmediate(dataVolumePollInterval, dataVolumeCreateTime, func() (bool, error) {
 		var err error
