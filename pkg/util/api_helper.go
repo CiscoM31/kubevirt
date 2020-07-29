@@ -386,8 +386,11 @@ func NewDataVolumeWithClone(params DiskParams) (*cdiv1.DataVolume, error) {
 			return nil, fmt.Errorf("Source disk %v to clone from could not be found", params.CloneFromDisk)
 		}
 
-		if dv.Spec.PVC.VolumeMode != nil && *dv.Spec.PVC.VolumeMode == k8sv1.PersistentVolumeBlock {
-			return nil, fmt.Errorf("Cloning from a disk %s which is in Block mode is not supported", params.CloneFromDisk)
+		if dv.Spec.PVC.VolumeMode != nil {
+			if *dv.Spec.PVC.VolumeMode == k8sv1.PersistentVolumeBlock && !params.VolumeBlockMode ||
+				*dv.Spec.PVC.VolumeMode == k8sv1.PersistentVolumeFilesystem && params.VolumeBlockMode {
+				return nil, fmt.Errorf("Cloning from a disk %s which is not same mode as disk %v is not supported", params.CloneFromDisk, params.Name)
+			}
 		}
 		if dv.Status.Phase != cdiv1.Succeeded {
 			return nil, fmt.Errorf("Source Disk %s is not in succeeded state. Cannot clone", params.CloneFromDisk)
@@ -1103,7 +1106,7 @@ var filterDb = [...]EventFilter{
 	{"Failed to open", ""},
 	{"Failed to copy", ""},
 	{"Unable to mount volumes", ""},
-	{"The VirtualMachineInstance crashed", ""},
+	{"The VirtualMachineInstance crashed", "Virtual Machine has been stopped"},
 	{"initialization failed for volume", ""},
 	{"NodeNotSchedulable", "node is in maintenance mode"},
 	{"NodeSchedulable", "node is in active state"},
@@ -1122,10 +1125,10 @@ var filterDb = [...]EventFilter{
 	{"System OOM encountered", "System is experiencing out of memory condition"},
 	{"Import into", ""},
 	{"Created DataVolume", ""},
-	{"Deleted DataVolume", "Deleted vdisk"},
+	{"Deleted DataVolume", ""},
 	{"Failed to import", "Failed to import image"},
 	{"Unable to connect", ""},
-	{"Successfully imported", "Successfully imported image"},
+	{"Successfully imported", ""},
 	{"Successfully cloned ", ""},
 	{"Cloning from ", ""},
 	{"Created migration target", "Migration of VM initiated"},
@@ -1722,6 +1725,66 @@ func SetNodeKVUnSchedulable(c kubecli.KubevirtClient, nodeName string, set bool)
 	return nil
 }
 
+// Update a given VM
+func updateVMFromDefinition(c kubecli.KubevirtClient, def *v1.VirtualMachine) (error) {
+	err := wait.PollImmediate(dataVolumePollInterval, dataVolumeCreateTime, func() (bool, error) {
+		var err error
+		_, err = c.VirtualMachine(def.Namespace).Update(def)
+		if err == nil || apierrs.IsAlreadyExists(err) {
+			return true, nil
+		}
+		return false, err
+	})
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func setVMLabel(c kubecli.KubevirtClient, vm *v1.VirtualMachine, label, value string) error {
+	labels := vm.ObjectMeta.GetObjectMeta().GetLabels()
+	if labels == nil {
+		labels = map[string]string{}
+	}
+	labels[label] = value
+	vm.ObjectMeta.GetObjectMeta().SetLabels(labels)
+	return updateVMFromDefinition(c, vm)
+}
+
+// Remove VM label
+func removeVMLabel(c kubecli.KubevirtClient, vm *v1.VirtualMachine, label string) error {
+	labels := vm.ObjectMeta.GetObjectMeta().GetLabels()
+	if labels == nil {
+		fmt.Printf("Failed to find vm:%v labels", vm.Name)
+		return fmt.Errorf("failed to find vm:%v labels", vm.Name)
+	}
+	if _, ok := labels[label]; ok {
+			delete(labels, label)
+			vm.ObjectMeta.GetObjectMeta().SetLabels(labels)
+			return updateVMFromDefinition(c, vm)
+	}
+	return nil
+}
+
+func IsVMMarkedForDelete(vm *v1.VirtualMachine) bool {
+	labels := vm.ObjectMeta.GetObjectMeta().GetLabels()
+	if labels == nil {
+		return false
+	}
+	if _, ok := labels["AP_DELETE_VM"]; ok {
+		return true
+	}
+	return false
+}
+
+func VMAddDeleteLabel(c kubecli.KubevirtClient, vm *v1.VirtualMachine) error {
+	return setVMLabel(c, vm, "AP_DELETE_VM", "true")
+}
+
+func VMRemoveDeleteLabel(c kubecli.KubevirtClient, vm *v1.VirtualMachine) error {
+	return removeVMLabel(c, vm, "AP_DELETE_VM")
+}
+
 func AbortPendingEvictionMigrations(c kubecli.KubevirtClient, nodeName string) error {
 	migs, err := c.VirtualMachineInstanceMigration(DefaultNs).List(&metav1.ListOptions{})
 	if err != nil {
@@ -1778,7 +1841,7 @@ func AbortPendingEvictionMigrations(c kubecli.KubevirtClient, nodeName string) e
 			if strings.Contains(jobName, "kubevirt-evacuation") {
 				err = c.CoreV1().Pods(DefaultNs).Delete(pod.Name, &metav1.DeleteOptions{})
 				if err != nil {
-					fmt.Print("Failed to clean up eviction migration pod: %v, err: %v", pod.Name, err)
+					fmt.Printf("Failed to clean up eviction migration pod: %v, err: %v", pod.Name, err)
 				} else {
 					fmt.Printf("Eviction migration POD:%v cleanup\n", pod.Name)
 				}
