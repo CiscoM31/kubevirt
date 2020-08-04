@@ -1812,6 +1812,7 @@ func AbortPendingEvictionMigrations(c kubecli.KubevirtClient, nodeName string) e
 			mig.Status.Phase == v1.MigrationSucceeded ||
 			mig.Status.Phase == v1.MigrationPhaseUnset) && existsOnNode {
 			mig.Finalizers = make([]string, 0)
+			fmt.Printf("Cleaning up migration: %v for VM: %v", mig.Name, mig.Spec.VMIName)
 			_, err := c.VirtualMachineInstanceMigration(DefaultNs).Update(&mig)
 			if err != nil {
 				er = err
@@ -1824,7 +1825,6 @@ func AbortPendingEvictionMigrations(c kubecli.KubevirtClient, nodeName string) e
 			} else {
 				fmt.Printf("Cleaned up eviction migration for VMI: %v/%v\n", mig.Spec.VMIName, mig.Name)
 			}
-
 		}
 	}
 
@@ -1850,4 +1850,49 @@ func AbortPendingEvictionMigrations(c kubecli.KubevirtClient, nodeName string) e
 	}
 
 	return er
+}
+
+func GetEvacuationMigrationObjMap(c kubecli.KubevirtClient) map[string]string {
+	objMap := make(map[string]string)
+
+	migs, err := c.VirtualMachineInstanceMigration(DefaultNs).List(&metav1.ListOptions{})
+	if err != nil {
+		return objMap
+	}
+	for _, mig := range migs.Items {
+		objMap[mig.Spec.VMIName] = mig.Name
+	}
+	return objMap
+}
+
+func CleanupEvacuationObjects(c kubecli.KubevirtClient) (error, []string) {
+	var objList []string
+	migs, err := c.VirtualMachineInstanceMigration(DefaultNs).List(&metav1.ListOptions{})
+	if err != nil {
+		return err, objList
+	}
+
+	var er error
+	for _, mig := range migs.Items {
+		// is not running or done, clean it up
+		t := mig.ObjectMeta.CreationTimestamp.Time
+
+		if mig.IsFinal() && (time.Since(t) > time.Hour){
+			objList = append(objList, mig.Name)
+			mig.Finalizers = make([]string, 0)
+			_, err := c.VirtualMachineInstanceMigration(DefaultNs).Update(&mig)
+			if err != nil {
+				er = err
+				fmt.Printf("Failed to update migration object: %v, VMI:%v, err:%v", mig.Name, mig.Spec.VMIName, err)
+			}
+			err = c.VirtualMachineInstanceMigration(DefaultNs).Delete(mig.Name, &metav1.DeleteOptions{})
+			if err != nil {
+				er = err
+				fmt.Printf("Failed to clean up migration object: %v, VMI:%v, err:%v", mig.Name, mig.Spec.VMIName, err)
+			} else {
+				fmt.Printf("Cleaned up eviction migration for VMI: %v/%v\n", mig.Spec.VMIName, mig.Name)
+			}
+		}
+	}
+	return er, objList
 }
