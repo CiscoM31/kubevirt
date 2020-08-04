@@ -1812,7 +1812,7 @@ func AbortPendingEvictionMigrations(c kubecli.KubevirtClient, nodeName string) e
 			mig.Status.Phase == v1.MigrationSucceeded ||
 			mig.Status.Phase == v1.MigrationPhaseUnset) && existsOnNode {
 			mig.Finalizers = make([]string, 0)
-			fmt.Printf("neukiron: Cleaning up migration: %v for VM: %v", mig.Name, mig.Spec.VMIName)
+			fmt.Printf("Cleaning up migration: %v for VM: %v", mig.Name, mig.Spec.VMIName)
 			_, err := c.VirtualMachineInstanceMigration(DefaultNs).Update(&mig)
 			if err != nil {
 				er = err
