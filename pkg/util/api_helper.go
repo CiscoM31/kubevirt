@@ -1067,6 +1067,7 @@ func CreateDryRunPods(c kubecli.KubevirtClient, hostname, image string) ([]strin
 
 	failedVMList := []string{}
 	dryRunPodsList := []*k8sv1.Pod{}
+	chanList := []chan map[string]error{}
 
 	defer func() {
 		var e error
@@ -1134,13 +1135,56 @@ func CreateDryRunPods(c kubecli.KubevirtClient, hostname, image string) ([]strin
 		if err != nil {
 			failedVMList = append(failedVMList, vmi.Name)
 			log.Printf("Failed to create dryrun pod for VM: %s. Error = %s", vmi.Name, err.Error())
+			continue
 		} else {
 			dryRunPodsList = append(dryRunPodsList, dryRunPod)
 			log.Printf("Dryrun pod created for VM %s", vmi.Name)
 		}
+
+		// wait for pods to reach Running state
+		ch := make(chan map[string]error, 1)
+		go waitForPodState(c, dName, vmi.Namespace, k8sv1.PodPhase("Running"), ch, 5*time.Second, 20)
+		chanList = append(chanList, ch)
+	}
+
+	for _, ch := range chanList {
+		m := <-ch
+		for k, v := range m {
+			if v != nil {
+				failedVMList = append(failedVMList, strings.TrimSuffix(k, "-dryrunpod"))
+			}
+		}
 	}
 
 	return failedVMList, err
+}
+
+func waitForPodState(c kubecli.KubevirtClient, pName, ns string, tgtState k8sv1.PodPhase, retChan chan map[string]error, waitInterval time.Duration, maxRetries int) {
+
+	var err error
+	var p *k8sv1.Pod
+
+	defer func() {
+		ret := map[string]error{pName: err}
+		retChan <- ret
+	}()
+
+	for i := 0; i < maxRetries; i++ {
+		p, err = c.CoreV1().Pods(ns).Get(pName, metav1.GetOptions{})
+		if err != nil {
+			log.Printf("Pod get failed for pod: %s. Error = %s", pName, err.Error())
+			return
+		}
+		log.Printf("Current state of pod(%s) = %s. Expected state = %s", pName, string(p.Status.Phase), string(tgtState))
+		if p.Status.Phase == tgtState {
+			err = nil
+			return
+		}
+		time.Sleep(waitInterval)
+	}
+
+	err = fmt.Errorf("Pod %s did not reach target state %s in expected time", pName, string(tgtState))
+	return
 }
 
 // drain pods from node and cardon it
