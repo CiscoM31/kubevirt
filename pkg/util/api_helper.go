@@ -943,6 +943,24 @@ func GetPv(c kubecli.KubevirtClient, name string) (*k8sv1.PersistentVolume, erro
 	return pv, err
 }
 
+func GetDefaultStorageProvisioner(c kubecli.KubevirtClient) (string, error) {
+	options := metav1.ListOptions{}
+
+	scList, err := c.StorageV1().StorageClasses().List(options)
+	if err != nil {
+		return "", err
+	}
+
+	for _, sc := range scList.Items {
+		ann := sc.GetObjectMeta().GetAnnotations()
+		if ann["storageclass.kubernetes.io/is-default-class"] == "true" {
+			return sc.Provisioner, nil
+		}
+	}
+
+	return "", err
+}
+
 func GetPvDetails(c kubecli.KubevirtClient, name string) (string, int32, int64, error) {
 	pv, err := c.CoreV1().PersistentVolumes().Get(name, metav1.GetOptions{})
 	if err != nil || pv == nil {
