@@ -953,7 +953,8 @@ func GetDefaultStorageProvisioner(c kubecli.KubevirtClient) (string, error) {
 
 	for _, sc := range scList.Items {
 		ann := sc.GetObjectMeta().GetAnnotations()
-		if ann["storageclass.kubernetes.io/is-default-class"] == "true" {
+		if ann["storageclass.kubernetes.io/is-default-class"] == "true" ||
+		   ann["storageclass.beta.kubernetes.io/is-default-class"] == "true" {
 			return sc.Provisioner, nil
 		}
 	}
