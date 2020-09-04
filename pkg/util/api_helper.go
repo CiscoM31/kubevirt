@@ -11,6 +11,8 @@ import (
 	"k8s.io/apimachinery/pkg/util/strategicpatch"
 	"net/url"
 	"os"
+	"os/exec"
+	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -810,9 +812,15 @@ func GetPodList(c kubecli.KubevirtClient, ns string) (*k8sv1.PodList, error) {
 }
 
 func GetVirtPodList(c kubecli.KubevirtClient, nodeName, ns string) (*k8sv1.PodList, error) {
-	selector := fmt.Sprintf("kubevirt.io/nodeName=%s", nodeName)
-	pods, err := c.CoreV1().Pods(ns).List(metav1.ListOptions{LabelSelector: selector})
-	return pods, err
+	lSelector := "kubevirt.io=virt-launcher"
+	if nodeName != "" {
+		fSelector := fmt.Sprintf("spec.nodeName=%s", nodeName)
+		pods, err := c.CoreV1().Pods(ns).List(metav1.ListOptions{FieldSelector: fSelector, LabelSelector: lSelector})
+		return pods, err
+	} else  {
+		pods, err := c.CoreV1().Pods(ns).List(metav1.ListOptions{LabelSelector: lSelector})
+		return pods, err
+	}
 }
 
 func GetVMIRSList(c kubecli.KubevirtClient, ns string) (*v1.VirtualMachineInstanceReplicaSetList, error) {
@@ -1914,4 +1922,94 @@ func CleanupEvacuationObjects(c kubecli.KubevirtClient) (error, []string) {
 		}
 	}
 	return er, objList
+}
+
+func GetVMUUID(vmi *v1.VirtualMachineInstance) string {
+	owners := vmi.ObjectMeta.GetOwnerReferences()
+	for _, ref := range owners {
+		if ref.Kind == "VirtualMachine" {
+			return string(ref.UID)
+	    }
+	}
+	return  ""
+}
+
+
+type blockInfo struct {
+	Blockdevices []struct {
+		Name       string      `json:"name"`
+	} `json:"blockdevices"`
+}
+
+func getDeviceName(volName string) (string, error) {
+	name := path.Join("/var/lib/kubelet/plugins/kubernetes.io/csi/volumeDevices/publish", volName)
+	out, err := exec.Command("lsblk", "-J", name).Output()
+	if err != nil {
+		return "", err
+	}
+	blkInfo := blockInfo{}
+	if err = json.Unmarshal(out, &blkInfo); err == nil {
+		if len(blkInfo.Blockdevices) > 0 {
+			//cmd := fmt.Sprintf("multipath -l %s | grep \"active undef\" | awk '{print $3}'", blkInfo.Blockdevices[0].Name)
+			name := blkInfo.Blockdevices[0].Name
+			// if the name does not contain any digits, it is a non-multipath device
+			if !strings.ContainsAny(name, "0123456789") {
+				return name, nil
+			}
+			cmd := fmt.Sprintf("multipath -l %s | grep \"%s\" | awk '{print $2}'", name, name)
+			out, err := exec.Command("bash", "-c", cmd).Output()
+			//return strings.Split(strings.TrimSpace(string(out)), "\n"), err
+			return strings.TrimSpace(string(out)), err
+		} else {
+			return "", fmt.Errorf("No Block devices found")
+		}
+	}
+	return "", err
+}
+
+// PV to disk device is a mapping specific to the node on which the PV is mounted
+// read it out and add it as annotation to the VMI. We'll need it
+// to map the metrics back to the VM virtual disk
+func AddDiskAnnoToVMIs(c kubecli.KubevirtClient, nodeName string) error {
+	vmiList, err := GetVMIsOnNode(c, nodeName, DefaultNs)
+	if err != nil {
+		return err
+	}
+
+	for _, vmi := range vmiList.Items {
+		ann := vmi.Annotations
+		changed := false
+		for _, v := range vmi.Spec.Volumes {
+			if v.DataVolume != nil {
+				pvc, err := GetPVC(c, v.DataVolume.Name)
+				if err == nil {
+					pvName := pvc.Spec.VolumeName
+					devName, err := getDeviceName(pvName)
+					if err == nil {
+						key := "DiskName"+"_"+v.DataVolume.Name
+						value := vmi.Status.NodeName+"_"+devName
+						if ann[key] != value {
+							changed = true
+							ann[key] = value
+						}
+					} else {
+						fmt.Printf("Failed to get device name for %v: %v", err, pvName)
+					}
+				} else {
+					fmt.Printf("Error looking up PVC: %v", v.DataVolume.Name)
+				}
+			}
+		}
+		if changed {
+			// annotations changed, lets update the vmi
+			vmi.Annotations = ann
+			_, err := c.VirtualMachineInstance(DefaultNs).Update(&vmi)
+			if err != nil {
+				fmt.Print("Failed to update VMI %v, err:%v", vmi.Name, err)
+			}
+		} else {
+			fmt.Printf("No change to annotations for %v\n", vmi.Name)
+		}
+	}
+	return err
 }
