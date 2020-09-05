@@ -2007,8 +2007,6 @@ func AddDiskAnnoToVMIs(c kubecli.KubevirtClient, nodeName string) error {
 			if err != nil {
 				fmt.Print("Failed to update VMI %v, err:%v", vmi.Name, err)
 			}
-		} else {
-			fmt.Printf("No change to annotations for %v\n", vmi.Name)
 		}
 	}
 	return err
