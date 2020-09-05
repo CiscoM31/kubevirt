@@ -1950,7 +1950,6 @@ func getDeviceName(volName string) (string, error) {
 	blkInfo := blockInfo{}
 	if err = json.Unmarshal(out, &blkInfo); err == nil {
 		if len(blkInfo.Blockdevices) > 0 {
-			//cmd := fmt.Sprintf("multipath -l %s | grep \"active undef\" | awk '{print $3}'", blkInfo.Blockdevices[0].Name)
 			name := blkInfo.Blockdevices[0].Name
 			// if the name does not contain any digits, it is a non-multipath device
 			if !strings.ContainsAny(name, "0123456789") {
@@ -1958,7 +1957,6 @@ func getDeviceName(volName string) (string, error) {
 			}
 			cmd := fmt.Sprintf("multipath -l %s | grep \"%s\" | awk '{print $2}'", name, name)
 			out, err := exec.Command("bash", "-c", cmd).Output()
-			//return strings.Split(strings.TrimSpace(string(out)), "\n"), err
 			return strings.TrimSpace(string(out)), err
 		} else {
 			return "", fmt.Errorf("No Block devices found")
