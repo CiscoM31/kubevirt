@@ -260,14 +260,25 @@ func updatePVCPrivate(client kubecli.KubevirtClient, pvc *k8sv1.PersistentVolume
 	return client.CoreV1().PersistentVolumeClaims(pvc.Namespace).Update(pvc)
 }
 
-func SetResources(vm *v1.VirtualMachine, cpu, memory, cpuModel string) error {
+func SetResources(vm *v1.VirtualMachine, cpu, memory, cpuModel string, osubfactor int) error {
 	t := int64(30)
 	vmSpec := &vm.Spec.Template.Spec
 	vmSpec.TerminationGracePeriodSeconds = &t
-	cpus := resource.MustParse(cpu)
+
+	cpuInt, _ := strconv.Atoi(cpu)
+	cpuReq := fmt.Sprintf("%f", float32(cpuInt)/float32(osubfactor))
+	cpuRequests := resource.MustParse(cpuReq)
 	vmSpec.Domain.Resources.Requests = make(map[k8sv1.ResourceName]resource.Quantity, 0)
 	vmSpec.Domain.Resources.Requests[k8sv1.ResourceMemory] = resource.MustParse(memory)
-	vmSpec.Domain.Resources.Requests[k8sv1.ResourceCPU] = cpus
+	vmSpec.Domain.Resources.Requests[k8sv1.ResourceCPU] = cpuRequests
+
+	cpus := resource.MustParse(cpu)
+	vmSpec.Domain.Resources.Limits = make(map[k8sv1.ResourceName]resource.Quantity, 0)
+	vmSpec.Domain.Resources.Limits[k8sv1.ResourceCPU] = cpus
+
+	memReq := resource.MustParse(memory)
+	vmSpec.Domain.Resources.Limits[k8sv1.ResourceMemory] = memReq
+
 	cores, err := strconv.Atoi(cpu)
 	if err != nil {
 		return fmt.Errorf("SetResources failed: %v", err)
@@ -591,7 +602,6 @@ func GetCloudInitUserData(c kubecli.KubevirtClient, ns, secret string) (string, 
 }
 
 func GetCloudInitNetworkData(c kubecli.KubevirtClient, ns, secret string) (string, string, error) {
-
 	sec, err := c.CoreV1().Secrets(ns).Get(secret, metav1.GetOptions{})
 	if err != nil {
 		return "", "", err
@@ -804,9 +814,15 @@ func GetVMIsOnNode(c kubecli.KubevirtClient, node, ns string) (*v1.VirtualMachin
 	return vms, err
 }
 
-func GetPodList(c kubecli.KubevirtClient, ns string) (*k8sv1.PodList, error) {
-	pods, err := c.CoreV1().Pods(ns).List(metav1.ListOptions{})
-	return pods, err
+func GetPodList(c kubecli.KubevirtClient, nodeName, ns string) (*k8sv1.PodList, error) {
+	if nodeName != "" {
+		fSelector := fmt.Sprintf("spec.nodeName=%s", nodeName)
+		pods, err := c.CoreV1().Pods(ns).List(metav1.ListOptions{FieldSelector: fSelector})
+		return pods, err
+	} else  {
+		pods, err := c.CoreV1().Pods(ns).List(metav1.ListOptions{})
+		return pods, err
+	}
 }
 
 func GetVirtPodList(c kubecli.KubevirtClient, nodeName, ns string) (*k8sv1.PodList, error) {
