@@ -49,15 +49,9 @@ if [ ! -d "cluster-up/cluster/$KUBEVIRT_PROVIDER" ]; then
   exit 1
 fi
 
-if [[ $TARGET =~ os-.* ]]; then
-  # when testing on slow CI system cleanup sometimes takes very long.
-  # openshift clusters are more memory demanding. If the cleanup
-  # of old vms does not go fast enough they run out of memory.
-  # To still allow continuing with the tests, give more memory in CI.
-  export KUBEVIRT_MEMORY_SIZE=6144M
-fi
-
 export KUBEVIRT_NUM_NODES=2
+# Give the nodes enough memory to run tests in parallel, including tests which involve fedora
+export KUBEVIRT_MEMORY_SIZE=9216M
 
 export RHEL_NFS_DIR=${RHEL_NFS_DIR:-/var/lib/stdci/shared/kubevirt-images/rhel7}
 export RHEL_LOCK_PATH=${RHEL_LOCK_PATH:-/var/lib/stdci/shared/download_rhel_image.lock}
@@ -261,8 +255,12 @@ done
 kubectl version
 
 mkdir -p "$ARTIFACTS_PATH"
+export KUBEVIRT_E2E_PARALLEL=true
+if [[ $TARGET =~ .*kind.* ]]; then
+  export KUBEVIRT_E2E_PARALLEL=false
+fi
 
-ginko_params="--ginkgo.noColor --junit-output=$ARTIFACTS_PATH/junit.functest.xml --ginkgo.seed=42"
+ginko_params="--noColor --seed=42"
 
 # Prepare PV for Windows testing
 if [[ $TARGET =~ windows.* ]]; then
@@ -285,19 +283,21 @@ spec:
   storageClassName: windows
 EOF
   # Run only Windows tests
-  ginko_params="$ginko_params --ginkgo.focus=Windows"
+  export KUBEVIRT_E2E_FOCUS=Windows
 elif [[ $TARGET =~ (cnao|multus) ]]; then
-  ginko_params="$ginko_params --ginkgo.focus=Multus|Networking|VMIlifecycle|Expose"
+  export KUBEVIRT_E2E_FOCUS="Multus|Networking|VMIlifecycle|Expose|Macvtap"
 elif [[ $TARGET =~ sriov.* ]]; then
-  ginko_params="$ginko_params --ginkgo.focus=SRIOV"
+  export KUBEVIRT_E2E_FOCUS=SRIOV
 elif [[ $TARGET =~ gpu.* ]]; then
-  ginko_params="$ginko_params --ginkgo.focus=GPU"
+  export KUBEVIRT_E2E_FOCUS=GPU
 elif [[ $TARGET =~ (okd|ocp).* ]]; then
-  ginko_params="$ginko_params --ginkgo.skip=SRIOV|GPU"
-elif [[ $TARGET =~ ipv6.* ]]; then
-  ginko_params="$ginko_params --ginkgo.skip=Multus|SRIOV|GPU|.*slirp.*|.*bridge.*"
+  export KUBEVIRT_E2E_SKIP="SRIOV|GPU"
 else
-  ginko_params="$ginko_params --ginkgo.skip=Multus|SRIOV|GPU"
+  export KUBEVIRT_E2E_SKIP="Multus|SRIOV|GPU|Macvtap"
+fi
+
+if [[ "$KUBEVIRT_STORAGE" == "rook-ceph" ]]; then
+  export KUBEVIRT_E2E_FOCUS=rook-ceph
 fi
 
 # Prepare RHEL PV for Template testing

@@ -22,7 +22,6 @@ package tests_test
 import (
 	"fmt"
 	"strings"
-	"time"
 
 	expect "github.com/google/goexpect"
 	. "github.com/onsi/ginkgo"
@@ -36,7 +35,9 @@ import (
 	v1 "kubevirt.io/client-go/api/v1"
 	"kubevirt.io/client-go/kubecli"
 	"kubevirt.io/kubevirt/tests"
+	"kubevirt.io/kubevirt/tests/console"
 	cd "kubevirt.io/kubevirt/tests/containerdisk"
+	"kubevirt.io/kubevirt/tests/libvmi"
 )
 
 var _ = Describe("[rfe_id:588][crit:medium][vendor:cnv-qe@redhat.com][level:component]ContainerDisk", func() {
@@ -94,7 +95,7 @@ var _ = Describe("[rfe_id:588][crit:medium][vendor:cnv-qe@redhat.com][level:comp
 		vmi.Spec.Volumes[0].ContainerDisk.ImagePullPolicy = policy
 		vmi = tests.RunVMIAndExpectScheduling(vmi, 60)
 		Expect(vmi.Spec.Volumes[0].ContainerDisk.ImagePullPolicy).To(Equal(expectedPolicy))
-		pod := tests.GetPodByVirtualMachineInstance(vmi, vmi.Namespace)
+		pod := libvmi.GetPodByVirtualMachineInstance(vmi, vmi.Namespace)
 		container := tests.GetContainerDiskContainerOfPod(pod, vmi.Spec.Volumes[0].Name)
 		Expect(container.ImagePullPolicy).To(Equal(expectedPolicy))
 	},
@@ -107,7 +108,7 @@ var _ = Describe("[rfe_id:588][crit:medium][vendor:cnv-qe@redhat.com][level:comp
 
 	Describe("[rfe_id:273][crit:medium][vendor:cnv-qe@redhat.com][level:component]Starting and stopping the same VirtualMachineInstance", func() {
 		Context("with ephemeral registry disk", func() {
-			It("[test_id:1463]should success multiple times", func() {
+			It("[test_id:1463][Conformance] should success multiple times", func() {
 				vmi := tests.NewRandomVMIWithEphemeralDiskAndUserdata(cd.ContainerDiskFor(cd.ContainerDiskCirros), "#!/bin/bash\necho 'hello'\n")
 				num := 2
 				for i := 0; i < num; i++ {
@@ -203,21 +204,21 @@ var _ = Describe("[rfe_id:588][crit:medium][vendor:cnv-qe@redhat.com][level:comp
 				tests.WaitForSuccessfulVMIStart(obj)
 
 				By("Checking whether the second disk really contains virtio drivers")
-				expecter, err := tests.LoggedInAlpineExpecter(vmi)
-				Expect(err).ToNot(HaveOccurred(), "expected alpine to login properly")
-				defer expecter.Close()
+				Expect(console.LoginToAlpine(vmi)).To(Succeed(), "expected alpine to login properly")
 
-				_, err = expecter.ExpectBatch([]expect.Batcher{
+				Expect(console.SafeExpectBatch(vmi, []expect.Batcher{
 					// mount virtio cdrom and check files are there
 					&expect.BSnd{S: "mount -t iso9600 /dev/cdrom\n"},
+					&expect.BExp{R: console.PromptExpression},
 					&expect.BSnd{S: "echo $?\n"},
-					&expect.BExp{R: tests.RetValue("0")},
+					&expect.BExp{R: console.RetValue("0")},
 					&expect.BSnd{S: "cd /media/cdrom\n"},
+					&expect.BExp{R: console.PromptExpression},
 					&expect.BSnd{S: "ls virtio-win_license.txt guest-agent\n"},
+					&expect.BExp{R: console.PromptExpression},
 					&expect.BSnd{S: "echo $?\n"},
-					&expect.BExp{R: tests.RetValue("0")},
-				}, 200*time.Second)
-				Expect(err).ToNot(HaveOccurred(), "expected virtio files to be mounted properly")
+					&expect.BExp{R: console.RetValue("0")},
+				}, 200)).To(Succeed(), "expected virtio files to be mounted properly")
 			})
 		})
 	})
@@ -233,10 +234,10 @@ var _ = Describe("[rfe_id:588][crit:medium][vendor:cnv-qe@redhat.com][level:comp
 				tests.WaitForSuccessfulVMIStart(vmi)
 
 				By("Ensuring VMI is running by logging in")
-				tests.WaitUntilVMIReady(vmi, tests.LoggedInAlpineExpecter)
+				tests.WaitUntilVMIReady(vmi, console.LoginToAlpine)
 
 				By("Fetching virt-launcher Pod")
-				pod := tests.GetPodByVirtualMachineInstance(vmi, tests.NamespaceTestDefault)
+				pod := libvmi.GetPodByVirtualMachineInstance(vmi, tests.NamespaceTestDefault)
 
 				writableImagePath := fmt.Sprintf("/var/run/kubevirt-ephemeral-disks/disk-data/%v/disk.qcow2", vmi.Spec.Domain.Devices.Disks[0].Name)
 
@@ -260,7 +261,8 @@ var _ = Describe("[rfe_id:588][crit:medium][vendor:cnv-qe@redhat.com][level:comp
 				Expect(err).ToNot(HaveOccurred())
 
 				By("Checking the read-only Image Octal mode")
-				Expect(strings.Trim(readonlyImageOctalMode, "\n")).To(Equal("444"), "Octal Mode of read-only Image should be 444")
+				Expect(strings.Trim(readonlyImageOctalMode, "\n")).To(Equal("440"), "Octal Mode of read-only Image should be 440")
+
 			})
 		})
 	})

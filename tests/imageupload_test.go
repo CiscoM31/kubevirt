@@ -27,10 +27,9 @@ const (
 	imagePath            = "/tmp/alpine.iso"
 )
 
-var _ = Describe("ImageUpload", func() {
+var _ = Describe("[Serial]ImageUpload", func() {
 	var kubectlCmd *exec.Cmd
 
-	namespace := tests.NamespaceTestDefault
 	pvcSize := "100Mi"
 
 	var virtClient kubecli.KubevirtClient
@@ -75,21 +74,21 @@ var _ = Describe("ImageUpload", func() {
 		Expect(err).ToNot(HaveOccurred())
 	})
 
-	validateDataVolume := func(targetName string) {
+	validateDataVolume := func(targetName string, _ string) {
 		By("Get DataVolume")
-		_, err := virtClient.CdiClient().CdiV1alpha1().DataVolumes(namespace).Get(targetName, metav1.GetOptions{})
+		_, err := virtClient.CdiClient().CdiV1alpha1().DataVolumes(tests.NamespaceTestDefault).Get(targetName, metav1.GetOptions{})
 		Expect(err).ToNot(HaveOccurred())
 	}
 
 	deletePVC := func(targetName string) {
-		err := virtClient.CoreV1().PersistentVolumeClaims(namespace).Delete(targetName, &metav1.DeleteOptions{})
+		err := virtClient.CoreV1().PersistentVolumeClaims(tests.NamespaceTestDefault).Delete(targetName, &metav1.DeleteOptions{})
 		if errors.IsNotFound(err) {
 			return
 		}
 		Expect(err).ToNot(HaveOccurred())
 
 		Eventually(func() bool {
-			_, err = virtClient.CoreV1().PersistentVolumeClaims(namespace).Get(targetName, metav1.GetOptions{})
+			_, err = virtClient.CoreV1().PersistentVolumeClaims(tests.NamespaceTestDefault).Get(targetName, metav1.GetOptions{})
 			if errors.IsNotFound(err) {
 				return true
 			}
@@ -99,14 +98,14 @@ var _ = Describe("ImageUpload", func() {
 	}
 
 	deleteDataVolume := func(targetName string) {
-		err := virtClient.CdiClient().CdiV1alpha1().DataVolumes(namespace).Delete(targetName, &metav1.DeleteOptions{})
+		err := virtClient.CdiClient().CdiV1alpha1().DataVolumes(tests.NamespaceTestDefault).Delete(targetName, &metav1.DeleteOptions{})
 		if errors.IsNotFound(err) {
 			return
 		}
 		Expect(err).ToNot(HaveOccurred())
 
 		Eventually(func() bool {
-			_, err = virtClient.CdiClient().CdiV1alpha1().DataVolumes(namespace).Get(targetName, metav1.GetOptions{})
+			_, err = virtClient.CdiClient().CdiV1alpha1().DataVolumes(tests.NamespaceTestDefault).Get(targetName, metav1.GetOptions{})
 			if errors.IsNotFound(err) {
 				return true
 			}
@@ -117,29 +116,34 @@ var _ = Describe("ImageUpload", func() {
 		deletePVC(targetName)
 	}
 
-	validatePVC := func(targetName string) {
+	validatePVC := func(targetName string, storageClass string) {
 		By("Don't DataVolume")
-		_, err := virtClient.CdiClient().CdiV1alpha1().DataVolumes(namespace).Get(targetName, metav1.GetOptions{})
+		_, err := virtClient.CdiClient().CdiV1alpha1().DataVolumes(tests.NamespaceTestDefault).Get(targetName, metav1.GetOptions{})
 		Expect(errors.IsNotFound(err)).To(BeTrue())
 
 		By("Get PVC")
-		_, err = virtClient.CoreV1().PersistentVolumeClaims(namespace).Get(targetName, metav1.GetOptions{})
+		pvc, err := virtClient.CoreV1().PersistentVolumeClaims(tests.NamespaceTestDefault).Get(targetName, metav1.GetOptions{})
 		Expect(err).ToNot(HaveOccurred())
+		Expect(*pvc.Spec.StorageClassName).To(Equal(storageClass))
 	}
 
-	Context("Upload an image and start a VMI with PVC", func() {
-		DescribeTable("[test_id:4621] Should succeed", func(resource, targetName string, validateFunc, deleteFunc func(string), startVM bool) {
+	Context("Upload an image and start a VMI with PVC on rook-ceph", func() {
+		DescribeTable("[test_id:4621] Should succeed", func(resource, targetName string, validateFunc func(string, string), deleteFunc func(string), startVM bool) {
+			sc, exists := tests.GetCephStorageClass()
+			if !exists {
+				Skip("Skip OCS tests when Ceph is not present")
+			}
 			defer deleteFunc(targetName)
 
 			By("Upload image")
 			virtctlCmd := tests.NewRepeatableVirtctlCommand("image-upload",
 				resource, targetName,
-				"--namespace", namespace,
+				"--namespace", tests.NamespaceTestDefault,
 				"--image-path", imagePath,
 				"--size", pvcSize,
 				"--uploadproxy-url", fmt.Sprintf("https://127.0.0.1:%d", localUploadProxyPort),
 				"--wait-secs", "30",
-				"--storage-class", tests.Config.StorageClassLocal,
+				"--storage-class", sc,
 				"--insecure")
 			err := virtctlCmd()
 			if err != nil {
@@ -147,12 +151,12 @@ var _ = Describe("ImageUpload", func() {
 				Expect(err).ToNot(HaveOccurred())
 			}
 
-			validateFunc(targetName)
+			validateFunc(targetName, sc)
 
 			if startVM {
 				By("Start VM")
 				vmi := tests.NewRandomVMIWithDataVolume(targetName)
-				vmi, err = virtClient.VirtualMachineInstance(namespace).Create(vmi)
+				vmi, err = virtClient.VirtualMachineInstance(tests.NamespaceTestDefault).Create(vmi)
 				Expect(err).ToNot(HaveOccurred())
 				defer func() {
 					err = virtClient.VirtualMachineInstance(tests.NamespaceTestDefault).Delete(vmi.Name, &metav1.DeleteOptions{})

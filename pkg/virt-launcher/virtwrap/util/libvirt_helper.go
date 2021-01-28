@@ -20,6 +20,8 @@ import (
 
 	v1 "kubevirt.io/client-go/api/v1"
 	"kubevirt.io/client-go/log"
+	"kubevirt.io/kubevirt/pkg/hooks"
+	"kubevirt.io/kubevirt/pkg/util"
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/api"
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/cli"
 )
@@ -103,8 +105,19 @@ func SetDomainSpecStr(virConn cli.Connection, vmi *v1.VirtualMachineInstance, wa
 	return dom, nil
 }
 
+func SetDomainSpecStrWithHooks(virConn cli.Connection, vmi *v1.VirtualMachineInstance, wantedSpec *api.DomainSpec) (cli.VirDomain, error) {
+	spec := wantedSpec.DeepCopy()
+	hooksManager := hooks.GetManager()
+
+	domainSpec, err := hooksManager.OnDefineDomain(spec, vmi)
+	if err != nil {
+		return nil, err
+	}
+	return SetDomainSpecStr(virConn, vmi, domainSpec)
+}
+
 // GetDomainSpecWithRuntimeInfo return the active domain XML with runtime information embedded
-func GetDomainSpecWithRuntimeInfo(status libvirt.DomainState, dom cli.VirDomain) (*api.DomainSpec, error) {
+func GetDomainSpecWithRuntimeInfo(dom cli.VirDomain) (*api.DomainSpec, error) {
 
 	// get libvirt xml with runtime status
 	activeSpec, err := GetDomainSpecWithFlags(dom, 0)
@@ -238,6 +251,7 @@ func StartVirtlog(stopChan chan struct{}, domainName string) {
 			var args []string
 			args = append(args, "-f")
 			args = append(args, "/etc/libvirt/virtlogd.conf")
+			// #nosec No risk for attacket injection. Args  are predefined strings
 			cmd := exec.Command("/usr/sbin/virtlogd", args...)
 
 			exitChan := make(chan struct{})
@@ -259,13 +273,13 @@ func StartVirtlog(stopChan chan struct{}, domainName string) {
 					}
 					time.Sleep(time.Second)
 				}
-
+				// #nosec No risk for path injection. logfile has a static basedir
 				file, err := os.Open(logfile)
 				if err != nil {
 					log.Log.Reason(err).Error("failed to catch virtlogd logs")
 					return
 				}
-				defer file.Close()
+				defer util.CloseIOAndCheckErr(file, nil)
 
 				scanner := bufio.NewScanner(file)
 				scanner.Buffer(make([]byte, 1024), 512*1024)
@@ -340,8 +354,7 @@ func NewDomainFromName(name string, vmiUID types.UID) *api.Domain {
 	return domain
 }
 
-func SetupLibvirt() error {
-
+func SetupLibvirt() (err error) {
 	// TODO: setting permissions and owners is not part of device plugins.
 	// Configure these manually right now on "/dev/kvm"
 	stats, err := os.Stat("/dev/kvm")
@@ -374,7 +387,7 @@ func SetupLibvirt() error {
 	if err != nil {
 		return err
 	}
-	defer qemuConf.Close()
+	defer util.CloseIOAndCheckErr(qemuConf, &err)
 	// We are in a container, don't try to stuff qemu inside special cgroups
 	_, err = qemuConf.WriteString("cgroup_controllers = [ ]\n")
 	if err != nil {
@@ -394,15 +407,21 @@ func SetupLibvirt() error {
 	if err != nil {
 		return err
 	}
-	defer libvirtConf.Close()
+	defer util.CloseIOAndCheckErr(libvirtConf, &err)
 	_, err = libvirtConf.WriteString("log_outputs = \"1:stderr\"\n")
 	if err != nil {
 		return err
 	}
 
 	if _, ok := os.LookupEnv("LIBVIRT_DEBUG_LOGS"); ok {
-		// see https://wiki.libvirt.org/page/DebugLogs for details
-		_, err = libvirtConf.WriteString("log_filters=\"3:remote 4:event 3:util.json 3:rpc 1:*\"\n")
+		// see https://libvirt.org/kbase/debuglogs.html for details
+		_, err = libvirtConf.WriteString("log_filters=\"3:remote 4:event 3:util.json 3:util.object 3:util.dbus 3:util.netlink 3:node_device 3:rpc 3:access 1:*\"\n")
+		if err != nil {
+			return err
+		}
+	}
+	if _, ok := os.LookupEnv("VIRTIOFSD_DEBUG_LOGS"); ok {
+		_, err = qemuConf.WriteString("virtiofsd_debug = 1\n")
 		if err != nil {
 			return err
 		}

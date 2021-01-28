@@ -128,7 +128,7 @@ func newControllerClusterRole() *rbacv1.ClusterRole {
 					"persistentvolumeclaims",
 				},
 				Verbs: []string{
-					"get", "list", "watch",
+					"get", "list", "watch", "create", "update", "delete", "patch",
 				},
 			},
 			{
@@ -151,6 +151,19 @@ func newControllerClusterRole() *rbacv1.ClusterRole {
 				},
 				Verbs: []string{
 					"*",
+				},
+			},
+			{
+				APIGroups: []string{
+					"subresources.kubevirt.io",
+				},
+				Resources: []string{
+					"virtualmachineinstances/addvolume",
+					"virtualmachineinstances/removevolume",
+				},
+				Verbs: []string{
+					"get",
+					"update",
 				},
 			},
 			{

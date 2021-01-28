@@ -32,12 +32,14 @@ import (
 	"kubevirt.io/client-go/kubecli"
 
 	"kubevirt.io/kubevirt/tests"
+	"kubevirt.io/kubevirt/tests/console"
 	cd "kubevirt.io/kubevirt/tests/containerdisk"
+	"kubevirt.io/kubevirt/tests/libnet"
+	"kubevirt.io/kubevirt/tests/libvmi"
 )
 
-var _ = SIGDescribe("Primary Pod Network", func() {
+var _ = SIGDescribe("[Serial]Primary Pod Network", func() {
 	var virtClient kubecli.KubevirtClient
-
 	BeforeEach(func() {
 		var err error
 		virtClient, err = kubecli.GetKubevirtClient()
@@ -50,7 +52,7 @@ var _ = SIGDescribe("Primary Pod Network", func() {
 			vmiPod := tests.GetRunningPodByVirtualMachineInstance(vmi, tests.NamespaceTestDefault)
 
 			By("Making sure IP/s reported on the VMI matches the ones on the pod")
-			Expect(ValidateVMIandPodIPMatch(vmi, vmiPod)).To(Succeed(), "Should have matching IP/s between pod and vmi")
+			Expect(libnet.ValidateVMIandPodIPMatch(vmi, vmiPod)).To(Succeed(), "Should have matching IP/s between pod and vmi")
 		}
 
 		Context("VMI connected to the pod network using the default (implicit) binding", func() {
@@ -68,31 +70,109 @@ var _ = SIGDescribe("Primary Pod Network", func() {
 		})
 
 		Context("VMI connected to the pod network using bridge binding", func() {
-			var vmi *v1.VirtualMachineInstance
+			When("Guest Agent exists", func() {
+				var (
+					vmi   *v1.VirtualMachineInstance
+					vmiIP = func() string {
+						var err error
+						vmi, err = virtClient.VirtualMachineInstance(vmi.Namespace).Get(vmi.Name, &metav1.GetOptions{})
+						ExpectWithOffset(1, err).ToNot(HaveOccurred(), "should success retrieving VMI to get IP")
+						return vmi.Status.Interfaces[0].IP
+					}
 
-			BeforeEach(func() {
-				vmi = setupVMI(virtClient, vmiWithBridgeBinding())
+					vmiIPs = func() []string {
+						var err error
+						vmi, err = virtClient.VirtualMachineInstance(vmi.Namespace).Get(vmi.Name, &metav1.GetOptions{})
+						ExpectWithOffset(1, err).ToNot(HaveOccurred(), "should success retrieving VMI to get IPs")
+						return vmi.Status.Interfaces[0].IPs
+					}
+				)
+				BeforeEach(func() {
+					var err error
+
+					vmi, err = newFedoraWithGuestAgentAndDefaultInterface(libvmi.InterfaceDeviceWithBridgeBinding())
+					Expect(err).NotTo(HaveOccurred())
+
+					vmi, err = virtClient.VirtualMachineInstance(tests.NamespaceTestDefault).Create(vmi)
+					Expect(err).NotTo(HaveOccurred())
+					tests.WaitForSuccessfulVMIStart(vmi)
+					tests.WaitAgentConnected(virtClient, vmi)
+				})
+
+				AfterEach(func() {
+					cleanupVMI(virtClient, vmi)
+				})
+
+				It("should report PodIP/s IPv4 as its own on interface status", func() {
+					vmiPod := tests.GetRunningPodByVirtualMachineInstance(vmi, vmi.Namespace)
+					Eventually(vmiIP).Should(Equal(vmiPod.Status.PodIP), "should contain VMI Status IP as Pod status ip")
+					Eventually(vmiIPs).Should(ContainElement(vmiPod.Status.PodIP), "should contain IPv4 reported by guest agent")
+				})
+
+				It("should report VMIs static IPv6 at interface status", func() {
+					Eventually(vmiIPs).Should(ContainElement(libnet.DefaultIPv6Address), "should contain IPv6 address set by cloud-init and reported by guest agent")
+				})
 			})
+			When("no Guest Agent exists", func() {
+				var vmi *v1.VirtualMachineInstance
 
-			AfterEach(func() {
-				cleanupVMI(virtClient, vmi)
+				BeforeEach(func() {
+					vmi = setupVMI(virtClient, vmiWithBridgeBinding())
+				})
+
+				AfterEach(func() {
+					cleanupVMI(virtClient, vmi)
+				})
+
+				It("should report PodIP as its own on interface status", func() { AssertReportedIP(vmi) })
 			})
-
-			It("should report PodIP as its own on interface status", func() { AssertReportedIP(vmi) })
 		})
 
 		Context("VMI connected to the pod network using masquerade binding", func() {
-			var vmi *v1.VirtualMachineInstance
+			When("Guest Agent exists", func() {
+				var vmi *v1.VirtualMachineInstance
 
-			BeforeEach(func() {
-				vmi = setupVMI(virtClient, vmiWithMasqueradeBinding())
+				BeforeEach(func() {
+					tmpVmi, err := newFedoraWithGuestAgentAndDefaultInterface(libvmi.InterfaceDeviceWithMasqueradeBinding())
+					Expect(err).NotTo(HaveOccurred())
+
+					tmpVmi, err = virtClient.VirtualMachineInstance(tests.NamespaceTestDefault).Create(tmpVmi)
+					Expect(err).NotTo(HaveOccurred())
+					vmi = tests.WaitUntilVMIReady(tmpVmi, console.LoginToFedora)
+
+					tests.WaitAgentConnected(virtClient, vmi)
+				})
+
+				AfterEach(func() {
+					cleanupVMI(virtClient, vmi)
+				})
+
+				It("[test_id:4153]should report PodIP/s as its own on interface status", func() {
+					vmiPod := tests.GetRunningPodByVirtualMachineInstance(vmi, vmi.Namespace)
+					Consistently(func() error {
+						vmi, err := virtClient.VirtualMachineInstance(vmi.Namespace).Get(vmi.Name, &metav1.GetOptions{})
+						if err != nil {
+							return err
+						}
+						return libnet.ValidateVMIandPodIPMatch(vmi, vmiPod)
+					}, 5*time.Second, time.Second).Should(Succeed())
+				})
+
 			})
 
-			AfterEach(func() {
-				cleanupVMI(virtClient, vmi)
-			})
+			When("no Guest Agent exists", func() {
+				var vmi *v1.VirtualMachineInstance
 
-			It("should report PodIP as its own on interface status", func() { AssertReportedIP(vmi) })
+				BeforeEach(func() {
+					vmi = setupVMI(virtClient, vmiWithMasqueradeBinding())
+				})
+
+				AfterEach(func() {
+					cleanupVMI(virtClient, vmi)
+				})
+
+				It("[Conformance] should report PodIP as its own on interface status", func() { AssertReportedIP(vmi) })
+			})
 		})
 	})
 })
@@ -104,7 +184,7 @@ func setupVMI(virtClient kubecli.KubevirtClient, vmi *v1.VirtualMachineInstance)
 	Expect(err).NotTo(HaveOccurred(), "VMI should be successfully created")
 
 	By("Waiting until the VMI gets ready")
-	vmi = tests.WaitUntilVMIReady(vmi, tests.LoggedInAlpineExpecter)
+	vmi = tests.WaitUntilVMIReady(vmi, console.LoginToAlpine)
 
 	return vmi
 }
@@ -141,4 +221,19 @@ func vmiWithMasqueradeBinding() *v1.VirtualMachineInstance {
 	vmi.Spec.Domain.Devices.Interfaces = []v1.Interface{*v1.DefaultMasqueradeNetworkInterface()}
 	vmi.Spec.Networks = []v1.Network{*v1.DefaultPodNetwork()}
 	return vmi
+}
+
+func newFedoraWithGuestAgentAndDefaultInterface(iface v1.Interface) (*v1.VirtualMachineInstance, error) {
+	networkData, err := libnet.CreateDefaultCloudInitNetworkData()
+	if err != nil {
+		return nil, err
+	}
+
+	vmi := libvmi.NewFedora(
+		libvmi.WithInterface(iface),
+		libvmi.WithNetwork(v1.DefaultPodNetwork()),
+		libvmi.WithCloudInitNoCloudUserData(tests.GetGuestAgentUserData(), false),
+		libvmi.WithCloudInitNoCloudNetworkData(networkData, false),
+	)
+	return vmi, nil
 }

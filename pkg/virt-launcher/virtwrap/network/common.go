@@ -37,19 +37,23 @@ import (
 	lmf "github.com/subgraph/libmacouflage"
 	"github.com/vishvananda/netlink"
 
+	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/converter"
+
+	"kubevirt.io/kubevirt/pkg/util/sysctl"
+
 	netutils "k8s.io/utils/net"
 
 	v1 "kubevirt.io/client-go/api/v1"
 	"kubevirt.io/client-go/log"
 	kvselinux "kubevirt.io/kubevirt/pkg/virt-handler/selinux"
-	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/api"
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/network/dhcp"
+	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/network/dhcpv6"
 )
 
 const (
 	randomMacGenerationAttempts = 10
-	qemuUID                     = "107"
-	qemuGID                     = "107"
+	tapOwnerUID                 = "0"
+	tapOwnerGID                 = "0"
 )
 
 type VIF struct {
@@ -62,7 +66,6 @@ type VIF struct {
 	Routes       *[]netlink.Route
 	Mtu          uint16
 	IPAMDisabled bool
-	TapDevice    string
 }
 
 type CriticalNetworkError struct {
@@ -73,15 +76,15 @@ func (e *CriticalNetworkError) Error() string { return e.Msg }
 
 func (vif VIF) String() string {
 	return fmt.Sprintf(
-		"VIF: { Name: %s, IP: %s, Mask: %s, MAC: %s, Gateway: %s, MTU: %d, IPAMDisabled: %t, TapDevice: %s}",
+		"VIF: { Name: %s, IP: %s, Mask: %s, IPv6: %s, MAC: %s, Gateway: %s, MTU: %d, IPAMDisabled: %t}",
 		vif.Name,
 		vif.IP.IP,
 		vif.IP.Mask,
+		vif.IPv6,
 		vif.MAC,
 		vif.Gateway,
 		vif.Mtu,
 		vif.IPAMDisabled,
-		vif.TapDevice,
 	)
 }
 
@@ -101,7 +104,7 @@ type NetworkHandler interface {
 	GenerateRandomMac() (net.HardwareAddr, error)
 	GetMacDetails(iface string) (net.HardwareAddr, error)
 	LinkSetMaster(link netlink.Link, master *netlink.Bridge) error
-	StartDHCP(nic *VIF, serverAddr *netlink.Addr, bridgeInterfaceName string, dhcpOptions *v1.DHCPOptions) error
+	StartDHCP(nic *VIF, serverAddr net.IP, bridgeInterfaceName string, dhcpOptions *v1.DHCPOptions, filterByMAC bool) error
 	HasNatIptables(proto iptables.Protocol) bool
 	IsIpv6Enabled(interfaceName string) (bool, error)
 	IsIpv4Primary() (bool, error)
@@ -112,15 +115,16 @@ type NetworkHandler interface {
 	NftablesAppendRule(proto iptables.Protocol, table, chain string, rulespec ...string) error
 	NftablesLoad(fnName string) error
 	GetNFTIPString(proto iptables.Protocol) string
-	CreateTapDevice(tapName string, isMultiqueue bool, launcherPID int) error
+	CreateTapDevice(tapName string, queueNumber uint32, launcherPID int, mtu int) error
 	BindTapDeviceToBridge(tapName string, bridgeName string) error
+	DisableTXOffloadChecksum(ifaceName string) error
 }
 
 type NetworkUtilsHandler struct{}
 
 type tapDeviceMaker struct {
 	tapName         string
-	isMultiqueue    bool
+	queueNumber     uint32
 	virtLauncherPID int
 	tapMakingCmd    *exec.Cmd
 }
@@ -177,12 +181,15 @@ func (h *NetworkUtilsHandler) HasNatIptables(proto iptables.Protocol) bool {
 }
 
 func (h *NetworkUtilsHandler) ConfigureIpv6Forwarding() error {
-	_, err := exec.Command("sysctl", "net.ipv6.conf.all.forwarding=1").CombinedOutput()
+	err := sysctl.New().SetSysctl(sysctl.NetIPv6Forwarding, 1)
 	return err
 }
 
 func (h *NetworkUtilsHandler) IsIpv6Enabled(interfaceName string) (bool, error) {
 	link, err := Handler.LinkByName(interfaceName)
+	if err != nil {
+		return false, err
+	}
 	addrList, err := Handler.AddrList(link, netlink.FAMILY_V6)
 	if err != nil {
 		return false, err
@@ -224,6 +231,7 @@ func (h *NetworkUtilsHandler) IptablesAppendRule(proto iptables.Protocol, table,
 }
 
 func (h *NetworkUtilsHandler) NftablesNewChain(proto iptables.Protocol, table, chain string) error {
+	// #nosec g204 no risk to use GetNFTIPString as  argument as it returns either "ipv6" or "ip" strings
 	output, err := exec.Command("nft", "add", "chain", Handler.GetNFTIPString(proto), table, chain).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("%s", string(output))
@@ -234,6 +242,7 @@ func (h *NetworkUtilsHandler) NftablesNewChain(proto iptables.Protocol, table, c
 
 func (h *NetworkUtilsHandler) NftablesAppendRule(proto iptables.Protocol, table, chain string, rulespec ...string) error {
 	cmd := append([]string{"add", "rule", Handler.GetNFTIPString(proto), table, chain}, rulespec...)
+	// #nosec No risk for attacket injection. CMD variables are predefined strings
 	output, err := exec.Command("nft", cmd...).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("failed to apped new nfrule error %s", string(output))
@@ -250,6 +259,7 @@ func (h *NetworkUtilsHandler) GetNFTIPString(proto iptables.Protocol) string {
 }
 
 func (h *NetworkUtilsHandler) NftablesLoad(fnName string) error {
+	// #nosec g204 no risk to use Sprintf as  argument as it uses two static strings (fname limited to ipv4-nat or ipv6-nat)
 	output, err := exec.Command("nft", "-f", fmt.Sprintf("/etc/nftables/%s.nft", fnName)).CombinedOutput()
 	if err != nil {
 		log.Log.V(5).Reason(err).Infof("failed to load nftable %s", fnName)
@@ -332,9 +342,9 @@ func (h *NetworkUtilsHandler) SetRandomMac(iface string) (net.HardwareAddr, erro
 	return currentMac, nil
 }
 
-func (h *NetworkUtilsHandler) StartDHCP(nic *VIF, serverAddr *netlink.Addr, bridgeInterfaceName string, dhcpOptions *v1.DHCPOptions) error {
+func (h *NetworkUtilsHandler) StartDHCP(nic *VIF, serverAddr net.IP, bridgeInterfaceName string, dhcpOptions *v1.DHCPOptions, filterByMAC bool) error {
 	log.Log.V(4).Infof("StartDHCP network Nic: %+v", nic)
-	nameservers, searchDomains, err := api.GetResolvConfDetailsFromPod()
+	nameservers, searchDomains, err := converter.GetResolvConfDetailsFromPod()
 	if err != nil {
 		return fmt.Errorf("Failed to get DNS servers from resolv.conf: %v", err)
 	}
@@ -344,10 +354,11 @@ func (h *NetworkUtilsHandler) StartDHCP(nic *VIF, serverAddr *netlink.Addr, brid
 	go func() {
 		if err = DHCPServer(
 			nic.MAC,
+			filterByMAC,
 			nic.IP.IP,
 			nic.IP.Mask,
 			bridgeInterfaceName,
-			serverAddr.IP,
+			serverAddr,
 			nic.Gateway,
 			nameservers,
 			nic.Routes,
@@ -359,6 +370,18 @@ func (h *NetworkUtilsHandler) StartDHCP(nic *VIF, serverAddr *netlink.Addr, brid
 			panic(err)
 		}
 	}()
+
+	if nic.IPv6.IPNet != nil {
+		go func() {
+			if err = DHCPv6Server(
+				nic.IPv6.IP,
+				bridgeInterfaceName,
+			); err != nil {
+				log.Log.Reason(err).Error("failed to run DHCPv6")
+				panic(err)
+			}
+		}()
+	}
 
 	return nil
 }
@@ -375,8 +398,8 @@ func (h *NetworkUtilsHandler) GenerateRandomMac() (net.HardwareAddr, error) {
 	return net.HardwareAddr(append(prefix, suffix...)), nil
 }
 
-func (h *NetworkUtilsHandler) CreateTapDevice(tapName string, isMultiqueue bool, launcherPID int) error {
-	tapDeviceMaker, err := buildTapDeviceMaker(tapName, isMultiqueue, launcherPID)
+func (h *NetworkUtilsHandler) CreateTapDevice(tapName string, queueNumber uint32, launcherPID int, mtu int) error {
+	tapDeviceMaker, err := buildTapDeviceMaker(tapName, queueNumber, launcherPID, mtu)
 	if err != nil {
 		return fmt.Errorf("error creating tap device named %s; %v", tapName, err)
 	}
@@ -389,22 +412,22 @@ func (h *NetworkUtilsHandler) CreateTapDevice(tapName string, isMultiqueue bool,
 	return nil
 }
 
-func buildTapDeviceMaker(tapName string, isMultiqueue bool, virtLauncherPID int) (*tapDeviceMaker, error) {
+func buildTapDeviceMaker(tapName string, queueNumber uint32, virtLauncherPID int, mtu int) (*tapDeviceMaker, error) {
 	createTapDeviceArgs := []string{
 		"create-tap",
 		"--tap-name", tapName,
-		"--uid", qemuUID,
-		"--gid", qemuGID,
+		"--uid", tapOwnerUID,
+		"--gid", tapOwnerGID,
+		"--queue-number", fmt.Sprintf("%d", queueNumber),
+		"--mtu", fmt.Sprintf("%d", mtu),
 	}
-	if isMultiqueue {
-		createTapDeviceArgs = append(createTapDeviceArgs, "--multiqueue")
-	}
+	// #nosec No risk for attacket injection. createTapDeviceArgs includes predefined strings
 	cmd := exec.Command("virt-chroot", createTapDeviceArgs...)
 
 	return &tapDeviceMaker{
 		tapMakingCmd:    cmd,
 		tapName:         tapName,
-		isMultiqueue:    isMultiqueue,
+		queueNumber:     queueNumber,
 		virtLauncherPID: virtLauncherPID,
 	}, nil
 }
@@ -492,10 +515,18 @@ func (h *NetworkUtilsHandler) BindTapDeviceToBridge(tapName string, bridgeName s
 	return nil
 }
 
+func (h *NetworkUtilsHandler) DisableTXOffloadChecksum(ifaceName string) error {
+	if err := dhcp.EthtoolTXOff(ifaceName); err != nil {
+		log.Log.Reason(err).Errorf("Failed to set tx offload for interface %s off", ifaceName)
+		return err
+	}
+
+	return nil
+}
+
 // Allow mocking for tests
-var SetupPodNetworkPhase1 = SetupNetworkInterfacesPhase1
-var SetupPodNetworkPhase2 = SetupNetworkInterfacesPhase2
 var DHCPServer = dhcp.SingleClientDHCPServer
+var DHCPv6Server = dhcpv6.SingleClientDHCPv6Server
 
 func initHandler() {
 	if Handler == nil {

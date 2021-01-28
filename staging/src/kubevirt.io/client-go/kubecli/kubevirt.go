@@ -55,6 +55,7 @@ type KubevirtClient interface {
 	VirtualMachineInstancePreset(namespace string) VirtualMachineInstancePresetInterface
 	VirtualMachineSnapshot(namespace string) vmsnapshotv1alpha1.VirtualMachineSnapshotInterface
 	VirtualMachineSnapshotContent(namespace string) vmsnapshotv1alpha1.VirtualMachineSnapshotContentInterface
+	VirtualMachineRestore(namespace string) vmsnapshotv1alpha1.VirtualMachineRestoreInterface
 	ServerVersion() *ServerVersion
 	RestClient() *rest.RESTClient
 	GeneratedKubeVirtClient() generatedclient.Interface
@@ -129,6 +130,10 @@ func (k kubevirt) VirtualMachineSnapshotContent(namespace string) vmsnapshotv1al
 	return k.generatedKubeVirtClient.SnapshotV1alpha1().VirtualMachineSnapshotContents(namespace)
 }
 
+func (k kubevirt) VirtualMachineRestore(namespace string) vmsnapshotv1alpha1.VirtualMachineRestoreInterface {
+	return k.generatedKubeVirtClient.SnapshotV1alpha1().VirtualMachineRestores(namespace)
+}
+
 func (k kubevirt) KubernetesSnapshotClient() k8ssnapshotclient.Interface {
 	return k.snapshotClient
 }
@@ -156,6 +161,8 @@ type VirtualMachineInstanceInterface interface {
 	GuestOsInfo(name string) (v1.VirtualMachineInstanceGuestAgentInfo, error)
 	UserList(name string) (v1.VirtualMachineInstanceGuestOSUserList, error)
 	FilesystemList(name string) (v1.VirtualMachineInstanceFileSystemList, error)
+	AddVolume(name string, addVolumeOptions *v1.AddVolumeOptions) error
+	RemoveVolume(name string, removeVolumeOptions *v1.RemoveVolumeOptions) error
 }
 
 type ReplicaSetInterface interface {
@@ -197,6 +204,8 @@ type VirtualMachineInterface interface {
 	Stop(name string) error
 	Migrate(name string) error
 	Rename(name string, options *v1.RenameOptions) error
+	AddVolume(name string, addVolumeOptions *v1.AddVolumeOptions) error
+	RemoveVolume(name string, removeVolumeOptions *v1.RemoveVolumeOptions) error
 }
 
 type VirtualMachineInstanceMigrationInterface interface {

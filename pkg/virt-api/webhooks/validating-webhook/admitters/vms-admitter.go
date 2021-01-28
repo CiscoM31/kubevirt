@@ -26,13 +26,17 @@ import (
 	"strings"
 
 	"k8s.io/api/admission/v1beta1"
+	authv1 "k8s.io/api/authorization/v1"
 	k8svalidation "k8s.io/apimachinery/pkg/api/validation"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	k8sfield "k8s.io/apimachinery/pkg/util/validation/field"
 
+	"k8s.io/apimachinery/pkg/api/errors"
+
 	v1 "kubevirt.io/client-go/api/v1"
 	"kubevirt.io/client-go/kubecli"
 	cdiclone "kubevirt.io/containerized-data-importer/pkg/clone"
+	"kubevirt.io/kubevirt/pkg/controller"
 	webhookutils "kubevirt.io/kubevirt/pkg/util/webhooks"
 	"kubevirt.io/kubevirt/pkg/virt-api/webhooks"
 	virtconfig "kubevirt.io/kubevirt/pkg/virt-config"
@@ -45,13 +49,25 @@ type CloneAuthFunc func(pvcNamespace, pvcName, saNamespace, saName string) (bool
 type VMsAdmitter struct {
 	ClusterConfig *virtconfig.ClusterConfig
 	cloneAuthFunc CloneAuthFunc
+	virtClient    kubecli.KubevirtClient
+}
+
+type sarProxy struct {
+	client kubecli.KubevirtClient
+}
+
+func (p *sarProxy) Create(sar *authv1.SubjectAccessReview) (*authv1.SubjectAccessReview, error) {
+	return p.client.AuthorizationV1().SubjectAccessReviews().Create(sar)
 }
 
 func NewVMsAdmitter(clusterConfig *virtconfig.ClusterConfig, client kubecli.KubevirtClient) *VMsAdmitter {
+	proxy := &sarProxy{client: client}
+
 	return &VMsAdmitter{
 		ClusterConfig: clusterConfig,
+		virtClient:    client,
 		cloneAuthFunc: func(pvcNamespace, pvcName, saNamespace, saName string) (bool, string, error) {
-			return cdiclone.CanServiceAccountClonePVC(client, pvcNamespace, pvcName, saNamespace, saName)
+			return cdiclone.CanServiceAccountClonePVC(proxy, pvcNamespace, pvcName, saNamespace, saName)
 		},
 	}
 }
@@ -93,6 +109,13 @@ func (admitter *VMsAdmitter) Admit(ar *v1beta1.AdmissionReview) *v1beta1.Admissi
 		return webhookutils.ToAdmissionResponse(causes)
 	}
 
+	causes, err = admitter.validateVolumeRequests(ar.Request, &vm)
+	if err != nil {
+		return webhookutils.ToAdmissionResponseError(err)
+	} else if len(causes) > 0 {
+		return webhookutils.ToAdmissionResponse(causes)
+	}
+
 	causes = validateSnapshotStatus(ar.Request, &vm)
 	if len(causes) > 0 {
 		return webhookutils.ToAdmissionResponse(causes)
@@ -111,6 +134,13 @@ func (admitter *VMsAdmitter) AdmitStatus(ar *v1beta1.AdmissionReview) *v1beta1.A
 
 	causes := validateStateChangeRequests(ar.Request, vm)
 	if len(causes) > 0 {
+		return webhookutils.ToAdmissionResponse(causes)
+	}
+
+	causes, err = admitter.validateVolumeRequests(ar.Request, vm)
+	if err != nil {
+		return webhookutils.ToAdmissionResponseError(err)
+	} else if len(causes) > 0 {
 		return webhookutils.ToAdmissionResponse(causes)
 	}
 
@@ -204,9 +234,11 @@ func ValidateVirtualMachineSpec(field *k8sfield.Path, spec *v1.VirtualMachineSpe
 
 			dataVolumeRefFound := false
 			for _, volume := range spec.Template.Spec.Volumes {
-				if volume.VolumeSource.DataVolume == nil {
-					continue
-				} else if volume.VolumeSource.DataVolume.Name == dataVolume.Name {
+				// TODO: Assuming here that PVC name == DV name which might not be the case in the future
+				if volume.VolumeSource.PersistentVolumeClaim != nil && volume.VolumeSource.PersistentVolumeClaim.ClaimName == dataVolume.Name {
+					dataVolumeRefFound = true
+					break
+				} else if volume.VolumeSource.DataVolume != nil && volume.VolumeSource.DataVolume.Name == dataVolume.Name {
 					dataVolumeRefFound = true
 					break
 				}
@@ -259,6 +291,159 @@ func ValidateVirtualMachineSpec(field *k8sfield.Path, spec *v1.VirtualMachineSpe
 	return causes
 }
 
+func (admitter *VMsAdmitter) validateVolumeRequests(ar *v1beta1.AdmissionRequest, vm *v1.VirtualMachine) ([]metav1.StatusCause, error) {
+	if len(vm.Status.VolumeRequests) == 0 {
+		return nil, nil
+	}
+
+	curVMAddRequestsMap := make(map[string]*v1.VirtualMachineVolumeRequest)
+	curVMRemoveRequestsMap := make(map[string]*v1.VirtualMachineVolumeRequest)
+
+	vmVolumeMap := make(map[string]v1.Volume)
+	vmiVolumeMap := make(map[string]v1.Volume)
+
+	vmi := &v1.VirtualMachineInstance{}
+	vmiExists := false
+	// get VMI if vm is active
+	if vm.Status.Ready {
+		retrievedVMI, err := admitter.virtClient.VirtualMachineInstance(vm.Namespace).Get(vm.Name, &metav1.GetOptions{})
+		if errors.IsNotFound(err) {
+			// ignore if VMI doesn't exist. This is best effort
+		} else if err != nil {
+			return nil, err
+		} else if retrievedVMI.DeletionTimestamp == nil {
+			// If VMI exists, lets simulate whether the new volume will be successful
+			vmi = retrievedVMI
+			vmiExists = true
+		}
+	}
+
+	if vmiExists {
+		for _, volume := range vmi.Spec.Volumes {
+			vmiVolumeMap[volume.Name] = volume
+		}
+	}
+
+	for _, volume := range vm.Spec.Template.Spec.Volumes {
+		vmVolumeMap[volume.Name] = volume
+	}
+
+	newSpec := vm.Spec.Template.Spec.DeepCopy()
+	for _, volumeRequest := range vm.Status.VolumeRequests {
+		volumeRequest := volumeRequest
+		name := ""
+		if volumeRequest.AddVolumeOptions != nil && volumeRequest.RemoveVolumeOptions != nil {
+			return []metav1.StatusCause{{
+				Type:    metav1.CauseTypeFieldValueInvalid,
+				Message: "VolumeRequests require either addVolumeOptions or removeVolumeOptions to be set, not both",
+				Field:   k8sfield.NewPath("Status", "volumeRequests").String(),
+			}}, nil
+		} else if volumeRequest.AddVolumeOptions != nil {
+			name = volumeRequest.AddVolumeOptions.Name
+
+			_, ok := curVMAddRequestsMap[name]
+			if ok {
+				return []metav1.StatusCause{{
+					Type:    metav1.CauseTypeFieldValueInvalid,
+					Message: fmt.Sprintf("AddVolume request for [%s] aleady exists", name),
+					Field:   k8sfield.NewPath("Status", "volumeRequests").String(),
+				}}, nil
+			}
+
+			// Validate the disk is configured properly
+			if volumeRequest.AddVolumeOptions.Disk == nil {
+				return []metav1.StatusCause{{
+					Type:    metav1.CauseTypeFieldValueInvalid,
+					Message: fmt.Sprintf("AddVolume request for [%s] requires the disk field to be set.", name),
+					Field:   k8sfield.NewPath("Status", "volumeRequests").String(),
+				}}, nil
+			} else if volumeRequest.AddVolumeOptions.Disk.DiskDevice.Disk == nil {
+				return []metav1.StatusCause{{
+					Type:    metav1.CauseTypeFieldValueInvalid,
+					Message: fmt.Sprintf("AddVolume request for [%s] requires diskDevice of type 'disk' to be used.", name),
+					Field:   k8sfield.NewPath("Status", "volumeRequests").String(),
+				}}, nil
+			} else if volumeRequest.AddVolumeOptions.Disk.DiskDevice.Disk.Bus != "scsi" {
+				return []metav1.StatusCause{{
+					Type:    metav1.CauseTypeFieldValueInvalid,
+					Message: fmt.Sprintf("AddVolume request for [%s] requires disk bus to be 'scsi'. [%s] is not permitted", name, volumeRequest.AddVolumeOptions.Disk.DiskDevice.Disk.Bus),
+					Field:   k8sfield.NewPath("Status", "volumeRequests").String(),
+				}}, nil
+			}
+
+			newVolume := v1.Volume{
+				Name: volumeRequest.AddVolumeOptions.Name,
+			}
+			if volumeRequest.AddVolumeOptions.VolumeSource.PersistentVolumeClaim != nil {
+				newVolume.VolumeSource.PersistentVolumeClaim = volumeRequest.AddVolumeOptions.VolumeSource.PersistentVolumeClaim
+			} else if volumeRequest.AddVolumeOptions.VolumeSource.DataVolume != nil {
+				newVolume.VolumeSource.DataVolume = volumeRequest.AddVolumeOptions.VolumeSource.DataVolume
+			}
+
+			vmVolume, ok := vmVolumeMap[name]
+			if ok && !reflect.DeepEqual(newVolume, vmVolume) {
+				return []metav1.StatusCause{{
+					Type:    metav1.CauseTypeFieldValueInvalid,
+					Message: fmt.Sprintf("AddVolume request for [%s] conflicts with an existing volume of the same name on the vmi template.", name),
+					Field:   k8sfield.NewPath("Status", "volumeRequests").String(),
+				}}, nil
+			}
+
+			vmiVolume, ok := vmiVolumeMap[name]
+			if ok && !reflect.DeepEqual(newVolume, vmiVolume) {
+				return []metav1.StatusCause{{
+					Type:    metav1.CauseTypeFieldValueInvalid,
+					Message: fmt.Sprintf("AddVolume request for [%s] conflicts with an existing volume of the same name on currently running vmi", name),
+					Field:   k8sfield.NewPath("Status", "volumeRequests").String(),
+				}}, nil
+			}
+
+			curVMAddRequestsMap[name] = &volumeRequest
+		} else if volumeRequest.RemoveVolumeOptions != nil {
+			name = volumeRequest.RemoveVolumeOptions.Name
+
+			_, ok := curVMRemoveRequestsMap[name]
+			if ok {
+				return []metav1.StatusCause{{
+					Type:    metav1.CauseTypeFieldValueInvalid,
+					Message: fmt.Sprintf("RemoveVolume request for [%s] aleady exists", name),
+					Field:   k8sfield.NewPath("Status", "volumeRequests").String(),
+				}}, nil
+			}
+
+			curVMRemoveRequestsMap[name] = &volumeRequest
+		} else {
+			return []metav1.StatusCause{{
+				Type:    metav1.CauseTypeFieldValueInvalid,
+				Message: "VolumeRequests require one of either addVolumeOptions or removeVolumeOptions to be set",
+				Field:   k8sfield.NewPath("Status", "volumeRequests").String(),
+			}}, nil
+		}
+		newSpec = controller.ApplyVolumeRequestOnVMISpec(newSpec, &volumeRequest)
+
+		if vmiExists {
+			vmi.Spec = *controller.ApplyVolumeRequestOnVMISpec(&vmi.Spec, &volumeRequest)
+		}
+	}
+
+	// this simulates injecting the changes into the VMI template and validates it will work.
+	causes := ValidateVirtualMachineInstanceSpec(k8sfield.NewPath("spec", "template", "spec"), newSpec, admitter.ClusterConfig)
+	if len(causes) > 0 {
+		return causes, nil
+	}
+
+	// This simulates injecting the changes directly into the vmi, if the vmi exists
+	if vmiExists {
+		causes := ValidateVirtualMachineInstanceSpec(k8sfield.NewPath("spec", "template", "spec"), &vmi.Spec, admitter.ClusterConfig)
+		if len(causes) > 0 {
+			return causes, nil
+		}
+	}
+
+	return nil, nil
+
+}
+
 func validateStateChangeRequests(ar *v1beta1.AdmissionRequest, vm *v1.VirtualMachine) []metav1.StatusCause {
 	// Only rename request is validated
 	renameRequest := getRenameRequest(vm)
@@ -284,10 +469,21 @@ func validateStateChangeRequests(ar *v1beta1.AdmissionRequest, vm *v1.VirtualMac
 		}
 
 		if getRenameRequest(existingVM) != nil {
-			return []metav1.StatusCause{{
-				Type:    metav1.CauseTypeFieldValueInvalid,
-				Message: "Modifying a VM during a rename process is not allowed",
-			}}
+			if webhooks.IsKubeVirtServiceAccount(ar.UserInfo.Username) {
+				if !reflect.DeepEqual(existingVM.Spec, vm.Spec) {
+					return []metav1.StatusCause{{
+						Type:    metav1.CauseTypeFieldValueNotSupported,
+						Message: fmt.Sprint("Cannot update VM spec until rename process completes"),
+						Field:   k8sfield.NewPath("spec").String(),
+					}}
+
+				}
+			} else {
+				return []metav1.StatusCause{{
+					Type:    metav1.CauseTypeFieldValueNotSupported,
+					Message: fmt.Sprint("Modifying a VM during a rename process is restricted to Kubevirt core components"),
+				}}
+			}
 		}
 	}
 

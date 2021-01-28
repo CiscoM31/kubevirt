@@ -224,7 +224,7 @@ func eventCallback(c cli.Connection, domain *api.Domain, libvirtEvent libvirtEve
 			domain.SetState(util.ConvState(status), util.ConvReason(status, reason))
 		}
 
-		spec, err := util.GetDomainSpecWithRuntimeInfo(status, d)
+		spec, err := util.GetDomainSpecWithRuntimeInfo(d)
 		if err != nil {
 			// NOTE: Getting domain metadata for a live-migrating VM isn't allowed
 			if !domainerrors.IsNotFound(err) && !domainerrors.IsInvalidOperation(err) {
@@ -247,34 +247,46 @@ func eventCallback(c cli.Connection, domain *api.Domain, libvirtEvent libvirtEve
 		domain.ObjectMeta.DeletionTimestamp = &now
 		watchEvent := watch.Event{Type: watch.Modified, Object: domain}
 		client.SendDomainEvent(watchEvent)
-		events <- watchEvent
+		updateEvents(watchEvent, domain, events)
 	default:
 		if libvirtEvent.Event != nil {
 			if libvirtEvent.Event.Event == libvirt.DOMAIN_EVENT_DEFINED && libvirt.DomainEventDefinedDetailType(libvirtEvent.Event.Detail) == libvirt.DOMAIN_EVENT_DEFINED_ADDED {
 				event := watch.Event{Type: watch.Added, Object: domain}
 				client.SendDomainEvent(event)
-				events <- event
+				updateEvents(event, domain, events)
 			} else if libvirtEvent.Event.Event == libvirt.DOMAIN_EVENT_STARTED && libvirt.DomainEventStartedDetailType(libvirtEvent.Event.Detail) == libvirt.DOMAIN_EVENT_STARTED_MIGRATED {
 				event := watch.Event{Type: watch.Added, Object: domain}
 				client.SendDomainEvent(event)
-				events <- event
+				updateEvents(event, domain, events)
 			}
 		}
-		log.Log.Infof("7) OSINFO IN EVENT CALLBACK: %v", osInfo)
 		if interfaceStatus != nil {
 			domain.Status.Interfaces = interfaceStatus
 		}
 		if osInfo != nil {
 			domain.Status.OSInfo = *osInfo
 		}
-		if interfaceStatus != nil || osInfo != nil {
-			event := watch.Event{Type: watch.Modified, Object: domain}
-			client.SendDomainEvent(event)
-			events <- event
-		}
+
 		err := client.SendDomainEvent(watch.Event{Type: watch.Modified, Object: domain})
 		if err != nil {
 			log.Log.Reason(err).Error("Could not send domain notify event.")
+		}
+	}
+}
+
+var updateEvents = updateEventsClosure()
+
+func updateEventsClosure() func(event watch.Event, domain *api.Domain, events chan watch.Event) {
+	firstAddEvent := true
+	firstDeleteEvent := true
+
+	return func(event watch.Event, domain *api.Domain, events chan watch.Event) {
+		if event.Type == watch.Added && firstAddEvent {
+			firstAddEvent = false
+			events <- event
+		} else if event.Type == watch.Modified && domain.ObjectMeta.DeletionTimestamp != nil && firstDeleteEvent {
+			firstDeleteEvent = false
+			events <- event
 		}
 	}
 }
@@ -355,9 +367,47 @@ func (n *Notifier) StartDomainNotifier(
 		}
 	}
 
+	domainEventDeviceAddedCallback := func(c *libvirt.Connect, d *libvirt.Domain, event *libvirt.DomainEventDeviceAdded) {
+		log.Log.Infof("Domain Device Added event received")
+		name, err := d.GetName()
+		if err != nil {
+			log.Log.Reason(err).Info("Could not determine name of libvirt domain in event callback.")
+		}
+		select {
+		case eventChan <- libvirtEvent{Domain: name}:
+		default:
+			log.Log.Infof("Libvirt event channel is full, dropping event.")
+		}
+	}
+
+	domainEventDeviceRemovedCallback := func(c *libvirt.Connect, d *libvirt.Domain, event *libvirt.DomainEventDeviceRemoved) {
+		log.Log.Infof("Domain Device Removed event received")
+		name, err := d.GetName()
+		if err != nil {
+			log.Log.Reason(err).Info("Could not determine name of libvirt domain in event callback.")
+		}
+
+		select {
+		case eventChan <- libvirtEvent{Domain: name}:
+		default:
+			log.Log.Infof("Libvirt event channel is full, dropping event.")
+		}
+	}
+
 	err := domainConn.DomainEventLifecycleRegister(domainEventLifecycleCallback)
 	if err != nil {
 		log.Log.Reason(err).Errorf("failed to register event callback with libvirt")
+		return err
+	}
+
+	err = domainConn.DomainEventDeviceAddedRegister(domainEventDeviceAddedCallback)
+	if err != nil {
+		log.Log.Reason(err).Errorf("failed to register device added event callback with libvirt")
+		return err
+	}
+	err = domainConn.DomainEventDeviceRemovedRegister(domainEventDeviceRemovedCallback)
+	if err != nil {
+		log.Log.Reason(err).Errorf("failed to register device removed event callback with libvirt")
 		return err
 	}
 

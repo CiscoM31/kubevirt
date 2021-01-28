@@ -46,6 +46,7 @@ import (
 	"kubevirt.io/client-go/kubecli"
 	cdiv1 "kubevirt.io/containerized-data-importer/pkg/apis/core/v1alpha1"
 	uploadcdiv1 "kubevirt.io/containerized-data-importer/pkg/apis/upload/v1alpha1"
+	"kubevirt.io/kubevirt/pkg/util"
 	"kubevirt.io/kubevirt/pkg/virtctl/templates"
 )
 
@@ -136,7 +137,7 @@ func NewImageUploadCommand(clientConfig clientcmd.ClientConfig) *cobra.Command {
 	cmd.Flags().StringVar(&imagePath, "image-path", "", "Path to the local VM image.")
 	cmd.MarkFlagRequired("image-path")
 	cmd.Flags().BoolVar(&noCreate, "no-create", false, "Don't attempt to create a new DataVolume/PVC.")
-	cmd.Flags().UintVar(&uploadPodWaitSecs, "wait-secs", 60, "Seconds to wait for upload pod to start.")
+	cmd.Flags().UintVar(&uploadPodWaitSecs, "wait-secs", 300, "Seconds to wait for upload pod to start.")
 	cmd.SetUsageTemplate(templates.UsageTemplate())
 	return cmd
 }
@@ -172,6 +173,10 @@ func parseArgs(args []string) error {
 		size = pvcSize
 	}
 
+	if accessMode == string(v1.ReadOnlyMany) {
+		return fmt.Errorf("cannot upload to a readonly volume, use either ReadWriteOnce or ReadWriteMany if supported")
+	}
+
 	// check deprecated invocation
 	if name != "" {
 		if len(args) != 0 {
@@ -205,12 +210,13 @@ func (c *command) run(cmd *cobra.Command, args []string) error {
 	if err := parseArgs(args); err != nil {
 		return err
 	}
-
+	// #nosec G304 No risk for path injection as this funtion exectues with
+	// the same previliges as those of virtctl user who supplies imagePath
 	file, err := os.Open(imagePath)
 	if err != nil {
 		return err
 	}
-	defer file.Close()
+	defer util.CloseIOAndCheckErr(file, nil)
 
 	namespace, _, err := c.clientConfig.Namespace()
 	if err != nil {
@@ -256,11 +262,17 @@ func (c *command) run(cmd *cobra.Command, args []string) error {
 		fmt.Printf("Using existing PVC %s/%s\n", namespace, pvc.Name)
 	}
 
-	err = waitUploadServerReady(virtClient, namespace, name, uploadReadyWaitInterval, time.Duration(uploadPodWaitSecs)*time.Second)
-	if err != nil {
-		return err
+	if createPVC {
+		err = waitUploadServerReady(virtClient, namespace, name, uploadReadyWaitInterval, time.Duration(uploadPodWaitSecs)*time.Second)
+		if err != nil {
+			return err
+		}
+	} else {
+		err = waitDvUploadScheduled(virtClient, namespace, name, uploadReadyWaitInterval, time.Duration(uploadPodWaitSecs)*time.Second)
+		if err != nil {
+			return err
+		}
 	}
-
 	if uploadProxyURL == "" {
 		uploadProxyURL, err = getUploadProxyURL(virtClient.CdiClient())
 		if err != nil {
@@ -307,6 +319,7 @@ func getHTTPClient(insecure bool) *http.Client {
 	client := &http.Client{}
 
 	if insecure {
+		// #nosec cause: InsecureSkipVerify: true resolution: this method explicitly ask for insecure http client
 		client.Transport = &http.Transport{
 			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
 		}
@@ -315,7 +328,7 @@ func getHTTPClient(insecure bool) *http.Client {
 	return client
 }
 
-//ConstructUploadProxyPath - receives uploadproxy adress and concatenates to it URI
+//ConstructUploadProxyPath - receives uploadproxy address and concatenates to it URI
 func ConstructUploadProxyPath(uploadProxyURL string) (string, error) {
 	u, err := url.Parse(uploadProxyURL)
 
@@ -329,7 +342,7 @@ func ConstructUploadProxyPath(uploadProxyURL string) (string, error) {
 	return u.String(), nil
 }
 
-//ConstructUploadProxyPathAsync - receives uploadproxy adress and concatenates to it URI
+//ConstructUploadProxyPathAsync - receives uploadproxy address and concatenates to it URI
 func ConstructUploadProxyPathAsync(uploadProxyURL, token string, insecure bool) (string, error) {
 	u, err := url.Parse(uploadProxyURL)
 
@@ -414,6 +427,40 @@ func getUploadToken(client cdiClientset.Interface, namespace, name string) (stri
 	}
 
 	return response.Status.Token, nil
+}
+
+func waitDvUploadScheduled(client kubecli.KubevirtClient, namespace, name string, interval, timeout time.Duration) error {
+	loggedStatus := false
+	//
+	err := wait.PollImmediate(interval, timeout, func() (bool, error) {
+		dv, err := client.CdiClient().CdiV1alpha1().DataVolumes(namespace).Get(name, metav1.GetOptions{})
+
+		if err != nil {
+			// DataVolume controller may not have created the DV yet ? TODO:
+			if k8serrors.IsNotFound(err) {
+				return false, nil
+			}
+
+			return false, err
+		}
+
+		if dv.Status.Phase == cdiv1.WaitForFirstConsumer {
+			return false, fmt.Errorf("cannot upload to DataVolume in WaitForFirstConsumer state, make sure the PVC is Bound")
+		}
+		done := dv.Status.Phase == cdiv1.UploadReady
+		if !done && !loggedStatus {
+			fmt.Printf("Waiting for PVC %s upload pod to be ready...\n", name)
+			loggedStatus = true
+		}
+
+		if done && loggedStatus {
+			fmt.Printf("Pod now ready\n")
+		}
+
+		return done, nil
+	})
+
+	return err
 }
 
 func waitUploadServerReady(client kubernetes.Interface, namespace, name string, interval, timeout time.Duration) error {
@@ -533,6 +580,10 @@ func createPVCSpec(size, storageClass, accessMode string, blockVolume bool) (*v1
 				v1.ResourceStorage: quantity,
 			},
 		},
+	}
+
+	if storageClass != "" {
+		spec.StorageClassName = &storageClass
 	}
 
 	if accessMode != "" {

@@ -27,36 +27,50 @@ import (
 
 // Default VMI values
 const (
-	DefaultResourceMemory        = "8192Ki"
 	DefaultTestGracePeriod int64 = 0
 	DefaultVmiName               = "testvmi"
-	NamespaceTestDefault         = "kubevirt-test-default"
 )
 
 // NewFedora instantiates a new Fedora based VMI configuration,
 // building its extra properties based on the specified With* options.
 func NewFedora(opts ...Option) *kvirtv1.VirtualMachineInstance {
+	return newFedora(cd.ContainerDiskFedora, opts...)
+}
+
+// NewSriovFedora instantiates a new Fedora based VMI configuration,
+// building its extra properties based on the specified With* options, the
+// image used include Guest Agent and some moduled needed by SRIOV.
+func NewSriovFedora(opts ...Option) *kvirtv1.VirtualMachineInstance {
+	return newFedora(cd.ContainerDiskFedoraSRIOVLane, opts...)
+}
+
+// NewFedora instantiates a new Fedora based VMI configuration with specified
+// containerDisk, building its extra properties based on the specified With*
+// options.
+func newFedora(containerDisk cd.ContainerDisk, opts ...Option) *kvirtv1.VirtualMachineInstance {
 	configurePassword := `#!/bin/bash
 	echo "fedora" |passwd fedora --stdin
 	echo `
 
-	fedoraOptions := append(
-		defaultOptions(),
+	fedoraOptions := []Option{
+		WithTerminationGracePeriod(DefaultTestGracePeriod),
 		WithResourceMemory("512M"),
 		WithRng(),
-		WithContainerImage(cd.ContainerDiskFor(cd.ContainerDiskFedora)),
-		WithCloudInitNoCloudUserData(configurePassword, true),
-	)
+		WithContainerImage(cd.ContainerDiskFor(containerDisk)),
+		WithCloudInitNoCloudUserData(configurePassword, false),
+	}
 	opts = append(fedoraOptions, opts...)
-	return New(NamespaceTestDefault, RandName(DefaultVmiName), opts...)
+	return New(RandName(DefaultVmiName), opts...)
 }
 
-// defaultOptions returns a list of "default" options.
-func defaultOptions() []Option {
-	return []Option{
-		WithInterface(InterfaceDeviceWithMasqueradeBinding()),
-		WithNetwork(kvirtv1.DefaultPodNetwork()),
+// NewCirros instantiates a new CirrOS based VMI configuration
+func NewCirros(opts ...Option) *kvirtv1.VirtualMachineInstance {
+	cirrosOpts := []Option{
+		WithContainerImage(cd.ContainerDiskFor(cd.ContainerDiskCirros)),
+		WithCloudInitNoCloudUserData("#!/bin/bash\necho 'hello'\n", true),
+		WithResourceMemory("64M"),
 		WithTerminationGracePeriod(DefaultTestGracePeriod),
-		WithResourceMemory(DefaultResourceMemory),
 	}
+	cirrosOpts = append(cirrosOpts, opts...)
+	return New(RandName(DefaultVmiName), cirrosOpts...)
 }

@@ -30,15 +30,13 @@ import (
 	. "github.com/onsi/ginkgo"
 	"github.com/onsi/ginkgo/extensions/table"
 	. "github.com/onsi/gomega"
-	batchv1 "k8s.io/api/batch/v1"
 	k8sv1 "k8s.io/api/core/v1"
 	v12 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	v13 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/util/intstr"
-	"k8s.io/apimachinery/pkg/util/rand"
 	netutils "k8s.io/utils/net"
+	"k8s.io/utils/pointer"
 
 	v1 "kubevirt.io/client-go/api/v1"
 	"kubevirt.io/client-go/kubecli"
@@ -46,13 +44,18 @@ import (
 	"kubevirt.io/kubevirt/pkg/virt-controller/services"
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/api"
 	"kubevirt.io/kubevirt/tests"
+	"kubevirt.io/kubevirt/tests/console"
 	cd "kubevirt.io/kubevirt/tests/containerdisk"
+	"kubevirt.io/kubevirt/tests/flags"
+	"kubevirt.io/kubevirt/tests/libnet"
+	"kubevirt.io/kubevirt/tests/libvmi"
 )
 
-var _ = Describe("[rfe_id:694][crit:medium][vendor:cnv-qe@redhat.com][level:component]Networking", func() {
+var _ = Describe("[Serial][rfe_id:694][crit:medium][vendor:cnv-qe@redhat.com][level:component]Networking", func() {
 
 	var err error
 	var virtClient kubecli.KubevirtClient
+	var currentConfiguration v1.KubeVirtConfiguration
 
 	var inboundVMI *v1.VirtualMachineInstance
 	var inboundVMIWithPodNetworkSet *v1.VirtualMachineInstance
@@ -64,29 +67,25 @@ var _ = Describe("[rfe_id:694][crit:medium][vendor:cnv-qe@redhat.com][level:comp
 	tests.BeforeAll(func() {
 		virtClient, err = kubecli.GetKubevirtClient()
 		tests.PanicOnError(err)
+
+		kv := tests.GetCurrentKv(virtClient)
+		currentConfiguration = kv.Spec.Configuration
 	})
 
-	runHelloWorldJob := func(host, port, namespace string) *batchv1.Job {
-		job := tests.NewHelloWorldJob(host, port)
-		job, err := virtClient.BatchV1().Jobs(namespace).Create(job)
-		ExpectWithOffset(1, err).ToNot(HaveOccurred())
-		return job
-	}
-
-	checkMacAddress := func(vmi *v1.VirtualMachineInstance, expectedMacAddress string, prompt string) {
-		err := tests.CheckForTextExpecter(vmi, []expect.Batcher{
+	checkMacAddress := func(vmi *v1.VirtualMachineInstance, expectedMacAddress string) {
+		err := console.SafeExpectBatch(vmi, []expect.Batcher{
 			&expect.BSnd{S: "\n"},
-			&expect.BExp{R: prompt},
+			&expect.BExp{R: console.PromptExpression},
 			&expect.BSnd{S: "cat /sys/class/net/eth0/address\n"},
 			&expect.BExp{R: expectedMacAddress},
 		}, 15)
 		Expect(err).ToNot(HaveOccurred())
 	}
 
-	checkNetworkVendor := func(vmi *v1.VirtualMachineInstance, expectedVendor string, prompt string) {
-		err := tests.CheckForTextExpecter(vmi, []expect.Batcher{
+	checkNetworkVendor := func(vmi *v1.VirtualMachineInstance, expectedVendor string) {
+		err := console.SafeExpectBatch(vmi, []expect.Batcher{
 			&expect.BSnd{S: "\n"},
-			&expect.BExp{R: prompt},
+			&expect.BExp{R: console.PromptExpression},
 			&expect.BSnd{S: "cat /sys/class/net/eth0/device/vendor\n"},
 			&expect.BExp{R: expectedVendor},
 		}, 15)
@@ -99,7 +98,13 @@ var _ = Describe("[rfe_id:694][crit:medium][vendor:cnv-qe@redhat.com][level:comp
 	}
 
 	setBridgeEnabled := func(enable bool) {
-		tests.UpdateClusterConfigValueAndWait("permitBridgeInterfaceOnPodNetwork", fmt.Sprintf("%t", enable))
+		if currentConfiguration.NetworkConfiguration == nil {
+			currentConfiguration.NetworkConfiguration = &v1.NetworkConfiguration{}
+		}
+
+		currentConfiguration.NetworkConfiguration.PermitBridgeInterfaceOnPodNetwork = pointer.BoolPtr(enable)
+		kv := tests.UpdateKubeVirtConfigValueAndWait(currentConfiguration)
+		currentConfiguration = kv.Spec.Configuration
 	}
 
 	Describe("Multiple virtual machines connectivity using bridge binding interface", func() {
@@ -110,9 +115,6 @@ var _ = Describe("[rfe_id:694][crit:medium][vendor:cnv-qe@redhat.com][level:comp
 
 			// inboundVMI expects implicitly to be added to the pod network
 			inboundVMI = tests.NewRandomVMIWithEphemeralDiskAndUserdata(cd.ContainerDiskFor(cd.ContainerDiskCirros), "#!/bin/bash\necho 'hello'\n")
-			inboundVMI.Labels = map[string]string{"expose": "me"}
-			inboundVMI.Spec.Subdomain = "myvmi"
-			inboundVMI.Spec.Hostname = "my-subdomain"
 			// Remove the masquerade interface to use the default bridge one
 			inboundVMI.Spec.Domain.Devices.Interfaces = nil
 			inboundVMI.Spec.Networks = nil
@@ -147,10 +149,10 @@ var _ = Describe("[rfe_id:694][crit:medium][vendor:cnv-qe@redhat.com][level:comp
 			}
 
 			// Wait for VMIs to become ready
-			inboundVMI = tests.WaitUntilVMIReady(inboundVMI, tests.LoggedInCirrosExpecter)
-			outboundVMI = tests.WaitUntilVMIReady(outboundVMI, tests.LoggedInCirrosExpecter)
-			inboundVMIWithPodNetworkSet = tests.WaitUntilVMIReady(inboundVMIWithPodNetworkSet, tests.LoggedInCirrosExpecter)
-			inboundVMIWithCustomMacAddress = tests.WaitUntilVMIReady(inboundVMIWithCustomMacAddress, tests.LoggedInCirrosExpecter)
+			inboundVMI = tests.WaitUntilVMIReady(inboundVMI, libnet.WithIPv6(console.LoginToCirros))
+			outboundVMI = tests.WaitUntilVMIReady(outboundVMI, libnet.WithIPv6(console.LoginToCirros))
+			inboundVMIWithPodNetworkSet = tests.WaitUntilVMIReady(inboundVMIWithPodNetworkSet, libnet.WithIPv6(console.LoginToCirros))
+			inboundVMIWithCustomMacAddress = tests.WaitUntilVMIReady(inboundVMIWithCustomMacAddress, libnet.WithIPv6(console.LoginToCirros))
 
 			tests.StartTCPServer(inboundVMI, testPort)
 		})
@@ -176,42 +178,41 @@ var _ = Describe("[rfe_id:694][crit:medium][vendor:cnv-qe@redhat.com][level:comp
 			payloadSize := 0
 			ipHeaderSize := 28 // IPv4 specific
 
-			By("checking k6t-eth0 MTU inside the pod")
 			vmiPod := tests.GetRunningPodByVirtualMachineInstance(outboundVMI, tests.NamespaceTestDefault)
-			output, err := tests.ExecuteCommandOnPod(
-				virtClient,
-				vmiPod,
-				"compute",
-				[]string{"cat", "/sys/class/net/k6t-eth0/mtu"},
-			)
-			log.Log.Infof("k6t-eth0 mtu is %v", output)
-			Expect(err).ToNot(HaveOccurred())
+			var mtu int
+			for _, ifaceName := range []string{"k6t-eth0", "tap0"} {
+				By(fmt.Sprintf("checking %s MTU inside the pod", ifaceName))
+				output, err := tests.ExecuteCommandOnPod(
+					virtClient,
+					vmiPod,
+					"compute",
+					[]string{"cat", fmt.Sprintf("/sys/class/net/%s/mtu", ifaceName)},
+				)
+				log.Log.Infof("%s mtu is %v", ifaceName, output)
+				Expect(err).ToNot(HaveOccurred())
 
-			output = strings.TrimSuffix(output, "\n")
-			mtu, err := strconv.Atoi(output)
-			Expect(err).ToNot(HaveOccurred())
+				output = strings.TrimSuffix(output, "\n")
+				mtu, err = strconv.Atoi(output)
+				Expect(err).ToNot(HaveOccurred())
 
-			Expect(mtu > 1000).To(BeTrue())
+				Expect(mtu > 1000).To(BeTrue())
 
-			payloadSize = mtu - ipHeaderSize
+				payloadSize = mtu - ipHeaderSize
+			}
 			expectedMtuString := fmt.Sprintf("mtu %d", mtu)
 
 			By("checking eth0 MTU inside the VirtualMachineInstance")
-			expecter, err := tests.LoggedInCirrosExpecter(outboundVMI)
-			Expect(err).ToNot(HaveOccurred())
-			defer expecter.Close()
+			Expect(libnet.WithIPv6(console.LoginToCirros)(outboundVMI)).To(Succeed())
 
 			addrShow = "ip address show eth0\n"
-			resp, err := expecter.ExpectBatch([]expect.Batcher{
+			Expect(console.SafeExpectBatch(outboundVMI, []expect.Batcher{
 				&expect.BSnd{S: "\n"},
-				&expect.BExp{R: "\\$ "},
+				&expect.BExp{R: console.PromptExpression},
 				&expect.BSnd{S: addrShow},
 				&expect.BExp{R: fmt.Sprintf(".*%s.*\n", expectedMtuString)},
 				&expect.BSnd{S: "echo $?\n"},
-				&expect.BExp{R: tests.RetValue("0")},
-			}, 180*time.Second)
-			log.Log.Infof("%v", resp)
-			Expect(err).ToNot(HaveOccurred())
+				&expect.BExp{R: console.RetValue("0")},
+			}, 180)).To(Succeed())
 
 			By("checking the VirtualMachineInstance can send MTU sized frames to another VirtualMachineInstance")
 			// NOTE: VirtualMachineInstance is not directly accessible from inside the pod because
@@ -221,24 +222,24 @@ var _ = Describe("[rfe_id:694][crit:medium][vendor:cnv-qe@redhat.com][level:comp
 			// NOTE: cirros ping doesn't support -M do that could be used to
 			// validate end-to-end connectivity with Don't Fragment flag set
 			cmdCheck = fmt.Sprintf("ping %s -c 1 -w 5 -s %d\n", addr, payloadSize)
-			err = tests.CheckForTextExpecter(outboundVMI, []expect.Batcher{
+			err = console.SafeExpectBatch(outboundVMI, []expect.Batcher{
 				&expect.BSnd{S: "\n"},
-				&expect.BExp{R: "\\$ "},
+				&expect.BExp{R: console.PromptExpression},
 				&expect.BSnd{S: cmdCheck},
-				&expect.BExp{R: "\\$ "},
+				&expect.BExp{R: console.PromptExpression},
 				&expect.BSnd{S: "echo $?\n"},
-				&expect.BExp{R: tests.RetValue("0")},
+				&expect.BExp{R: console.RetValue("0")},
 			}, 180)
 			Expect(err).ToNot(HaveOccurred())
 
 			By("checking the VirtualMachineInstance can fetch via HTTP")
-			err = tests.CheckForTextExpecter(outboundVMI, []expect.Batcher{
+			err = console.SafeExpectBatch(outboundVMI, []expect.Batcher{
 				&expect.BSnd{S: "\n"},
-				&expect.BExp{R: "\\$ "},
+				&expect.BExp{R: console.PromptExpression},
 				&expect.BSnd{S: "curl --silent http://kubevirt.io > /dev/null\n"},
-				&expect.BExp{R: "\\$ "},
+				&expect.BExp{R: console.PromptExpression},
 				&expect.BSnd{S: "echo $?\n"},
-				&expect.BExp{R: tests.RetValue("0")},
+				&expect.BExp{R: console.RetValue("0")},
 			}, 15)
 			Expect(err).ToNot(HaveOccurred())
 		},
@@ -278,91 +279,13 @@ var _ = Describe("[rfe_id:694][crit:medium][vendor:cnv-qe@redhat.com][level:comp
 
 			job, err = virtClient.BatchV1().Jobs(inboundVMI.ObjectMeta.Namespace).Create(job)
 			Expect(err).ToNot(HaveOccurred())
-			tests.WaitForJobToSucceed(&virtClient, job, 90)
+			Expect(tests.WaitForJobToSucceed(job, 90*time.Second)).To(Succeed())
 		},
 			table.Entry("[test_id:1543]on the same node from Pod", v12.NodeSelectorOpIn, false),
 			table.Entry("[test_id:1544]on a different node from Pod", v12.NodeSelectorOpNotIn, false),
 			table.Entry("[test_id:1545]on the same node from Node", v12.NodeSelectorOpIn, true),
 			table.Entry("[test_id:1546]on a different node from Node", v12.NodeSelectorOpNotIn, true),
 		)
-
-		Context("with a service matching the vmi exposed", func() {
-			BeforeEach(func() {
-				service := &v12.Service{
-					ObjectMeta: v13.ObjectMeta{
-						Name: "myservice",
-					},
-					Spec: v12.ServiceSpec{
-						Selector: map[string]string{
-							"expose": "me",
-						},
-						Ports: []v12.ServicePort{
-							{Protocol: v12.ProtocolTCP, Port: testPort, TargetPort: intstr.FromInt(testPort)},
-						},
-					},
-				}
-
-				_, err := virtClient.CoreV1().Services(inboundVMI.Namespace).Create(service)
-				Expect(err).ToNot(HaveOccurred())
-
-			})
-			It("[test_id:1547] should be able to reach the vmi based on labels specified on the vmi", func() {
-
-				By("starting a job which tries to reach the vmi via the defined service")
-				job := runHelloWorldJob(fmt.Sprintf("%s.%s", "myservice", inboundVMI.Namespace), strconv.Itoa(testPort), inboundVMI.Namespace)
-
-				By("waiting for the job to report a successful connection attempt")
-				tests.WaitForJobToSucceed(&virtClient, job, 90)
-			})
-			It("[test_id:1548]should fail to reach the vmi if an invalid servicename is used", func() {
-
-				By("starting a job which tries to reach the vmi via a non-existent service")
-				job := runHelloWorldJob(fmt.Sprintf("%s.%s", "wrongservice", inboundVMI.Namespace), strconv.Itoa(testPort), inboundVMI.Namespace)
-
-				By("waiting for the job to report an  unsuccessful connection attempt")
-				tests.WaitForJobToFail(&virtClient, job, 90)
-			})
-
-			AfterEach(func() {
-				Expect(virtClient.CoreV1().Services(inboundVMI.Namespace).Delete("myservice", &v13.DeleteOptions{})).To(Succeed())
-			})
-		})
-
-		Context("with a subdomain and a headless service given", func() {
-			BeforeEach(func() {
-				service := &v12.Service{
-					ObjectMeta: v13.ObjectMeta{
-						Name: inboundVMI.Spec.Subdomain,
-					},
-					Spec: v12.ServiceSpec{
-						ClusterIP: v12.ClusterIPNone,
-						Selector: map[string]string{
-							"expose": "me",
-						},
-						/* Normally ports are not required on headless services, but there is a bug in kubedns:
-						https://github.com/kubernetes/kubernetes/issues/55158
-						*/
-						Ports: []v12.ServicePort{
-							{Protocol: v12.ProtocolTCP, Port: testPort, TargetPort: intstr.FromInt(testPort)},
-						},
-					},
-				}
-				_, err := virtClient.CoreV1().Services(inboundVMI.Namespace).Create(service)
-				Expect(err).ToNot(HaveOccurred())
-			})
-
-			It("[test_id:1549]should be able to reach the vmi via its unique fully qualified domain name", func() {
-				By("starting a job which tries to reach the vm via the defined service")
-				job := runHelloWorldJob(fmt.Sprintf("%s.%s.%s", inboundVMI.Spec.Hostname, inboundVMI.Spec.Subdomain, inboundVMI.Namespace), strconv.Itoa(testPort), inboundVMI.Namespace)
-
-				By("waiting for the job to report a successful connection attempt")
-				tests.WaitForJobToSucceed(&virtClient, job, 90)
-			})
-
-			AfterEach(func() {
-				Expect(virtClient.CoreV1().Services(inboundVMI.Namespace).Delete(inboundVMI.Spec.Subdomain, &v13.DeleteOptions{})).To(Succeed())
-			})
-		})
 
 		Context("VirtualMachineInstance with default interface model", func() {
 			// Unless an explicit interface model is specified, the default interface model is virtio.
@@ -374,7 +297,7 @@ var _ = Describe("[rfe_id:694][crit:medium][vendor:cnv-qe@redhat.com][level:comp
 
 				for _, networkVMI := range []*v1.VirtualMachineInstance{inboundVMI, outboundVMI} {
 					// as defined in https://vendev.org/pci/ven_1af4/
-					checkNetworkVendor(networkVMI, virtio_vid, "\\$ ")
+					checkNetworkVendor(networkVMI, virtio_vid)
 				}
 			})
 
@@ -399,9 +322,9 @@ var _ = Describe("[rfe_id:694][crit:medium][vendor:cnv-qe@redhat.com][level:comp
 			_, err = virtClient.VirtualMachineInstance(tests.NamespaceTestDefault).Create(e1000VMI)
 			Expect(err).ToNot(HaveOccurred())
 
-			tests.WaitUntilVMIReady(e1000VMI, tests.LoggedInAlpineExpecter)
+			tests.WaitUntilVMIReady(e1000VMI, console.LoginToAlpine)
 			// as defined in https://vendev.org/pci/ven_8086/
-			checkNetworkVendor(e1000VMI, "0x8086", "localhost:~\\#")
+			checkNetworkVendor(e1000VMI, "0x8086")
 		})
 	})
 
@@ -416,8 +339,8 @@ var _ = Describe("[rfe_id:694][crit:medium][vendor:cnv-qe@redhat.com][level:comp
 			_, err = virtClient.VirtualMachineInstance(tests.NamespaceTestDefault).Create(deadbeafVMI)
 			Expect(err).ToNot(HaveOccurred())
 
-			tests.WaitUntilVMIReady(deadbeafVMI, tests.LoggedInAlpineExpecter)
-			checkMacAddress(deadbeafVMI, deadbeafVMI.Spec.Domain.Devices.Interfaces[0].MacAddress, "localhost:~\\#")
+			tests.WaitUntilVMIReady(deadbeafVMI, console.LoginToAlpine)
+			checkMacAddress(deadbeafVMI, deadbeafVMI.Spec.Domain.Devices.Interfaces[0].MacAddress)
 		})
 	})
 
@@ -433,12 +356,12 @@ var _ = Describe("[rfe_id:694][crit:medium][vendor:cnv-qe@redhat.com][level:comp
 			_, err = virtClient.VirtualMachineInstance(tests.NamespaceTestDefault).Create(beafdeadVMI)
 			Expect(err).ToNot(HaveOccurred())
 
-			tests.WaitUntilVMIReady(beafdeadVMI, tests.LoggedInAlpineExpecter)
-			checkMacAddress(beafdeadVMI, "be:af:00:00:de:ad", "localhost:~#")
+			tests.WaitUntilVMIReady(beafdeadVMI, console.LoginToAlpine)
+			checkMacAddress(beafdeadVMI, "be:af:00:00:de:ad")
 		})
 	})
 
-	Context("VirtualMachineInstance with invalid MAC addres", func() {
+	Context("VirtualMachineInstance with invalid MAC address", func() {
 		BeforeEach(func() {
 			tests.BeforeTestCleanup()
 		})
@@ -455,12 +378,22 @@ var _ = Describe("[rfe_id:694][crit:medium][vendor:cnv-qe@redhat.com][level:comp
 	})
 
 	Context("VirtualMachineInstance with custom MAC address and slirp interface", func() {
+
+		setPermitSlirpInterface := func(enable bool) {
+			if currentConfiguration.NetworkConfiguration == nil {
+				currentConfiguration.NetworkConfiguration = &v1.NetworkConfiguration{}
+			}
+
+			currentConfiguration.NetworkConfiguration.PermitSlirpInterface = pointer.BoolPtr(enable)
+			kv := tests.UpdateKubeVirtConfigValueAndWait(currentConfiguration)
+			currentConfiguration = kv.Spec.Configuration
+		}
 		BeforeEach(func() {
 			tests.BeforeTestCleanup()
-			tests.UpdateClusterConfigValueAndWait("permitSlirpInterface", "true")
+			setPermitSlirpInterface(true)
 		})
 		AfterEach(func() {
-			tests.UpdateClusterConfigValueAndWait("permitSlirpInterface", "false")
+			setPermitSlirpInterface(false)
 		})
 
 		It("[test_id:1773]should configure custom MAC address", func() {
@@ -470,8 +403,8 @@ var _ = Describe("[rfe_id:694][crit:medium][vendor:cnv-qe@redhat.com][level:comp
 			_, err = virtClient.VirtualMachineInstance(tests.NamespaceTestDefault).Create(deadbeafVMI)
 			Expect(err).ToNot(HaveOccurred())
 
-			tests.WaitUntilVMIReady(deadbeafVMI, tests.LoggedInAlpineExpecter)
-			checkMacAddress(deadbeafVMI, deadbeafVMI.Spec.Domain.Devices.Interfaces[0].MacAddress, "localhost:~#")
+			tests.WaitUntilVMIReady(deadbeafVMI, console.LoginToAlpine)
+			checkMacAddress(deadbeafVMI, deadbeafVMI.Spec.Domain.Devices.Interfaces[0].MacAddress)
 		})
 	})
 
@@ -491,11 +424,11 @@ var _ = Describe("[rfe_id:694][crit:medium][vendor:cnv-qe@redhat.com][level:comp
 
 			_, err = virtClient.VirtualMachineInstance(tests.NamespaceTestDefault).Create(detachedVMI)
 			Expect(err).ToNot(HaveOccurred())
-			tests.WaitUntilVMIReady(detachedVMI, tests.LoggedInCirrosExpecter)
+			tests.WaitUntilVMIReady(detachedVMI, libnet.WithIPv6(console.LoginToCirros))
 
-			err := tests.CheckForTextExpecter(detachedVMI, []expect.Batcher{
+			err := console.SafeExpectBatch(detachedVMI, []expect.Batcher{
 				&expect.BSnd{S: "\n"},
-				&expect.BExp{R: "\\$ "},
+				&expect.BExp{R: console.PromptExpression},
 				&expect.BSnd{S: "ls /sys/class/net/ | wc -l\n"},
 				&expect.BExp{R: "1"},
 			}, 15)
@@ -513,7 +446,7 @@ var _ = Describe("[rfe_id:694][crit:medium][vendor:cnv-qe@redhat.com][level:comp
 
 			_, err = virtClient.VirtualMachineInstance(tests.NamespaceTestDefault).Create(vmi)
 			Expect(err).ToNot(HaveOccurred())
-			waitUntilVMIReady(vmi, tests.LoggedInAlpineExpecter)
+			waitUntilVMIReady(vmi, console.LoginToAlpine)
 
 			By("Checking that the pod did not request a tun device")
 			virtClient, err := kubecli.GetKubevirtClient()
@@ -538,7 +471,7 @@ var _ = Describe("[rfe_id:694][crit:medium][vendor:cnv-qe@redhat.com][level:comp
 					caps := container.SecurityContext.Capabilities
 
 					Expect(caps.Add).To(Not(ContainElement(k8sv1.Capability("NET_ADMIN"))), "Compute container should not have NET_ADMIN capability")
-					Expect(caps.Add).To(Not(ContainElement(k8sv1.Capability("NET_RAW"))), "Compute container should not have NET_RAW capability")
+					Expect(caps.Drop).To(ContainElement(k8sv1.Capability("NET_RAW")), "Compute container should drop NET_RAW capability")
 				}
 			}
 
@@ -551,10 +484,10 @@ var _ = Describe("[rfe_id:694][crit:medium][vendor:cnv-qe@redhat.com][level:comp
 			tests.BeforeTestCleanup()
 		})
 
-		checkPciAddress := func(vmi *v1.VirtualMachineInstance, expectedPciAddress string, prompt string) {
-			err := tests.CheckForTextExpecter(vmi, []expect.Batcher{
+		checkPciAddress := func(vmi *v1.VirtualMachineInstance, expectedPciAddress string) {
+			err := console.SafeExpectBatch(vmi, []expect.Batcher{
 				&expect.BSnd{S: "\n"},
-				&expect.BExp{R: prompt},
+				&expect.BExp{R: console.PromptExpression},
 				&expect.BSnd{S: "grep INTERFACE /sys/bus/pci/devices/" + expectedPciAddress + "/*/net/eth0/uevent|awk -F= '{ print $2 }'\n"},
 				&expect.BExp{R: "eth0"},
 			}, 15)
@@ -569,8 +502,8 @@ var _ = Describe("[rfe_id:694][crit:medium][vendor:cnv-qe@redhat.com][level:comp
 			_, err = virtClient.VirtualMachineInstance(tests.NamespaceTestDefault).Create(testVMI)
 			Expect(err).ToNot(HaveOccurred())
 
-			tests.WaitUntilVMIReady(testVMI, tests.LoggedInCirrosExpecter)
-			checkPciAddress(testVMI, testVMI.Spec.Domain.Devices.Interfaces[0].PciAddress, "\\$")
+			tests.WaitUntilVMIReady(testVMI, libnet.WithIPv6(console.LoginToCirros))
+			checkPciAddress(testVMI, testVMI.Spec.Domain.Devices.Interfaces[0].PciAddress)
 		})
 	})
 
@@ -588,7 +521,7 @@ var _ = Describe("[rfe_id:694][crit:medium][vendor:cnv-qe@redhat.com][level:comp
 			_, err = virtClient.VirtualMachineInstance(tests.NamespaceTestDefault).Create(learningDisabledVMI)
 			Expect(err).ToNot(HaveOccurred())
 
-			tests.WaitUntilVMIReady(learningDisabledVMI, tests.LoggedInAlpineExpecter)
+			tests.WaitUntilVMIReady(learningDisabledVMI, console.LoginToAlpine)
 			checkLearningState(learningDisabledVMI, "0")
 		})
 	})
@@ -614,23 +547,23 @@ var _ = Describe("[rfe_id:694][crit:medium][vendor:cnv-qe@redhat.com][level:comp
 			_, err = virtClient.VirtualMachineInstance(tests.NamespaceTestDefault).Create(dhcpVMI)
 			Expect(err).ToNot(HaveOccurred())
 
-			tests.WaitUntilVMIReady(dhcpVMI, tests.LoggedInFedoraExpecter)
+			tests.WaitUntilVMIReady(dhcpVMI, console.LoginToFedora)
 
-			err = tests.CheckForTextExpecter(dhcpVMI, []expect.Batcher{
+			err = console.SafeExpectBatch(dhcpVMI, []expect.Batcher{
 				&expect.BSnd{S: "\n"},
-				&expect.BExp{R: "\\#"},
+				&expect.BExp{R: console.PromptExpression},
 				&expect.BSnd{S: "dhclient -1 -r -d eth0\n"},
-				&expect.BExp{R: "\\#"},
+				&expect.BExp{R: console.PromptExpression},
 				&expect.BSnd{S: "dhclient -1 -sf /usr/bin/env --request-options subnet-mask,broadcast-address,time-offset,routers,domain-search,domain-name,domain-name-servers,host-name,nis-domain,nis-servers,ntp-servers,interface-mtu,tftp-server-name,bootfile-name eth0 | tee /dhcp-env\n"},
-				&expect.BExp{R: "\\#"},
+				&expect.BExp{R: console.PromptExpression},
 				&expect.BSnd{S: "grep -q 'new_tftp_server_name=tftp.kubevirt.io' /dhcp-env; echo $?\n"},
-				&expect.BExp{R: tests.RetValue("0")},
+				&expect.BExp{R: console.RetValue("0")},
 				&expect.BSnd{S: "grep -q 'new_bootfile_name=config' /dhcp-env; echo $?\n"},
-				&expect.BExp{R: tests.RetValue("0")},
+				&expect.BExp{R: console.RetValue("0")},
 				&expect.BSnd{S: "grep -q 'new_ntp_servers=127.0.0.1 127.0.0.2' /dhcp-env; echo $?\n"},
-				&expect.BExp{R: tests.RetValue("0")},
+				&expect.BExp{R: console.RetValue("0")},
 				&expect.BSnd{S: "grep -q 'new_unknown_240=private.options.kubevirt.io' /dhcp-env; echo $?\n"},
-				&expect.BExp{R: tests.RetValue("0")},
+				&expect.BExp{R: console.RetValue("0")},
 			}, 15)
 
 			Expect(err).ToNot(HaveOccurred())
@@ -652,41 +585,33 @@ var _ = Describe("[rfe_id:694][crit:medium][vendor:cnv-qe@redhat.com][level:comp
 			}
 			_, err = virtClient.VirtualMachineInstance(tests.NamespaceTestDefault).Create(dnsVMI)
 			Expect(err).ToNot(HaveOccurred())
-			tests.WaitUntilVMIReady(dnsVMI, tests.LoggedInCirrosExpecter)
-			err = tests.CheckForTextExpecter(dnsVMI, []expect.Batcher{
+			tests.WaitUntilVMIReady(dnsVMI, libnet.WithIPv6(console.LoginToCirros))
+			err = console.SafeExpectBatch(dnsVMI, []expect.Batcher{
 				&expect.BSnd{S: "\n"},
-				&expect.BExp{R: "\\$"},
+				&expect.BExp{R: console.PromptExpression},
 				&expect.BSnd{S: "cat /etc/resolv.conf\n"},
 				&expect.BExp{R: "search example.com"},
 				&expect.BSnd{S: "\n"},
-				&expect.BExp{R: "\\$"},
+				&expect.BExp{R: console.PromptExpression},
 				&expect.BSnd{S: "cat /etc/resolv.conf\n"},
 				&expect.BExp{R: "nameserver 8.8.8.8"},
 				&expect.BSnd{S: "\n"},
-				&expect.BExp{R: "\\$"},
+				&expect.BExp{R: console.PromptExpression},
 				&expect.BSnd{S: "cat /etc/resolv.conf\n"},
 				&expect.BExp{R: "nameserver 4.2.2.1"},
 				&expect.BSnd{S: "\n"},
-				&expect.BExp{R: "\\$"},
+				&expect.BExp{R: console.PromptExpression},
 			}, 15)
 			Expect(err).ToNot(HaveOccurred())
 		})
 	})
 
 	Context("VirtualMachineInstance with masquerade binding mechanism", func() {
-		const (
-			defaultCIDR = false
-			customCIDR  = true
-		)
-
-		var serverVMI *v1.VirtualMachineInstance
-		var clientVMI *v1.VirtualMachineInstance
-
-		masqueradeVMI := func(Ports []v1.Port, ipv4NetworkCIDR string) *v1.VirtualMachineInstance {
+		masqueradeVMI := func(ports []v1.Port, ipv4NetworkCIDR string) *v1.VirtualMachineInstance {
 			containerImage := cd.ContainerDiskFor(cd.ContainerDiskCirros)
 			userData := "#!/bin/bash\necho 'hello'\n"
 			vmi := tests.NewRandomVMIWithEphemeralDiskAndUserdata(containerImage, userData)
-			vmi.Spec.Domain.Devices.Interfaces = []v1.Interface{{Name: "default", Ports: Ports, InterfaceBindingMethod: v1.InterfaceBindingMethod{Masquerade: &v1.InterfaceMasquerade{}}}}
+			vmi.Spec.Domain.Devices.Interfaces = []v1.Interface{{Name: "default", Ports: ports, InterfaceBindingMethod: v1.InterfaceBindingMethod{Masquerade: &v1.InterfaceMasquerade{}}}}
 			net := v1.DefaultPodNetwork()
 			if ipv4NetworkCIDR != "" {
 				net.NetworkSource.Pod.VMNetworkCIDR = ipv4NetworkCIDR
@@ -696,73 +621,399 @@ var _ = Describe("[rfe_id:694][crit:medium][vendor:cnv-qe@redhat.com][level:comp
 			return vmi
 		}
 
-		table.DescribeTable("[test_id:1780][label:masquerade_binding_connectivity]should allow regular network connection", func(ports []v1.Port, withCustomCIDR bool) {
-			var ipv4NetworkCIDR string
+		fedoraMasqueradeVMI := func(ports []v1.Port) (*v1.VirtualMachineInstance, error) {
 
-			if withCustomCIDR {
-				ipv4NetworkCIDR = "10.10.10.0/24"
+			networkData, err := libnet.NewNetworkData(
+				libnet.WithEthernet("eth0",
+					libnet.WithDHCP4Enabled(),
+					libnet.WithDHCP6Enabled(),
+				),
+			)
+			if err != nil {
+				return nil, err
 			}
 
-			// Create the client only one time
-			if clientVMI == nil {
-				clientVMI = masqueradeVMI([]v1.Port{}, ipv4NetworkCIDR)
-				_, err = virtClient.VirtualMachineInstance(tests.NamespaceTestDefault).Create(clientVMI)
-				Expect(err).ToNot(HaveOccurred())
-				tests.WaitUntilVMIReady(clientVMI, tests.LoggedInCirrosExpecter)
+			vmi := libvmi.NewFedora(
+				libvmi.WithInterface(libvmi.InterfaceDeviceWithMasqueradeBinding(ports...)),
+				libvmi.WithNetwork(v1.DefaultPodNetwork()),
+				libvmi.WithCloudInitNoCloudNetworkData(networkData, false),
+			)
+
+			return vmi, nil
+		}
+
+		configureIpv6 := func(vmi *v1.VirtualMachineInstance) error {
+			err := console.RunCommand(vmi, "dhclient -6 eth0", 30*time.Second)
+			if err != nil {
+				return err
 			}
+			err = console.RunCommand(vmi, "ip -6 route add fd10:0:2::/120 dev eth0", 5*time.Second)
+			if err != nil {
+				return err
+			}
+			err = console.RunCommand(vmi, "ip -6 route add default via fd10:0:2::1", 5*time.Second)
+			if err != nil {
+				return err
+			}
+			return nil
+		}
 
-			serverVMI = masqueradeVMI(ports, ipv4NetworkCIDR)
-			serverVMI.Labels = map[string]string{"expose": "server"}
-			_, err = virtClient.VirtualMachineInstance(tests.NamespaceTestDefault).Create(serverVMI)
-			Expect(err).ToNot(HaveOccurred())
+		Context("[Conformance][test_id:1780][label:masquerade_binding_connectivity]should allow regular network connection", func() {
+			var serverVMI *v1.VirtualMachineInstance
 
-			tests.WaitUntilVMIReady(serverVMI, tests.LoggedInCirrosExpecter)
-
-			serverVMI, err = virtClient.VirtualMachineInstance(tests.NamespaceTestDefault).Get(serverVMI.Name, &v13.GetOptions{})
-			Expect(err).ToNot(HaveOccurred())
-			Expect(len(serverVMI.Status.Interfaces)).To(Equal(1))
-			Expect(serverVMI.Status.Interfaces[0].IPs).NotTo(BeEmpty())
-
-			By("starting a tcp server")
-			tcpPort := "8080"
-			err = tests.CheckForTextExpecter(serverVMI, createExpectStartTcpServer(tcpPort), 30)
-			Expect(err).ToNot(HaveOccurred())
-
-			for _, serverIP := range serverVMI.Status.Interfaces[0].IPs {
-				if netutils.IsIPv6String(serverIP) {
-					By("Checking ping (IPv6) from vmi to cluster nodes gateway")
-					// Cluster nodes subnet (docker network gateway)
-					// Docker network subnet cidr definition:
-					// https://github.com/kubevirt/project-infra/blob/master/github/ci/shared-deployments/files/docker-daemon-mirror.conf#L5
-					Expect(tests.PingFromVMConsole(serverVMI, "2001:db8:1::1")).To(Succeed())
-				} else {
-					if ipv4NetworkCIDR == "" {
-						ipv4NetworkCIDR = api.DefaultVMCIDR
-					}
-					By("Checking ping (IPv4) to gateway")
-					ipAddr := gatewayIPFromCIDR(ipv4NetworkCIDR)
-					Expect(tests.PingFromVMConsole(serverVMI, ipAddr)).To(Succeed())
-
-					By("Checking ping (IPv4) to google")
-					Expect(tests.PingFromVMConsole(serverVMI, "8.8.8.8")).To(Succeed())
-					Expect(tests.PingFromVMConsole(clientVMI, "google.com")).To(Succeed())
+			verifyClientServerConnectivity := func(clientVMI *v1.VirtualMachineInstance, serverVMI *v1.VirtualMachineInstance, tcpPort int, ipFamily k8sv1.IPFamily) error {
+				serverIP := libnet.GetVmiPrimaryIpByFamily(serverVMI, ipFamily)
+				err := libnet.PingFromVMConsole(clientVMI, serverIP)
+				if err != nil {
+					return err
 				}
 
 				By("Connecting from the client vm")
-				err = tests.CheckForTextExpecter(clientVMI, createExpectConnectToServer(serverIP, tcpPort, true), 30)
-				Expect(err).ToNot(HaveOccurred())
+				err = console.SafeExpectBatch(clientVMI, createExpectConnectToServer(serverIP, tcpPort, true), 30)
+				if err != nil {
+					return err
+				}
 
 				By("Rejecting the connection from the client to unregistered port")
-				err = tests.CheckForTextExpecter(clientVMI, createExpectConnectToServer(serverIP, "8081", false), 30)
-				Expect(err).ToNot(HaveOccurred())
+				err = console.SafeExpectBatch(clientVMI, createExpectConnectToServer(serverIP, tcpPort+1, false), 30)
+				if err != nil {
+					return err
+				}
+
+				return nil
 			}
 
-			err = virtClient.VirtualMachineInstance(tests.NamespaceTestDefault).Delete(serverVMI.Name, &v13.DeleteOptions{})
-			Expect(err).ToNot(HaveOccurred())
-		}, table.Entry("with a specific port number", []v1.Port{{Name: "http", Port: 8080}}, defaultCIDR),
-			table.Entry("without a specific port number", []v1.Port{}, defaultCIDR),
-			table.Entry("with custom CIDR", []v1.Port{}, customCIDR),
-		)
+			AfterEach(func() {
+				err = virtClient.VirtualMachineInstance(tests.NamespaceTestDefault).Delete(serverVMI.Name, &v13.DeleteOptions{})
+				Expect(err).ToNot(HaveOccurred())
+			})
+
+			table.DescribeTable("ipv4", func(ports []v1.Port, networkCIDR string) {
+				var clientVMI *v1.VirtualMachineInstance
+
+				// Create the client only one time
+				if clientVMI == nil {
+					clientVMI = masqueradeVMI([]v1.Port{}, networkCIDR)
+					_, err = virtClient.VirtualMachineInstance(tests.NamespaceTestDefault).Create(clientVMI)
+					Expect(err).ToNot(HaveOccurred())
+					clientVMI = tests.WaitUntilVMIReady(clientVMI, console.LoginToCirros)
+				}
+
+				serverVMI = masqueradeVMI(ports, networkCIDR)
+
+				serverVMI.Labels = map[string]string{"expose": "server"}
+				_, err = virtClient.VirtualMachineInstance(tests.NamespaceTestDefault).Create(serverVMI)
+				Expect(err).ToNot(HaveOccurred())
+				serverVMI = tests.WaitUntilVMIReady(serverVMI, console.LoginToCirros)
+				Expect(serverVMI.Status.Interfaces).To(HaveLen(1))
+				Expect(serverVMI.Status.Interfaces[0].IPs).NotTo(BeEmpty())
+
+				By("starting a tcp server")
+				tcpPort := 8080
+				tests.StartTCPServer(serverVMI, tcpPort)
+
+				if networkCIDR == "" {
+					networkCIDR = api.DefaultVMCIDR
+				}
+
+				By("Checking ping (IPv4) to gateway")
+				ipAddr := gatewayIPFromCIDR(networkCIDR)
+				Expect(libnet.PingFromVMConsole(serverVMI, ipAddr)).To(Succeed())
+
+				By("Checking ping (IPv4) to google")
+				Expect(libnet.PingFromVMConsole(serverVMI, "8.8.8.8")).To(Succeed())
+				Expect(libnet.PingFromVMConsole(clientVMI, "google.com")).To(Succeed())
+
+				Expect(verifyClientServerConnectivity(clientVMI, serverVMI, tcpPort, k8sv1.IPv4Protocol)).To(Succeed())
+			},
+				table.Entry("with a specific port number [IPv4]", []v1.Port{{Name: "http", Port: 8080}}, ""),
+				table.Entry("without a specific port number [IPv4]", []v1.Port{}, ""),
+				table.Entry("with custom CIDR [IPv4]", []v1.Port{}, "10.10.10.0/24"),
+			)
+
+			table.DescribeTable("IPv6", func(ports []v1.Port) {
+				libnet.SkipWhenNotDualStackCluster(virtClient)
+
+				var clientVMI *v1.VirtualMachineInstance
+
+				// Create the client only one time
+				if clientVMI == nil {
+					clientVMI, err = fedoraMasqueradeVMI([]v1.Port{})
+					Expect(err).ToNot(HaveOccurred())
+					clientVMI, err = virtClient.VirtualMachineInstance(tests.NamespaceTestDefault).Create(clientVMI)
+					Expect(err).ToNot(HaveOccurred())
+					clientVMI = tests.WaitUntilVMIReady(clientVMI, console.LoginToFedora)
+
+					Expect(configureIpv6(clientVMI)).To(Succeed(), "failed to configure ipv6 on client vmi")
+				}
+
+				serverVMI, err = fedoraMasqueradeVMI(ports)
+				Expect(err).ToNot(HaveOccurred())
+
+				serverVMI.Labels = map[string]string{"expose": "server"}
+				serverVMI, err = virtClient.VirtualMachineInstance(tests.NamespaceTestDefault).Create(serverVMI)
+				Expect(err).ToNot(HaveOccurred())
+				serverVMI = tests.WaitUntilVMIReady(serverVMI, console.LoginToFedora)
+
+				Expect(configureIpv6(serverVMI)).To(Succeed(), "failed to configure ipv6  on server vmi")
+
+				Expect(serverVMI.Status.Interfaces).To(HaveLen(1))
+				Expect(serverVMI.Status.Interfaces[0].IPs).NotTo(BeEmpty())
+
+				By("starting a http server")
+				tcpPort := 8080
+				tests.StartPythonHttpServer(serverVMI, tcpPort)
+
+				By("Checking ping (IPv6) from vmi to cluster nodes gateway")
+				// Cluster nodes subnet (docker network gateway)
+				// Docker network subnet cidr definition:
+				// https://github.com/kubevirt/project-infra/blob/master/github/ci/shared-deployments/files/docker-daemon-mirror.conf#L5
+				Expect(libnet.PingFromVMConsole(serverVMI, "2001:db8:1::1")).To(Succeed())
+
+				Expect(verifyClientServerConnectivity(clientVMI, serverVMI, tcpPort, k8sv1.IPv6Protocol)).To(Succeed())
+			}, table.Entry("with a specific port number [IPv6]", []v1.Port{{Name: "http", Port: 8080}}),
+				table.Entry("without a specific port number [IPv6]", []v1.Port{}),
+			)
+		})
+
+		When("performing migration", func() {
+			var vmi *v1.VirtualMachineInstance
+
+			ping := func(ipAddr string) error {
+				return libnet.PingFromVMConsole(vmi, ipAddr, "-c 1", "-w 2")
+			}
+
+			getVirtHandlerPod := func() (*k8sv1.Pod, error) {
+				node := vmi.Status.NodeName
+				pod, err := kubecli.NewVirtHandlerClient(virtClient).Namespace(flags.KubeVirtInstallNamespace).ForNode(node).Pod()
+				if err != nil {
+					return nil, fmt.Errorf("failed to get virt-handler pod on node %s: %v", node, err)
+				}
+				return pod, nil
+			}
+
+			runMigrationAndExpectCompletion := func(migration *v1.VirtualMachineInstanceMigration, timeout int) {
+				migration, err = virtClient.VirtualMachineInstanceMigration(migration.Namespace).Create(migration)
+				Expect(err).NotTo(HaveOccurred())
+
+				Eventually(func() error {
+					migration, err := virtClient.VirtualMachineInstanceMigration(migration.Namespace).Get(migration.Name, &v13.GetOptions{})
+					if err != nil {
+						return err
+					}
+
+					Expect(migration.Status.Phase).ToNot(Equal(v1.MigrationFailed))
+
+					if migration.Status.Phase == v1.MigrationSucceeded {
+						return nil
+					}
+					return fmt.Errorf("Migration is in phase %s", migration.Status.Phase)
+
+				}, timeout, time.Second).Should(Succeed(), fmt.Sprintf("migration should succeed after %d s", timeout))
+			}
+
+			BeforeEach(func() {
+				if !tests.HasLiveMigration() {
+					Skip("LiveMigration feature gate is not enabled in kubevirt-config")
+				}
+			})
+
+			AfterEach(func() {
+				if vmi != nil {
+					By("Delete VMI")
+					Expect(virtClient.VirtualMachineInstance(vmi.Namespace).Delete(vmi.Name, &v13.DeleteOptions{})).To(Succeed())
+
+					Eventually(func() error {
+						_, err := virtClient.VirtualMachineInstance(vmi.Namespace).Get(vmi.Name, &v13.GetOptions{})
+						return err
+					}, time.Minute, time.Second).Should(
+						SatisfyAll(HaveOccurred(), WithTransform(errors.IsNotFound, BeTrue())),
+						"The VMI should be gone within the given timeout",
+					)
+				}
+			})
+
+			table.DescribeTable("[Conformance] preserves connectivity", func(ipFamily k8sv1.IPFamily) {
+				if ipFamily == k8sv1.IPv6Protocol {
+					libnet.SkipWhenNotDualStackCluster(virtClient)
+				}
+
+				var err error
+				var loginMethod console.LoginToFactory
+
+				By("Create VMI")
+				if ipFamily == k8sv1.IPv4Protocol {
+					vmi = masqueradeVMI([]v1.Port{}, "")
+					loginMethod = console.LoginToCirros
+				} else {
+					vmi, err = fedoraMasqueradeVMI([]v1.Port{})
+					Expect(err).ToNot(HaveOccurred(), "Error creating fedora masquerade vmi")
+					loginMethod = console.LoginToFedora
+				}
+
+				vmi, err = virtClient.VirtualMachineInstance(tests.NamespaceTestDefault).Create(vmi)
+				Expect(err).ToNot(HaveOccurred())
+				tests.WaitUntilVMIReady(vmi, loginMethod)
+
+				vmi, err = virtClient.VirtualMachineInstance(vmi.Namespace).Get(vmi.Name, &v13.GetOptions{})
+				Expect(err).ToNot(HaveOccurred())
+
+				if ipFamily == k8sv1.IPv6Protocol {
+					err = configureIpv6(vmi)
+					Expect(err).ToNot(HaveOccurred(), "failed to configure ipv6 on vmi")
+				}
+
+				virtHandlerPod, err := getVirtHandlerPod()
+				Expect(err).ToNot(HaveOccurred())
+
+				By("Check connectivity")
+				podIP := libnet.GetPodIpByFamily(virtHandlerPod, ipFamily)
+				Expect(ping(podIP)).To(Succeed())
+
+				By("Execute migration")
+				migration := tests.NewRandomMigration(vmi.Name, vmi.Namespace)
+				runMigrationAndExpectCompletion(migration, migrationWaitTime)
+
+				vmi, err = virtClient.VirtualMachineInstance(vmi.Namespace).Get(vmi.Name, &v13.GetOptions{})
+				Expect(err).ToNot(HaveOccurred())
+				Expect(vmi.Status.Phase).To(Equal(v1.Running))
+
+				Eventually(func() error {
+					err := ping(podIP)
+					if err != nil {
+						return err
+					}
+
+					return nil
+				}, 120*time.Second).Should(Succeed())
+
+				By("Restarting the vmi")
+				Expect(console.SafeExpectBatch(vmi, []expect.Batcher{
+					&expect.BSnd{S: "sudo reboot\n"},
+					&expect.BExp{R: "reboot: Restarting system"},
+				}, 10)).To(Succeed(), "failed to restart the vmi")
+				tests.WaitUntilVMIReady(vmi, loginMethod)
+				if ipFamily == k8sv1.IPv6Protocol {
+					Expect(configureIpv6(vmi)).To(Succeed(), "failed to configure ipv6 on vmi after restart")
+				}
+				Expect(ping(podIP)).To(Succeed())
+			},
+				table.Entry("IPv4", k8sv1.IPv4Protocol),
+				table.Entry("IPv6", k8sv1.IPv6Protocol),
+			)
+		})
+
+		Context("MTU verification", func() {
+			var vmi *v1.VirtualMachineInstance
+			var anotherVmi *v1.VirtualMachineInstance
+
+			getMtu := func(pod *k8sv1.Pod, ifaceName string) int {
+				output, err := tests.ExecuteCommandOnPod(
+					virtClient,
+					pod,
+					"compute",
+					[]string{"cat", fmt.Sprintf("/sys/class/net/%s/mtu", ifaceName)},
+				)
+				ExpectWithOffset(1, err).ToNot(HaveOccurred())
+
+				output = strings.TrimSuffix(output, "\n")
+				mtu, err := strconv.Atoi(output)
+				ExpectWithOffset(1, err).ToNot(HaveOccurred())
+				return mtu
+			}
+
+			BeforeEach(func() {
+				var err error
+
+				By("Create masquerade VMI")
+				networkData, err := libnet.CreateDefaultCloudInitNetworkData()
+				Expect(err).NotTo(HaveOccurred())
+
+				vmi = libvmi.NewFedora(
+					libvmi.WithInterface(libvmi.InterfaceDeviceWithMasqueradeBinding()),
+					libvmi.WithNetwork(v1.DefaultPodNetwork()),
+					libvmi.WithCloudInitNoCloudNetworkData(networkData, false),
+				)
+
+				vmi, err = virtClient.VirtualMachineInstance(tests.NamespaceTestDefault).Create(vmi)
+				Expect(err).ToNot(HaveOccurred())
+
+				By("Create another VMI")
+				anotherVmi = masqueradeVMI([]v1.Port{}, "")
+				anotherVmi, err = virtClient.VirtualMachineInstance(anotherVmi.Namespace).Create(anotherVmi)
+				Expect(err).ToNot(HaveOccurred())
+
+				By("Wait for VMIs to be ready")
+				tests.WaitUntilVMIReady(anotherVmi, libnet.WithIPv6(console.LoginToCirros))
+				anotherVmi, err = virtClient.VirtualMachineInstance(anotherVmi.Namespace).Get(anotherVmi.Name, &v13.GetOptions{})
+				Expect(err).ToNot(HaveOccurred())
+
+				tests.WaitUntilVMIReady(vmi, console.LoginToFedora)
+				vmi, err = virtClient.VirtualMachineInstance(vmi.Namespace).Get(vmi.Name, &v13.GetOptions{})
+				Expect(err).ToNot(HaveOccurred())
+			})
+
+			AfterEach(func() {
+				if vmi != nil {
+					By("Delete VMI")
+					Expect(virtClient.VirtualMachineInstance(vmi.Namespace).Delete(vmi.Name, &v13.DeleteOptions{})).To(Succeed())
+				}
+			})
+
+			AfterEach(func() {
+				if anotherVmi != nil {
+					By("Delete another VMI")
+					Expect(virtClient.VirtualMachineInstance(anotherVmi.Namespace).Delete(anotherVmi.Name, &v13.DeleteOptions{})).To(Succeed())
+				}
+			})
+
+			table.DescribeTable("should have the correct MTU", func(ipFamily k8sv1.IPFamily) {
+				if ipFamily == k8sv1.IPv6Protocol {
+					libnet.SkipWhenNotDualStackCluster(virtClient)
+				}
+
+				By("checking k6t-eth0 MTU inside the pod")
+				vmiPod := tests.GetRunningPodByVirtualMachineInstance(vmi, vmi.Namespace)
+				bridgeMtu := getMtu(vmiPod, "k6t-eth0")
+				primaryIfaceMtu := getMtu(vmiPod, "eth0")
+
+				Expect(bridgeMtu).To(Equal(primaryIfaceMtu), "k6t-eth0 bridge mtu should equal eth0 interface mtu")
+
+				By("checking k6t-eth0-nic MTU inside the pod")
+				bridgePrimaryNicMtu := getMtu(vmiPod, "k6t-eth0-nic")
+				Expect(bridgePrimaryNicMtu).To(Equal(primaryIfaceMtu), "k6t-eth0-nic mtu should equal eth0 interface mtu")
+
+				By("checking the tap device - tap0 - MTU inside the pod")
+				tapDeviceMTU := getMtu(vmiPod, "tap0")
+				Expect(tapDeviceMTU).To(Equal(primaryIfaceMtu), "tap0 mtu should equal eth0 interface mtu")
+
+				By("checking eth0 MTU inside the VirtualMachineInstance")
+				showMtu := "cat /sys/class/net/eth0/mtu\n"
+				err = console.SafeExpectBatch(vmi, []expect.Batcher{
+					&expect.BSnd{S: showMtu},
+					&expect.BExp{R: console.RetValue(strconv.Itoa(bridgeMtu))},
+				}, 180)
+				Expect(err).ToNot(HaveOccurred())
+
+				By("checking the VirtualMachineInstance can send MTU sized frames to another VirtualMachineInstance")
+				icmpHeaderSize := 8
+				var ipHeaderSize int
+				if ipFamily == k8sv1.IPv4Protocol {
+					ipHeaderSize = 20
+				} else {
+					ipHeaderSize = 40
+				}
+				payloadSize := primaryIfaceMtu - ipHeaderSize - icmpHeaderSize
+				addr := libnet.GetVmiPrimaryIpByFamily(anotherVmi, ipFamily)
+				Expect(libnet.PingFromVMConsole(vmi, addr, "-c 1", "-w 5", fmt.Sprintf("-s %d", payloadSize), "-M do")).To(Succeed())
+
+				By("checking the VirtualMachineInstance cannot send bigger than MTU sized frames to another VirtualMachineInstance")
+				Expect(libnet.PingFromVMConsole(vmi, addr, "-c 1", "-w 5", fmt.Sprintf("-s %d", payloadSize+1), "-M do")).ToNot(Succeed())
+			},
+				table.Entry("IPv4", k8sv1.IPv4Protocol),
+				table.Entry("IPv6", k8sv1.IPv6Protocol),
+			)
+		})
 	})
 
 	Context("VirtualMachineInstance with TX offload disabled", func() {
@@ -776,7 +1027,7 @@ var _ = Describe("[rfe_id:694][crit:medium][vendor:cnv-qe@redhat.com][level:comp
 
 			_, err = virtClient.VirtualMachineInstance(tests.NamespaceTestDefault).Create(vmi)
 			Expect(err).ToNot(HaveOccurred())
-			tests.WaitUntilVMIReady(vmi, tests.LoggedInAlpineExpecter)
+			tests.WaitUntilVMIReady(vmi, console.LoginToAlpine)
 
 			output := tests.RunCommandOnVmiPod(vmi, []string{"python3", "-c", `import array
 import fcntl
@@ -807,19 +1058,18 @@ sockfd = None`})
 		})
 		It("[test_id:2964]should reject VMIs with bridge interface when it's not permitted on pod network", func() {
 			var t int64 = 0
-			vmi := v1.NewMinimalVMIWithNS(tests.NamespaceTestDefault, "testvmi"+rand.String(48))
+			vmi := v1.NewMinimalVMIWithNS(tests.NamespaceTestDefault, libvmi.RandName(libvmi.DefaultVmiName))
 			vmi.Spec.TerminationGracePeriodSeconds = &t
 			vmi.Spec.Domain.Resources.Requests[k8sv1.ResourceMemory] = resource.MustParse("64M")
 			tests.AddEphemeralDisk(vmi, "disk0", "virtio", cd.ContainerDiskFor(cd.ContainerDiskCirros))
 
 			vmi, err = virtClient.VirtualMachineInstance(tests.NamespaceTestDefault).Create(vmi)
-			Expect(err).To(HaveOccurred())
 			Expect(err.Error()).To(ContainSubstring("Bridge interface is not enabled in kubevirt-config"))
 		})
 	})
 })
 
-func waitUntilVMIReady(vmi *v1.VirtualMachineInstance, expecterFactory tests.VMIExpecterFactory) *v1.VirtualMachineInstance {
+func waitUntilVMIReady(vmi *v1.VirtualMachineInstance, loginTo console.LoginToFactory) *v1.VirtualMachineInstance {
 	// Wait for VirtualMachineInstance start
 	tests.WaitForSuccessfulVMIStart(vmi)
 
@@ -830,43 +1080,38 @@ func waitUntilVMIReady(vmi *v1.VirtualMachineInstance, expecterFactory tests.VMI
 	Expect(err).ToNot(HaveOccurred())
 
 	// Lets make sure that the OS is up by waiting until we can login
-	expecter, err := expecterFactory(vmi)
-	Expect(err).ToNot(HaveOccurred())
-	expecter.Close()
+	Expect(loginTo(vmi)).To(Succeed())
 	return vmi
 }
 
 func NewRandomVMIWithInvalidNetworkInterface() *v1.VirtualMachineInstance {
-	// Use alpine because cirros dhcp client starts prematurily before link is ready
+	// Use alpine because cirros dhcp client starts prematurely before link is ready
 	vmi := tests.NewRandomVMIWithEphemeralDisk(cd.ContainerDiskFor(cd.ContainerDiskAlpine))
 	tests.AddExplicitPodNetworkInterface(vmi)
 	vmi.Spec.Domain.Devices.Interfaces[0].Model = "gibberish"
 	return vmi
 }
 
-func createExpectStartTcpServer(port string) []expect.Batcher {
-	return []expect.Batcher{
-		&expect.BSnd{S: "\n"},
-		&expect.BExp{R: "\\$ "},
-		&expect.BSnd{S: "screen -d -m sudo nc -klp " + port + " -e echo -e 'Hello World!'\n"},
-		&expect.BExp{R: "\\$ "},
-		&expect.BSnd{S: "echo $?\n"},
-		&expect.BExp{R: tests.RetValue("0")},
-	}
-}
-
-func createExpectConnectToServer(serverIP, tcpPort string, expectSuccess bool) []expect.Batcher {
-	expectResult := "1"
+func createExpectConnectToServer(serverIP string, tcpPort int, expectSuccess bool) []expect.Batcher {
+	expectResult := console.ShellFail
 	if expectSuccess {
-		expectResult = "0"
+		expectResult = console.ShellSuccess
+	}
+
+	var clientCommand string
+
+	if netutils.IsIPv6String(serverIP) {
+		clientCommand = fmt.Sprintf("curl %s\n", net.JoinHostPort(serverIP, strconv.Itoa(tcpPort)))
+	} else {
+		clientCommand = fmt.Sprintf("echo test | nc %s %d -i 1 -w 1 1> /dev/null\n", serverIP, tcpPort)
 	}
 	return []expect.Batcher{
 		&expect.BSnd{S: "\n"},
-		&expect.BExp{R: "\\$ "},
-		&expect.BSnd{S: fmt.Sprintf("echo test | nc %s %s -i 1 -w 1 1> /dev/null\n", serverIP, tcpPort)},
-		&expect.BExp{R: "\\$ "},
+		&expect.BExp{R: console.PromptExpression},
+		&expect.BSnd{S: clientCommand},
+		&expect.BExp{R: console.PromptExpression},
 		&expect.BSnd{S: "echo $?\n"},
-		&expect.BExp{R: tests.RetValue(expectResult)},
+		&expect.BExp{R: expectResult},
 	}
 }
 

@@ -1,5 +1,5 @@
 ---
-apiVersion: kubevirt.io/v1alpha3
+apiVersion: kubevirt.io/v1
 kind: VirtualMachine
 metadata:
   labels:
@@ -21,7 +21,6 @@ spec:
       source:
         http:
           url: http://cdi-http-import-server.kubevirt/images/alpine.iso
-    status: {}
   running: false
   template:
     metadata:

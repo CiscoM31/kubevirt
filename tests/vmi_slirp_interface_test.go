@@ -20,9 +20,7 @@
 package tests_test
 
 import (
-	"fmt"
 	"strings"
-	"time"
 
 	expect "github.com/google/goexpect"
 	. "github.com/onsi/ginkgo"
@@ -30,34 +28,52 @@ import (
 	. "github.com/onsi/gomega"
 	k8sv1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
-	"k8s.io/apimachinery/pkg/util/rand"
+	"k8s.io/utils/pointer"
 
 	v1 "kubevirt.io/client-go/api/v1"
 	"kubevirt.io/client-go/kubecli"
 	"kubevirt.io/client-go/log"
 	"kubevirt.io/kubevirt/tests"
+	"kubevirt.io/kubevirt/tests/console"
 	cd "kubevirt.io/kubevirt/tests/containerdisk"
+	"kubevirt.io/kubevirt/tests/libvmi"
 )
 
-var _ = Describe("Slirp Networking", func() {
+var _ = Describe("[Serial]Slirp Networking", func() {
 
 	var err error
 	var virtClient kubecli.KubevirtClient
+	var currentConfiguration v1.KubeVirtConfiguration
 
 	var genericVmi *v1.VirtualMachineInstance
 	var deadbeafVmi *v1.VirtualMachineInstance
 	var container k8sv1.Container
 	setSlirpEnabled := func(enable bool) {
-		tests.UpdateClusterConfigValueAndWait("permitSlirpInterface", fmt.Sprintf("%t", enable))
+		if currentConfiguration.NetworkConfiguration == nil {
+			currentConfiguration.NetworkConfiguration = &v1.NetworkConfiguration{}
+		}
+
+		currentConfiguration.NetworkConfiguration.PermitSlirpInterface = pointer.BoolPtr(enable)
+		kv := tests.UpdateKubeVirtConfigValueAndWait(currentConfiguration)
+		currentConfiguration = kv.Spec.Configuration
 	}
 
 	setDefaultNetworkInterface := func(iface string) {
-		tests.UpdateClusterConfigValueAndWait("default-network-interface", fmt.Sprintf("%s", iface))
+		if currentConfiguration.NetworkConfiguration == nil {
+			currentConfiguration.NetworkConfiguration = &v1.NetworkConfiguration{}
+		}
+
+		currentConfiguration.NetworkConfiguration.NetworkInterface = iface
+		kv := tests.UpdateKubeVirtConfigValueAndWait(currentConfiguration)
+		currentConfiguration = kv.Spec.Configuration
 	}
 
 	tests.BeforeAll(func() {
 		virtClient, err = kubecli.GetKubevirtClient()
 		tests.PanicOnError(err)
+
+		kv := tests.GetCurrentKv(virtClient)
+		currentConfiguration = kv.Spec.Configuration
 
 		setSlirpEnabled(true)
 		ports := []v1.Port{{Name: "http", Port: 80}}
@@ -125,18 +141,12 @@ var _ = Describe("Slirp Networking", func() {
 		Expect(err).To(HaveOccurred())
 
 		By("communicate with the outside world")
-		expecter, _, err := tests.NewConsoleExpecter(virtClient, vmi, 10*time.Second)
-		defer expecter.Close()
-		Expect(err).ToNot(HaveOccurred())
-
-		out, err := expecter.ExpectBatch([]expect.Batcher{
+		Expect(console.SafeExpectBatch(vmi, []expect.Batcher{
 			&expect.BSnd{S: "\n"},
-			&expect.BExp{R: "\\$ "},
+			&expect.BExp{R: console.PromptExpression},
 			&expect.BSnd{S: "curl -o /dev/null -s -w \"%{http_code}\\n\" -k https://google.com\n"},
 			&expect.BExp{R: "301"},
-		}, 180*time.Second)
-		log.Log.Infof("%v", out)
-		Expect(err).ToNot(HaveOccurred())
+		}, 180)).To(Succeed())
 	},
 		table.Entry("VirtualMachineInstance with slirp interface", &genericVmi),
 		table.Entry("VirtualMachineInstance with slirp interface with custom MAC address", &deadbeafVmi),
@@ -153,7 +163,7 @@ var _ = Describe("Slirp Networking", func() {
 		})
 		It("should reject VMIs with default interface slirp when it's not permitted", func() {
 			var t int64 = 0
-			vmi := v1.NewMinimalVMIWithNS(tests.NamespaceTestDefault, "testvmi"+rand.String(48))
+			vmi := v1.NewMinimalVMIWithNS(tests.NamespaceTestDefault, libvmi.RandName(libvmi.DefaultVmiName))
 			vmi.Spec.TerminationGracePeriodSeconds = &t
 			vmi.Spec.Domain.Resources.Requests[k8sv1.ResourceMemory] = resource.MustParse("64M")
 			tests.AddEphemeralDisk(vmi, "disk0", "virtio", cd.ContainerDiskFor(cd.ContainerDiskCirros))

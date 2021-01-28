@@ -20,7 +20,7 @@
 package virtconfig
 
 /*
- This module is intended for exposing the virtualization configuration that is availabe at the cluster-level and its default settings.
+ This module is intended for exposing the virtualization configuration that is available at the cluster-level and its default settings.
 */
 
 import (
@@ -37,6 +37,7 @@ const (
 	ParallelMigrationsPerClusterDefault      uint32 = 5
 	BandwithPerMigrationDefault                     = "64Mi"
 	MigrationAllowAutoConverge               bool   = false
+	MigrationAllowPostCopy                   bool   = false
 	MigrationProgressTimeout                 int64  = 150
 	MigrationCompletionTimeoutPerGiB         int64  = 800
 	DefaultAMD64MachineType                         = "q35"
@@ -57,9 +58,15 @@ const (
 	SmbiosConfigDefaultProduct                      = "None"
 	DefaultPermitBridgeInterfaceOnPodNetwork        = true
 	DefaultSELinuxLauncherType                      = "virt_launcher.process"
-	SupportedGuestAgentVersions                     = "3.*,4.*"
+	SupportedGuestAgentVersions                     = "2.*,3.*,4.*"
 	DefaultOVMFPath                                 = "/usr/share/OVMF"
-	DefaultMemBalloonStatsPeriod                    = 10
+	DefaultMemBalloonStatsPeriod             uint32 = 10
+	DefaultCPUAllocationRatio                       = 10
+	DefaultVirtAPILogVerbosity                      = 2
+	DefaultVirtControllerLogVerbosity               = 2
+	DefaultVirtHandlerLogVerbosity                  = 2
+	DefaultVirtLauncherLogVerbosity                 = 2
+	DefaultVirtOperatorLogVerbosity                 = 2
 )
 
 // Set default machine type and supported emulated machines based on architecture
@@ -72,8 +79,8 @@ func getDefaultMachinesForArch() (string, string) {
 
 var DefaultMachineType, DefaultEmulatedMachines = getDefaultMachinesForArch()
 
-func (c *ClusterConfig) GetMemBalloonStatsPeriod() int {
-	return c.GetConfig().MemBalloonStatsPeriod
+func (c *ClusterConfig) GetMemBalloonStatsPeriod() uint32 {
+	return *c.GetConfig().MemBalloonStatsPeriod
 }
 
 func (c *ClusterConfig) IsUseEmulation() bool {
@@ -127,7 +134,7 @@ func (c *ClusterConfig) GetDefaultNetworkInterface() string {
 }
 
 func (c *ClusterConfig) IsSlirpInterfaceEnabled() bool {
-	return c.GetConfig().NetworkConfiguration.PermitSlirpInterface
+	return *c.GetConfig().NetworkConfiguration.PermitSlirpInterface
 }
 
 func (c *ClusterConfig) GetSMBIOS() *v1.SMBiosConfiguration {
@@ -135,7 +142,7 @@ func (c *ClusterConfig) GetSMBIOS() *v1.SMBiosConfiguration {
 }
 
 func (c *ClusterConfig) IsBridgeInterfaceOnPodNetworkEnabled() bool {
-	return c.GetConfig().NetworkConfiguration.PermitBridgeInterfaceOnPodNetwork
+	return *c.GetConfig().NetworkConfiguration.PermitBridgeInterfaceOnPodNetwork
 }
 
 func (c *ClusterConfig) GetDefaultClusterConfig() *v1.KubeVirtConfiguration {
@@ -152,4 +159,41 @@ func (c *ClusterConfig) GetSupportedAgentVersions() []string {
 
 func (c *ClusterConfig) GetOVMFPath() string {
 	return c.GetConfig().OVMFPath
+}
+
+func (c *ClusterConfig) GetCPUAllocationRatio() int {
+	return c.GetConfig().DeveloperConfiguration.CPUAllocationRatio
+}
+
+func (c *ClusterConfig) GetPermittedHostDevices() *v1.PermittedHostDevices {
+	return c.GetConfig().PermittedHostDevices
+}
+
+func (c *ClusterConfig) GetVirtHandlerVerbosity(nodeName string) uint {
+	logConf := c.GetConfig().DeveloperConfiguration.LogVerbosity
+	if level := logConf.NodeVerbosity[nodeName]; level != 0 {
+		return level
+	}
+	return logConf.VirtHandler
+}
+
+func (c *ClusterConfig) GetVirtAPIVerbosity(nodeName string) uint {
+	logConf := c.GetConfig().DeveloperConfiguration.LogVerbosity
+	if level := logConf.NodeVerbosity[nodeName]; level != 0 {
+		return level
+	}
+	return logConf.VirtAPI
+}
+
+func (c *ClusterConfig) GetVirtControllerVerbosity(nodeName string) uint {
+	logConf := c.GetConfig().DeveloperConfiguration.LogVerbosity
+	if level := logConf.NodeVerbosity[nodeName]; level != 0 {
+		return level
+	}
+	return logConf.VirtController
+}
+
+func (c *ClusterConfig) GetVirtLauncherVerbosity() uint {
+	logConf := c.GetConfig().DeveloperConfiguration.LogVerbosity
+	return logConf.VirtLauncher
 }

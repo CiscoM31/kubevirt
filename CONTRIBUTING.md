@@ -44,14 +44,14 @@ relevant Issues.
 
 To make yourself comfortable with the code, you might want to work on some
 Issues marked with one or more of the following labels:
-[good first issue](https://github.com/kubevirt/kubevirt/labels/good%20first%20issue),
+[good-first-issue](https://github.com/kubevirt/kubevirt/labels/good-first-issue),
 [help wanted](https://github.com/kubevirt/kubevirt/labels/help%20wanted)
 or [kind/bug](https://github.com/kubevirt/kubevirt/labels/kind%2Fbug).
 Any help is highly appreciated.
 
 ### Testing
 
-**Untested features do not exist**. To ensure that what we code really works,
+**Untested features do not exist**. To ensure that what the code really works,
 relevant flows should be covered via unit tests and functional tests. So when
 thinking about a contribution, also think about testability. All tests can be
 run local without the need of CI. Have a look at the
@@ -78,8 +78,8 @@ Maintainers are here to help you enabling your use-case in a reasonable amount
 of time. The maintainers will try to review your code and give you productive
 feedback in a reasonable amount of time. However, if you are blocked on a
 review, or your Pull Request does not get the attention you think it deserves,
-reach out for us via Comments in your Issues, or ping us on IRC
-[#kubevirt @irc.freenode.net](https://kiwiirc.com/client/irc.freenode.net/kubevirt).
+reach out for us via Comments in your Issues, or ping us on Slack
+[#kubevirt-dev @ kubernetes.slack.com](https://kubernetes.slack.com/?redir=%2Farchives%2FC0163DT0R8X).
 
 Maintainers are:
 

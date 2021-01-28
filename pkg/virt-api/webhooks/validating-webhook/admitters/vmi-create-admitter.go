@@ -35,8 +35,8 @@ import (
 
 	v1 "kubevirt.io/client-go/api/v1"
 	"kubevirt.io/kubevirt/pkg/hooks"
-	"kubevirt.io/kubevirt/pkg/util"
 	"kubevirt.io/kubevirt/pkg/util/hardware"
+	hwutil "kubevirt.io/kubevirt/pkg/util/hardware"
 	webhookutils "kubevirt.io/kubevirt/pkg/util/webhooks"
 	"kubevirt.io/kubevirt/pkg/virt-api/webhooks"
 	virtconfig "kubevirt.io/kubevirt/pkg/virt-config"
@@ -461,8 +461,8 @@ func ValidateVirtualMachineInstanceSpec(field *k8sfield.Path, spec *v1.VirtualMa
 		}
 	}
 
-	for _, volume := range spec.Volumes {
-		volumeNameMap[volume.Name] = &volume
+	for i, volume := range spec.Volumes {
+		volumeNameMap[volume.Name] = &spec.Volumes[i]
 	}
 
 	// used to validate uniqueness of boot orders among disks and interfaces
@@ -612,6 +612,18 @@ func ValidateVirtualMachineInstanceSpec(field *k8sfield.Path, spec *v1.VirtualMa
 				Message: "Bridge on pod network configuration is not enabled under kubevirt-config",
 				Field:   field.Child("domain", "devices", "interfaces").Index(idx).Child("name").String(),
 			})
+		} else if iface.InterfaceBindingMethod.Macvtap != nil && !config.MacvtapEnabled() {
+			causes = append(causes, metav1.StatusCause{
+				Type:    metav1.CauseTypeFieldValueInvalid,
+				Message: "Macvtap feature gate is not enabled",
+				Field:   field.Child("domain", "devices", "interfaces").Index(idx).Child("name").String(),
+			})
+		} else if iface.InterfaceBindingMethod.Macvtap != nil && networkData.NetworkSource.Multus == nil {
+			causes = append(causes, metav1.StatusCause{
+				Type:    metav1.CauseTypeFieldValueInvalid,
+				Message: "Macvtap interface only implemented with Multus network",
+				Field:   field.Child("domain", "devices", "interfaces").Index(idx).Child("name").String(),
+			})
 		}
 
 		// Check if the interface name is unique
@@ -619,6 +631,16 @@ func ValidateVirtualMachineInstanceSpec(field *k8sfield.Path, spec *v1.VirtualMa
 			causes = append(causes, metav1.StatusCause{
 				Type:    metav1.CauseTypeFieldValueDuplicate,
 				Message: "Only one interface can be connected to one specific network",
+				Field:   field.Child("domain", "devices", "interfaces").Index(idx).Child("name").String(),
+			})
+		}
+
+		// Check if the interface name has correct format
+		isValid := regexp.MustCompile(`^[A-Za-z0-9-_]+$`).MatchString
+		if !isValid(iface.Name) {
+			causes = append(causes, metav1.StatusCause{
+				Type:    metav1.CauseTypeFieldValueInvalid,
+				Message: "Network interface name can only contain alphabetical characters, numbers, dashes (-) or underscores (_)",
 				Field:   field.Child("domain", "devices", "interfaces").Index(idx).Child("name").String(),
 			})
 		}
@@ -732,7 +754,7 @@ func ValidateVirtualMachineInstanceSpec(field *k8sfield.Path, spec *v1.VirtualMa
 		}
 		// verify that the specified pci address is valid
 		if iface.PciAddress != "" {
-			_, err := util.ParsePciAddress(iface.PciAddress)
+			_, err := hwutil.ParsePciAddress(iface.PciAddress)
 			if err != nil {
 				causes = append(causes, metav1.StatusCause{
 					Type:    metav1.CauseTypeFieldValueInvalid,
@@ -905,6 +927,9 @@ func ValidateVirtualMachineInstanceSpec(field *k8sfield.Path, spec *v1.VirtualMa
 
 	causes = append(causes, validateDomainSpec(field.Child("domain"), &spec.Domain)...)
 	causes = append(causes, validateVolumes(field.Child("volumes"), spec.Volumes, config)...)
+
+	causes = append(causes, validateAccessCredentials(field.Child("accessCredentials"), spec.AccessCredentials, spec.Volumes, config)...)
+
 	if spec.DNSPolicy != "" {
 		causes = append(causes, validateDNSPolicy(&spec.DNSPolicy, field.Child("dnsPolicy"))...)
 	}
@@ -935,6 +960,49 @@ func ValidateVirtualMachineInstanceSpec(field *k8sfield.Path, spec *v1.VirtualMa
 		})
 	}
 
+	if spec.Domain.Devices.Filesystems != nil && !config.VirtiofsEnabled() {
+		causes = append(causes, metav1.StatusCause{
+			Type:    metav1.CauseTypeFieldValueInvalid,
+			Message: fmt.Sprintf("virtiofs feature gate is not enabled in kubevirt-config"),
+			Field:   field.Child("Filesystems").String(),
+		})
+	}
+
+	if spec.Domain.Devices.HostDevices != nil && !config.HostDevicesPassthroughEnabled() {
+		causes = append(causes, metav1.StatusCause{
+			Type:    metav1.CauseTypeFieldValueInvalid,
+			Message: fmt.Sprintf("Host Devices feature gate is not enabled in kubevirt-config"),
+			Field:   field.Child("HostDevices").String(),
+		})
+	}
+	if hostDevs := config.GetPermittedHostDevices(); hostDevs != nil {
+		// build a map of all permitted host devices
+		supportedHostDevicesMap := make(map[string]bool)
+		for _, dev := range hostDevs.PciHostDevices {
+			supportedHostDevicesMap[dev.ResourceName] = true
+		}
+		for _, dev := range hostDevs.MediatedDevices {
+			supportedHostDevicesMap[dev.ResourceName] = true
+		}
+		for _, hostDev := range spec.Domain.Devices.GPUs {
+			if _, exist := supportedHostDevicesMap[hostDev.DeviceName]; !exist {
+				causes = append(causes, metav1.StatusCause{
+					Type:    metav1.CauseTypeFieldValueInvalid,
+					Message: fmt.Sprintf("GPU %s is not permitted in permittedHostDevices configuration", hostDev.DeviceName),
+					Field:   field.Child("GPUs").String(),
+				})
+			}
+		}
+		for _, hostDev := range spec.Domain.Devices.HostDevices {
+			if _, exist := supportedHostDevicesMap[hostDev.DeviceName]; !exist {
+				causes = append(causes, metav1.StatusCause{
+					Type:    metav1.CauseTypeFieldValueInvalid,
+					Message: fmt.Sprintf("HostDevice %s is not permitted in permittedHostDevices configuration", hostDev.DeviceName),
+					Field:   field.Child("HostDevices").String(),
+				})
+			}
+		}
+	}
 	return causes
 }
 
@@ -966,8 +1034,7 @@ func ValidateVirtualMachineInstanceMetadata(field *k8sfield.Path, metadata *meta
 	labels := metadata.Labels
 	// Validate kubevirt.io labels presence. Restricted labels allowed
 	// to be created only by known service accounts
-	allowed := webhooks.GetAllowedServiceAccounts()
-	if _, ok := allowed[accountName]; !ok {
+	if !webhooks.IsKubeVirtServiceAccount(accountName) {
 		if len(filterKubevirtLabels(labels)) > 0 {
 			causes = append(causes, metav1.StatusCause{
 				Type:    metav1.CauseTypeFieldValueNotSupported,
@@ -1151,6 +1218,122 @@ func validateDomainSpec(field *k8sfield.Path, spec *v1.DomainSpec) []metav1.Stat
 	return causes
 }
 
+func validateAccessCredentials(field *k8sfield.Path, accessCredentials []v1.AccessCredential, volumes []v1.Volume, config *virtconfig.ClusterConfig) []metav1.StatusCause {
+	var causes []metav1.StatusCause
+
+	if len(accessCredentials) > arrayLenMax {
+		causes = append(causes, metav1.StatusCause{
+			Type:    metav1.CauseTypeFieldValueInvalid,
+			Message: fmt.Sprintf("%s list exceeds the %d element limit in length", field.String(), arrayLenMax),
+			Field:   field.String(),
+		})
+		// We won't process anything over the limit
+		return causes
+	}
+
+	hasConfigDriveVolume := false
+	for _, volume := range volumes {
+		if volume.CloudInitConfigDrive != nil {
+			hasConfigDriveVolume = true
+			break
+		}
+	}
+
+	for idx, accessCred := range accessCredentials {
+
+		count := 0
+		// one access cred type must be selected
+		if accessCred.SSHPublicKey != nil {
+			count++
+
+			sourceCount := 0
+			methodCount := 0
+			if accessCred.SSHPublicKey.Source.Secret != nil {
+				sourceCount++
+			}
+
+			if accessCred.SSHPublicKey.PropagationMethod.ConfigDrive != nil {
+				methodCount++
+				if !hasConfigDriveVolume {
+					causes = append(causes, metav1.StatusCause{
+						Type:    metav1.CauseTypeFieldValueInvalid,
+						Message: fmt.Sprintf("%s requires a configDrive volume to exist when the configDrive propagationMethod is in use.", field.Index(idx).String()),
+						Field:   field.Index(idx).Child("sshPublicKey", "propagationMethod").String(),
+					})
+
+				}
+			}
+			if accessCred.SSHPublicKey.PropagationMethod.QemuGuestAgent != nil {
+
+				if len(accessCred.SSHPublicKey.PropagationMethod.QemuGuestAgent.Users) == 0 {
+					causes = append(causes, metav1.StatusCause{
+						Type:    metav1.CauseTypeFieldValueInvalid,
+						Message: fmt.Sprintf("%s requires at least one user to be present in the users list", field.Index(idx).String()),
+						Field:   field.Index(idx).Child("sshPublicKey", "propagationMethod", "qemuGuestAgent", "users").String(),
+					})
+				}
+
+				methodCount++
+			}
+
+			if sourceCount != 1 {
+				causes = append(causes, metav1.StatusCause{
+					Type:    metav1.CauseTypeFieldValueInvalid,
+					Message: fmt.Sprintf("%s must have exactly one source set", field.Index(idx).String()),
+					Field:   field.Index(idx).Child("sshPublicKey", "source").String(),
+				})
+			}
+			if methodCount != 1 {
+				causes = append(causes, metav1.StatusCause{
+					Type:    metav1.CauseTypeFieldValueInvalid,
+					Message: fmt.Sprintf("%s must have exactly one propagationMethod set", field.Index(idx).String()),
+					Field:   field.Index(idx).Child("sshPublicKey", "propagationMethod").String(),
+				})
+			}
+		}
+
+		if accessCred.UserPassword != nil {
+			count++
+
+			sourceCount := 0
+			methodCount := 0
+			if accessCred.UserPassword.Source.Secret != nil {
+				sourceCount++
+			}
+
+			if accessCred.UserPassword.PropagationMethod.QemuGuestAgent != nil {
+				methodCount++
+			}
+
+			if sourceCount != 1 {
+				causes = append(causes, metav1.StatusCause{
+					Type:    metav1.CauseTypeFieldValueInvalid,
+					Message: fmt.Sprintf("%s must have exactly one source set", field.Index(idx).String()),
+					Field:   field.Index(idx).Child("userPassword", "source").String(),
+				})
+			}
+			if methodCount != 1 {
+				causes = append(causes, metav1.StatusCause{
+					Type:    metav1.CauseTypeFieldValueInvalid,
+					Message: fmt.Sprintf("%s must have exactly one propagationMethod set", field.Index(idx).String()),
+					Field:   field.Index(idx).Child("userPassword", "propagationMethod").String(),
+				})
+			}
+		}
+
+		if count != 1 {
+			causes = append(causes, metav1.StatusCause{
+				Type:    metav1.CauseTypeFieldValueInvalid,
+				Message: fmt.Sprintf("%s must have exactly one access credential type set", field.Index(idx).String()),
+				Field:   field.Index(idx).String(),
+			})
+		}
+
+	}
+
+	return causes
+}
+
 func validateVolumes(field *k8sfield.Path, volumes []v1.Volume, config *virtconfig.ClusterConfig) []metav1.StatusCause {
 	var causes []metav1.StatusCause
 	nameMap := make(map[string]int)
@@ -1228,6 +1411,9 @@ func validateVolumes(field *k8sfield.Path, volumes []v1.Volume, config *virtconf
 		if volume.Secret != nil {
 			volumeSourceSetCount++
 		}
+		if volume.DownwardAPI != nil {
+			volumeSourceSetCount++
+		}
 		if volume.ServiceAccount != nil {
 			volumeSourceSetCount++
 			serviceAccountVolumeCount++
@@ -1288,10 +1474,10 @@ func validateVolumes(field *k8sfield.Path, volumes []v1.Volume, config *virtconf
 				userDataLen = len(userData)
 			}
 
-			if userDataSourceCount != 1 {
+			if userDataSourceCount > 1 {
 				causes = append(causes, metav1.StatusCause{
 					Type:    metav1.CauseTypeFieldValueInvalid,
-					Message: fmt.Sprintf("%s must have one exactly one userdata source set.", field.Index(idx).Child(dataSourceType).String()),
+					Message: fmt.Sprintf("%s must have only one userdatasource set.", field.Index(idx).Child(dataSourceType).String()),
 					Field:   field.Index(idx).Child(dataSourceType).String(),
 				})
 			}
@@ -1336,6 +1522,14 @@ func validateVolumes(field *k8sfield.Path, volumes []v1.Volume, config *virtconf
 				causes = append(causes, metav1.StatusCause{
 					Type:    metav1.CauseTypeFieldValueInvalid,
 					Message: fmt.Sprintf("%s networkdata exceeds %d byte limit. Should use NetworkDataSecretRef for larger data.", field.Index(idx).Child(dataSourceType).String(), cloudInitNetworkMaxLen),
+					Field:   field.Index(idx).Child(dataSourceType).String(),
+				})
+			}
+
+			if userDataSourceCount == 0 && networkDataSourceCount == 0 {
+				causes = append(causes, metav1.StatusCause{
+					Type:    metav1.CauseTypeFieldValueInvalid,
+					Message: fmt.Sprintf("%s must have at least one userdatasource or one networkdatasource set.", field.Index(idx).Child(dataSourceType).String()),
 					Field:   field.Index(idx).Child(dataSourceType).String(),
 				})
 			}
@@ -1517,7 +1711,7 @@ func validateDisks(field *k8sfield.Path, disks []v1.Disk) []metav1.StatusCause {
 				})
 			}
 
-			_, err := util.ParsePciAddress(disk.Disk.PciAddress)
+			_, err := hwutil.ParsePciAddress(disk.Disk.PciAddress)
 			if err != nil {
 				causes = append(causes, metav1.StatusCause{
 					Type:    metav1.CauseTypeFieldValueInvalid,

@@ -30,7 +30,6 @@ import (
 	"time"
 
 	dhcp "github.com/krolaw/dhcp4"
-	dhcpConn "github.com/krolaw/dhcp4/conn"
 	"github.com/vishvananda/netlink"
 
 	v1 "kubevirt.io/client-go/api/v1"
@@ -50,6 +49,7 @@ var searchDomainValidationRegex = regexp.MustCompile(`^(?:[_a-z0-9](?:[_a-z0-9-]
 
 func SingleClientDHCPServer(
 	clientMAC net.HardwareAddr,
+	filterByMAC bool,
 	clientIP net.IP,
 	clientMask net.IPMask,
 	serverIface string,
@@ -76,18 +76,13 @@ func SingleClientDHCPServer(
 	handler := &DHCPHandler{
 		clientIP:      clientIP,
 		clientMAC:     clientMAC,
+		filterByMAC:   filterByMAC,
 		serverIP:      serverIP.To4(),
 		leaseDuration: infiniteLease,
 		options:       options,
 	}
 
-	// turn TX offload checksum because it causes dhcp failures
-	if err := EthtoolTXOff(serverIface); err != nil {
-		log.Log.Reason(err).Errorf("Failed to set tx offload for interface %s off", serverIface)
-		return err
-	}
-
-	l, err := dhcpConn.NewUDP4BoundListener(serverIface, ":67")
+	l, err := NewUDP4FilterListener(serverIface, ":67")
 	if err != nil {
 		return err
 	}
@@ -184,15 +179,18 @@ type DHCPHandler struct {
 	serverIP      net.IP
 	clientIP      net.IP
 	clientMAC     net.HardwareAddr
+	filterByMAC   bool
 	leaseDuration time.Duration
 	options       dhcp.Options
 }
 
 func (h *DHCPHandler) ServeDHCP(p dhcp.Packet, msgType dhcp.MessageType, options dhcp.Options) (d dhcp.Packet) {
 	log.Log.V(4).Info("Serving a new request")
-	if mac := p.CHAddr(); !bytes.Equal(mac, h.clientMAC) {
-		log.Log.V(4).Info("The request is not from our client")
-		return nil // Is not our client
+	if h.filterByMAC {
+		if mac := p.CHAddr(); !bytes.Equal(mac, h.clientMAC) {
+			log.Log.V(4).Info("The request is not from our client")
+			return nil // Is not our client
+		}
 	}
 
 	switch msgType {

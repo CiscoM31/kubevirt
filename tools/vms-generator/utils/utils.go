@@ -56,6 +56,7 @@ const (
 	VmiMultusMultipleNet = "vmi-multus-multiple-net"
 	VmiHostDisk          = "vmi-host-disk"
 	VmiGPU               = "vmi-gpu"
+	VmiMacvtap           = "vmi-macvtap"
 	VmTemplateFedora     = "vm-template-fedora"
 	VmTemplateRHEL7      = "vm-template-rhel7"
 	VmTemplateWindows    = "vm-template-windows2012r2"
@@ -435,7 +436,7 @@ func GetVMIMasquerade() *v1.VirtualMachineInstance {
 	vm.Spec.Domain.Resources.Requests[k8sv1.ResourceMemory] = resource.MustParse("1024M")
 	vm.Spec.Networks = []v1.Network{v1.Network{Name: "testmasquerade", NetworkSource: v1.NetworkSource{Pod: &v1.PodNetwork{}}}}
 	initFedora(&vm.Spec)
-	userData := "#!/bin/bash\necho \"fedora\" |passwd fedora --stdin\nfor i in {1..20}; do curl -I %s | grep \"200 OK\" && break || sleep 0.1; done\nyum install -y nginx\nsystemctl enable --now nginx"
+	userData := "#!/bin/bash\necho \"fedora\" |passwd fedora --stdin\nyum install -y nginx\nsystemctl enable --now nginx"
 	networkData := "version: 2\nethernets:\n  eth0:\n    addresses: [ fd10:0:2::2/120 ]\n    dhcp4: true\n    gateway6: fd10:0:2::1\n"
 	addNoCloudDiskWitUserDataNetworkData(&vm.Spec, userData, networkData)
 
@@ -519,7 +520,7 @@ func GetVMIBlockPvc() *v1.VirtualMachineInstance {
 
 func GetVMIHostDisk() *v1.VirtualMachineInstance {
 	vmi := getBaseVMI(VmiHostDisk)
-	addHostDisk(&vmi.Spec, "/data/disk.img", v1.HostDiskExistsOrCreate, "1Gi")
+	addHostDisk(&vmi.Spec, "/var/data/disk.img", v1.HostDiskExistsOrCreate, "1Gi")
 	return vmi
 }
 
@@ -852,7 +853,7 @@ func GetVMDataVolume() *v1.VirtualMachine {
 		panic(err)
 	}
 	storageClassName := "local"
-	dataVolume := cdiv1.DataVolume{
+	dataVolumeSpec := v1.DataVolumeTemplateSpec{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "alpine-dv",
 		},
@@ -874,7 +875,7 @@ func GetVMDataVolume() *v1.VirtualMachine {
 		},
 	}
 
-	vm.Spec.DataVolumeTemplates = append(vm.Spec.DataVolumeTemplates, dataVolume)
+	vm.Spec.DataVolumeTemplates = append(vm.Spec.DataVolumeTemplates, dataVolumeSpec)
 	addDataVolumeDisk(&vm.Spec.Template.Spec, "alpine-dv", busVirtio, "datavolumedisk1")
 
 	return vm
@@ -982,7 +983,7 @@ func GetVMIWithHookSidecar() *v1.VirtualMachineInstance {
 	addNoCloudDiskWitUserData(&vmi.Spec, "#cloud-config\npassword: fedora\nchpasswd: { expire: False }")
 
 	vmi.ObjectMeta.Annotations = map[string]string{
-		"hooks.kubevirt.io/hookSidecars":              fmt.Sprintf("[{\"image\": \"%s/example-hook-sidecar:%s\"}]", DockerPrefix, DockerTag),
+		"hooks.kubevirt.io/hookSidecars":              fmt.Sprintf("[{\"args\": [\"--version\", \"v1alpha2\"], \"image\": \"%s/example-hook-sidecar:%s\"}]", DockerPrefix, DockerTag),
 		"smbios.vm.kubevirt.io/baseBoardManufacturer": "Radical Edward",
 	}
 	return vmi
@@ -1000,5 +1001,18 @@ func GetVMIGPU() *v1.VirtualMachineInstance {
 	vmi.Spec.Domain.Devices.GPUs = GPUs
 	initFedora(&vmi.Spec)
 	addNoCloudDiskWitUserData(&vmi.Spec, "#cloud-config\npassword: fedora\nchpasswd: { expire: False }")
+	return vmi
+}
+
+func GetVMIMacvtap() *v1.VirtualMachineInstance {
+	vmi := getBaseVMI(VmiMacvtap)
+	macvtapNetworkName := "macvtap"
+	vmi.Spec.Domain.Resources.Requests[k8sv1.ResourceMemory] = resource.MustParse("1024M")
+	vmi.Spec.Networks = []v1.Network{v1.Network{Name: macvtapNetworkName, NetworkSource: v1.NetworkSource{Multus: &v1.MultusNetwork{NetworkName: "macvtapnetwork"}}}}
+	initFedora(&vmi.Spec)
+	addNoCloudDiskWitUserData(&vmi.Spec, "#!/bin/bash\necho \"fedora\" |passwd fedora --stdin\nyum install -y nginx\nsystemctl enable --now nginx")
+
+	macvtap := &v1.InterfaceMacvtap{}
+	vmi.Spec.Domain.Devices.Interfaces = []v1.Interface{v1.Interface{Name: macvtapNetworkName, InterfaceBindingMethod: v1.InterfaceBindingMethod{Macvtap: macvtap}}}
 	return vmi
 }

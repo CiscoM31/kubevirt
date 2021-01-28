@@ -22,7 +22,7 @@ if [ -z ${KUBEVIRT_CRI} ]; then
     fi
 fi
 
-KUBEVIRT_BUILDER_IMAGE="kubevirt/builder@sha256:1f521ae568f4bdbcb41f02f9f11a7b5234120cf7c6a673df4f42b6fdfe4c35d3"
+KUBEVIRT_BUILDER_IMAGE="kubevirt/builder@sha256:756e317913e2e5c4f342ff4cd5319bc504286bc52ca7aead3337d79182d11b46"
 
 SYNC_OUT=${SYNC_OUT:-true}
 
@@ -98,6 +98,7 @@ _rsync \
     --exclude 'cluster-up/cluster/**/.kubeconfig' \
     --exclude "_out" \
     --exclude ".vagrant" \
+    --exclude ".bazeldnf" \
     ${KUBEVIRT_DIR}/ \
     "rsync://root@127.0.0.1:${RSYNCD_PORT}/build"
 
@@ -135,7 +136,19 @@ fi
 
 # Run the command
 test -t 1 && USE_TTY="-it"
-$KUBEVIRT_CRI exec ${USE_TTY} ${BUILDER}-bazel-server /entrypoint.sh "$@"
+if ! $KUBEVIRT_CRI exec ${USE_TTY} ${BUILDER}-bazel-server /entrypoint.sh "$@"; then
+    # Copy the build output out of the container, make sure that _out exactly matches the build result
+    if [ "$SYNC_OUT" = "true" ]; then
+        _rsync --delete "rsync://root@127.0.0.1:${RSYNCD_PORT}/out" ${OUT_DIR}
+    fi
+    set -x
+    # Copy the junit where prow can pick it up
+    if [ "$@" = "./hack/gosec.sh" ] && [ "$CI" = "true" ]; then
+        echo "Moving file in prow"
+        mv ${OUT_DIR}/artifacts/junit-gosec.xml ${ARTIFACTS}
+    fi
+    exit 1
+fi
 
 # Copy the whole kubevirt data out to get generated sources and formatting changes
 _rsync \
@@ -151,6 +164,7 @@ _rsync \
     --exclude "vendor" \
     --exclude ".vagrant" \
     --exclude ".git" \
+    --exclude ".bazeldnf" \
     "rsync://root@127.0.0.1:${RSYNCD_PORT}/build" \
     ${KUBEVIRT_DIR}/
 

@@ -22,6 +22,7 @@ package v1
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"text/template"
 
 	. "github.com/onsi/ginkgo"
@@ -33,13 +34,13 @@ type NetworkTemplateConfig struct {
 	InterfaceConfig string
 }
 
-var exampleJSON = `{
+var exampleJSONFmt = `{
   "kind": "VirtualMachineInstance",
-  "apiVersion": "kubevirt.io/v1alpha3",
+  "apiVersion": "kubevirt.io/%s",
   "metadata": {
     "name": "testvmi",
     "namespace": "default",
-    "selfLink": "/apis/kubevirt.io/v1alpha3/namespaces/default/virtualmachineinstances/testvmi",
+    "selfLink": "/apis/kubevirt.io/%s/namespaces/default/virtualmachineinstances/testvmi",
     "creationTimestamp": null
   },
   "spec": {
@@ -141,6 +142,9 @@ var exampleJSON = `{
         },
         "smm": {
           "enabled": true
+        },
+        "kvm": {
+          "hidden": true
         }
       },
       "devices": {
@@ -237,6 +241,8 @@ var exampleJSON = `{
     "guestOSInfo": {}
   }
 }`
+
+var exampleJSON = fmt.Sprintf(exampleJSONFmt, ApiLatestVersion, ApiLatestVersion)
 
 var _ = Describe("Schema", func() {
 	//The example domain should stay in sync to the json above
@@ -342,6 +348,7 @@ var _ = Describe("Schema", func() {
 			ACPI: FeatureState{Enabled: _false},
 			SMM:  &FeatureState{Enabled: _true},
 			APIC: &FeatureAPIC{Enabled: _true},
+			KVM:  &FeatureKVM{Hidden: true},
 			Hyperv: &FeatureHyperv{
 				Relaxed:         &FeatureState{Enabled: _true},
 				VAPIC:           &FeatureState{Enabled: _false},

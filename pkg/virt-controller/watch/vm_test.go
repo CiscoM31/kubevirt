@@ -139,14 +139,14 @@ var _ = Describe("VirtualMachine", func() {
 				},
 			})
 
-			vm.Spec.DataVolumeTemplates = append(vm.Spec.DataVolumeTemplates, cdiv1.DataVolume{
+			vm.Spec.DataVolumeTemplates = append(vm.Spec.DataVolumeTemplates, v1.DataVolumeTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
 					Labels:      map[string]string{"my": "label"},
 					Annotations: map[string]string{"my": "annotation"},
 					Name:        "dv1",
 				},
 			})
-			vm.Spec.DataVolumeTemplates = append(vm.Spec.DataVolumeTemplates, cdiv1.DataVolume{
+			vm.Spec.DataVolumeTemplates = append(vm.Spec.DataVolumeTemplates, v1.DataVolumeTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
 					Name: "dv2",
 				},
@@ -162,6 +162,171 @@ var _ = Describe("VirtualMachine", func() {
 			Expect(createCount).To(Equal(1))
 			testutils.ExpectEvent(recorder, SuccessfulDataVolumeCreateReason)
 		})
+
+		table.DescribeTable("should hotplug a vm", func(isRunning bool) {
+
+			vm, vmi := DefaultVirtualMachine(isRunning)
+			vm.Status.Created = true
+			vm.Status.Ready = true
+			vm.Status.VolumeRequests = []v1.VirtualMachineVolumeRequest{
+				{
+					AddVolumeOptions: &v1.AddVolumeOptions{
+						Name:         "vol1",
+						Disk:         &v1.Disk{},
+						VolumeSource: &v1.HotplugVolumeSource{},
+					},
+				},
+			}
+
+			addVirtualMachine(vm)
+
+			if isRunning {
+				markAsReady(vmi)
+				vmiFeeder.Add(vmi)
+				vmiInterface.EXPECT().AddVolume(vmi.ObjectMeta.Name, vm.Status.VolumeRequests[0].AddVolumeOptions)
+			}
+
+			vmInterface.EXPECT().Update(gomock.Any()).Do(func(arg interface{}) {
+				Expect(arg.(*v1.VirtualMachine).Spec.Template.Spec.Volumes[0].Name).To(Equal("vol1"))
+			}).Return(nil, nil)
+
+			vmInterface.EXPECT().UpdateStatus(gomock.Any()).Do(func(arg interface{}) {
+				// vol request shouldn't be cleared until update status observes the new volume change
+				Expect(len(arg.(*v1.VirtualMachine).Status.VolumeRequests)).To(Equal(1))
+			}).Return(nil, nil)
+
+			controller.Execute()
+		},
+
+			table.Entry("that is running", true),
+			table.Entry("that is not running", false),
+		)
+
+		table.DescribeTable("should unhotplug a vm", func(isRunning bool) {
+			vm, vmi := DefaultVirtualMachine(isRunning)
+			vm.Status.Created = true
+			vm.Status.Ready = true
+			vm.Status.VolumeRequests = []v1.VirtualMachineVolumeRequest{
+				{
+					RemoveVolumeOptions: &v1.RemoveVolumeOptions{
+						Name: "vol1",
+					},
+				},
+			}
+			vm.Spec.Template.Spec.Domain.Devices.Disks = append(vmi.Spec.Domain.Devices.Disks, v1.Disk{
+				Name: "vol1",
+			})
+			vm.Spec.Template.Spec.Volumes = append(vmi.Spec.Volumes, v1.Volume{
+				Name: "vol1",
+				VolumeSource: v1.VolumeSource{
+					PersistentVolumeClaim: &k8sv1.PersistentVolumeClaimVolumeSource{
+						ClaimName: "testpvcdiskclaim",
+					},
+				},
+			})
+
+			addVirtualMachine(vm)
+
+			if isRunning {
+				vmi.Spec.Volumes = vm.Spec.Template.Spec.Volumes
+				vmi.Spec.Domain.Devices.Disks = vm.Spec.Template.Spec.Domain.Devices.Disks
+				markAsReady(vmi)
+				vmiFeeder.Add(vmi)
+				vmiInterface.EXPECT().RemoveVolume(vmi.ObjectMeta.Name, vm.Status.VolumeRequests[0].RemoveVolumeOptions)
+			}
+
+			vmInterface.EXPECT().Update(gomock.Any()).Do(func(arg interface{}) {
+				Expect(len(arg.(*v1.VirtualMachine).Spec.Template.Spec.Volumes)).To(Equal(0))
+			}).Return(nil, nil)
+
+			vmInterface.EXPECT().UpdateStatus(gomock.Any()).Do(func(arg interface{}) {
+				// vol request shouldn't be cleared until update status observes the new volume change occured
+				Expect(len(arg.(*v1.VirtualMachine).Status.VolumeRequests)).To(Equal(1))
+			}).Return(nil, nil)
+
+			controller.Execute()
+		},
+
+			table.Entry("that is running", true),
+			table.Entry("that is not running", false),
+		)
+
+		table.DescribeTable("should clear VolumeRequests for added volumes that are satisfied", func(isRunning bool) {
+			vm, vmi := DefaultVirtualMachine(isRunning)
+			vm.Status.Created = true
+			vm.Status.Ready = true
+			vm.Status.VolumeRequests = []v1.VirtualMachineVolumeRequest{
+				{
+					AddVolumeOptions: &v1.AddVolumeOptions{
+						Name:         "vol1",
+						Disk:         &v1.Disk{},
+						VolumeSource: &v1.HotplugVolumeSource{},
+					},
+				},
+			}
+			vm.Spec.Template.Spec.Domain.Devices.Disks = append(vmi.Spec.Domain.Devices.Disks, v1.Disk{
+				Name: "vol1",
+			})
+			vm.Spec.Template.Spec.Volumes = append(vmi.Spec.Volumes, v1.Volume{
+				Name: "vol1",
+				VolumeSource: v1.VolumeSource{
+					PersistentVolumeClaim: &k8sv1.PersistentVolumeClaimVolumeSource{
+						ClaimName: "testpvcdiskclaim",
+					},
+				},
+			})
+
+			addVirtualMachine(vm)
+
+			if isRunning {
+				vmi.Spec.Volumes = vm.Spec.Template.Spec.Volumes
+				vmi.Spec.Domain.Devices.Disks = vm.Spec.Template.Spec.Domain.Devices.Disks
+				markAsReady(vmi)
+				vmiFeeder.Add(vmi)
+			}
+
+			vmInterface.EXPECT().UpdateStatus(gomock.Any()).Do(func(arg interface{}) {
+				Expect(len(arg.(*v1.VirtualMachine).Status.VolumeRequests)).To(Equal(0))
+			}).Return(nil, nil)
+
+			controller.Execute()
+		},
+
+			table.Entry("that is running", true),
+			table.Entry("that is not running", false),
+		)
+
+		table.DescribeTable("should clear VolumeRequests for removed volumes that are satisfied", func(isRunning bool) {
+			vm, vmi := DefaultVirtualMachine(isRunning)
+			vm.Status.Created = true
+			vm.Status.Ready = true
+			vm.Status.VolumeRequests = []v1.VirtualMachineVolumeRequest{
+				{
+					RemoveVolumeOptions: &v1.RemoveVolumeOptions{
+						Name: "vol1",
+					},
+				},
+			}
+			vm.Spec.Template.Spec.Volumes = []v1.Volume{}
+			vm.Spec.Template.Spec.Domain.Devices.Disks = []v1.Disk{}
+
+			addVirtualMachine(vm)
+
+			if isRunning {
+				markAsReady(vmi)
+				vmiFeeder.Add(vmi)
+			}
+
+			vmInterface.EXPECT().UpdateStatus(gomock.Any()).Do(func(arg interface{}) {
+				Expect(len(arg.(*v1.VirtualMachine).Status.VolumeRequests)).To(Equal(0))
+			}).Return(nil, nil)
+
+			controller.Execute()
+		},
+
+			table.Entry("that is running", true),
+			table.Entry("that is not running", false),
+		)
 
 		It("should not delete failed DataVolume for VirtualMachineInstance", func() {
 			vm, _ := DefaultVirtualMachine(true)
@@ -182,12 +347,12 @@ var _ = Describe("VirtualMachine", func() {
 				},
 			})
 
-			vm.Spec.DataVolumeTemplates = append(vm.Spec.DataVolumeTemplates, cdiv1.DataVolume{
+			vm.Spec.DataVolumeTemplates = append(vm.Spec.DataVolumeTemplates, v1.DataVolumeTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
 					Name: "dv1",
 				},
 			})
-			vm.Spec.DataVolumeTemplates = append(vm.Spec.DataVolumeTemplates, cdiv1.DataVolume{
+			vm.Spec.DataVolumeTemplates = append(vm.Spec.DataVolumeTemplates, v1.DataVolumeTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
 					Name: "dv2",
 				},
@@ -235,12 +400,12 @@ var _ = Describe("VirtualMachine", func() {
 				},
 			})
 
-			vm.Spec.DataVolumeTemplates = append(vm.Spec.DataVolumeTemplates, cdiv1.DataVolume{
+			vm.Spec.DataVolumeTemplates = append(vm.Spec.DataVolumeTemplates, v1.DataVolumeTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
 					Name: "dv1",
 				},
 			})
-			vm.Spec.DataVolumeTemplates = append(vm.Spec.DataVolumeTemplates, cdiv1.DataVolume{
+			vm.Spec.DataVolumeTemplates = append(vm.Spec.DataVolumeTemplates, v1.DataVolumeTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
 					Name: "dv2",
 				},
@@ -284,12 +449,12 @@ var _ = Describe("VirtualMachine", func() {
 				},
 			})
 
-			vm.Spec.DataVolumeTemplates = append(vm.Spec.DataVolumeTemplates, cdiv1.DataVolume{
+			vm.Spec.DataVolumeTemplates = append(vm.Spec.DataVolumeTemplates, v1.DataVolumeTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
 					Name: "dv1",
 				},
 			})
-			vm.Spec.DataVolumeTemplates = append(vm.Spec.DataVolumeTemplates, cdiv1.DataVolume{
+			vm.Spec.DataVolumeTemplates = append(vm.Spec.DataVolumeTemplates, v1.DataVolumeTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
 					Name: "dv2",
 				},
@@ -317,7 +482,7 @@ var _ = Describe("VirtualMachine", func() {
 			testutils.ExpectEvent(recorder, FailedDataVolumeImportReason)
 		})
 
-		It("should only start VMI once DataVolumes are complete", func() {
+		It("should start VMI once DataVolumes are complete", func() {
 
 			vm, vmi := DefaultVirtualMachine(true)
 			vm.Spec.Template.Spec.Volumes = append(vm.Spec.Template.Spec.Volumes, v1.Volume{
@@ -328,7 +493,7 @@ var _ = Describe("VirtualMachine", func() {
 					},
 				},
 			})
-			vm.Spec.DataVolumeTemplates = append(vm.Spec.DataVolumeTemplates, cdiv1.DataVolume{
+			vm.Spec.DataVolumeTemplates = append(vm.Spec.DataVolumeTemplates, v1.DataVolumeTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
 					Name: "dv1",
 				},
@@ -338,6 +503,43 @@ var _ = Describe("VirtualMachine", func() {
 
 			existingDataVolume.Namespace = "default"
 			existingDataVolume.Status.Phase = cdiv1.Succeeded
+			addVirtualMachine(vm)
+			dataVolumeFeeder.Add(existingDataVolume)
+			// expect creation called
+			vmiInterface.EXPECT().Create(gomock.Any()).Do(func(arg interface{}) {
+				Expect(arg.(*v1.VirtualMachineInstance).ObjectMeta.Name).To(Equal("testvmi"))
+			}).Return(vmi, nil)
+			// expect update status is called
+			vmInterface.EXPECT().UpdateStatus(gomock.Any()).Do(func(arg interface{}) {
+				Expect(arg.(*v1.VirtualMachine).Status.Created).To(BeFalse())
+				Expect(arg.(*v1.VirtualMachine).Status.Ready).To(BeFalse())
+			}).Return(nil, nil)
+			controller.Execute()
+			testutils.ExpectEvent(recorder, SuccessfulCreateVirtualMachineReason)
+		})
+
+		It("should start VMI once DataVolumes are complete or WaitForFirstConsumer", func() {
+			// WaitForFirstConsumer state can only be handled by VMI
+
+			vm, vmi := DefaultVirtualMachine(true)
+			vm.Spec.Template.Spec.Volumes = append(vm.Spec.Template.Spec.Volumes, v1.Volume{
+				Name: "test1",
+				VolumeSource: v1.VolumeSource{
+					DataVolume: &v1.DataVolumeSource{
+						Name: "dv1",
+					},
+				},
+			})
+			vm.Spec.DataVolumeTemplates = append(vm.Spec.DataVolumeTemplates, v1.DataVolumeTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "dv1",
+				},
+			})
+
+			existingDataVolume := createDataVolumeManifest(&vm.Spec.DataVolumeTemplates[0], vm)
+
+			existingDataVolume.Namespace = "default"
+			existingDataVolume.Status.Phase = cdiv1.WaitForFirstConsumer
 			addVirtualMachine(vm)
 			dataVolumeFeeder.Add(existingDataVolume)
 			// expect creation called
@@ -364,7 +566,7 @@ var _ = Describe("VirtualMachine", func() {
 					},
 				},
 			})
-			vm.Spec.DataVolumeTemplates = append(vm.Spec.DataVolumeTemplates, cdiv1.DataVolume{
+			vm.Spec.DataVolumeTemplates = append(vm.Spec.DataVolumeTemplates, v1.DataVolumeTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
 					Name: "dv1",
 				},
@@ -403,12 +605,12 @@ var _ = Describe("VirtualMachine", func() {
 				},
 			})
 
-			vm.Spec.DataVolumeTemplates = append(vm.Spec.DataVolumeTemplates, cdiv1.DataVolume{
+			vm.Spec.DataVolumeTemplates = append(vm.Spec.DataVolumeTemplates, v1.DataVolumeTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
 					Name: "dv1",
 				},
 			})
-			vm.Spec.DataVolumeTemplates = append(vm.Spec.DataVolumeTemplates, cdiv1.DataVolume{
+			vm.Spec.DataVolumeTemplates = append(vm.Spec.DataVolumeTemplates, v1.DataVolumeTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
 					Name: "dv2",
 				},
@@ -423,7 +625,7 @@ var _ = Describe("VirtualMachine", func() {
 		})
 
 		Context("clone authorization tests", func() {
-			dv1 := &cdiv1.DataVolume{
+			dv1 := &v1.DataVolumeTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
 					Name: "dv1",
 				},
@@ -437,7 +639,7 @@ var _ = Describe("VirtualMachine", func() {
 				},
 			}
 
-			dv2 := &cdiv1.DataVolume{
+			dv2 := &v1.DataVolumeTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
 					Name: "dv2",
 				},
@@ -459,7 +661,7 @@ var _ = Describe("VirtualMachine", func() {
 				},
 			}
 
-			table.DescribeTable("create clone DataVolume for VirtualMachineInstance", func(dv *cdiv1.DataVolume, saVol *v1.Volume, fail bool) {
+			table.DescribeTable("create clone DataVolume for VirtualMachineInstance", func(dv *v1.DataVolumeTemplateSpec, saVol *v1.Volume, fail bool) {
 				vm, _ := DefaultVirtualMachine(true)
 				vm.Spec.Template.Spec.Volumes = append(vm.Spec.Template.Spec.Volumes,
 					v1.Volume{

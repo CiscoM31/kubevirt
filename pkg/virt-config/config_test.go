@@ -8,9 +8,9 @@ import (
 	"github.com/onsi/ginkgo/extensions/table"
 	. "github.com/onsi/gomega"
 	kubev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/rand"
+	"k8s.io/utils/pointer"
 
 	v1 "kubevirt.io/client-go/api/v1"
 	"kubevirt.io/client-go/log"
@@ -23,28 +23,17 @@ var _ = Describe("ConfigMap", func() {
 
 	log.Log.SetIOWriter(GinkgoWriter)
 
-	var stopChan chan struct{}
-	defaultCPURequest := resource.MustParse(virtconfig.DefaultCPURequest)
-
-	BeforeEach(func() {
-		stopChan = make(chan struct{})
-	})
-
-	AfterEach(func() {
-		close(stopChan)
-	})
-
-	table.DescribeTable("when memBalloonStatsPeriod", func(value string, result int) {
+	table.DescribeTable("when memBalloonStatsPeriod", func(value string, result uint32) {
 		clusterConfig, _, _, _ := testutils.NewFakeClusterConfig(&kubev1.ConfigMap{
 			Data: map[string]string{"memBalloonStatsPeriod": value},
 		})
 
 		Expect(clusterConfig.GetMemBalloonStatsPeriod()).To(Equal(result))
 	},
-		table.Entry("is positive, GetMemBalloonStatsPeriod should return period", "3", 3),
-		table.Entry("is negative, GetMemBalloonStatsPeriod should return 10", "-1", 10),
-		table.Entry("when unset, GetMemBalloonStatsPeriod should return 10", "", 10),
-		table.Entry("when invalid, GetMemBalloonStatsPeriod should return 10", "invalid", 10))
+		table.Entry("is positive, GetMemBalloonStatsPeriod should return period", "3", uint32(3)),
+		table.Entry("is negative, GetMemBalloonStatsPeriod should return 10", "-1", uint32(10)),
+		table.Entry("when unset, GetMemBalloonStatsPeriod should return 10", "", uint32(10)),
+		table.Entry("when invalid, GetMemBalloonStatsPeriod should return 10", "invalid", uint32(10)))
 
 	table.DescribeTable(" when useEmulation", func(value string, result bool) {
 		clusterConfig, _, _, _ := testutils.NewFakeClusterConfig(&kubev1.ConfigMap{
@@ -205,11 +194,12 @@ var _ = Describe("ConfigMap", func() {
 		result := clusterConfig.GetMigrationConfiguration()
 		Expect(*result.ParallelOutboundMigrationsPerNode).To(BeNumerically("==", 10))
 		Expect(*result.ParallelMigrationsPerCluster).To(BeNumerically("==", 20))
-		Expect(result.BandwidthPerMigration.String()).To(Equal("110Mi"))
+		bandwidth := *result.BandwidthPerMigration
+		Expect(bandwidth.String()).To(Equal("110Mi"))
 		Expect(*result.ProgressTimeout).To(BeNumerically("==", 5))
 		Expect(*result.CompletionTimeoutPerGiB).To(BeNumerically("==", 5))
-		Expect(result.UnsafeMigrationOverride).To(BeTrue())
-		Expect(result.AllowAutoConverge).To(BeTrue())
+		Expect(*result.UnsafeMigrationOverride).To(BeTrue())
+		Expect(*result.AllowAutoConverge).To(BeTrue())
 	})
 
 	It("Should return migration config values if specified as yaml", func() {
@@ -299,7 +289,7 @@ var _ = Describe("ConfigMap", func() {
 		Expect(clusterConfig.GetMachineType()).To(testutils.SatisfyAnyRegexp(clusterConfig.GetEmulatedMachines()))
 	})
 
-	table.DescribeTable("SMBIOS values from kubevirt-config", func(value string, result cmdv1.SMBios) {
+	table.DescribeTable("SMBIOS values from kubevirt-config", func(value string, result *cmdv1.SMBios) {
 		clusterConfig, _, _, _ := testutils.NewFakeClusterConfig(&kubev1.ConfigMap{
 			Data: map[string]string{virtconfig.SmbiosConfigKey: value},
 		})
@@ -313,8 +303,8 @@ var _ = Describe("ConfigMap", func() {
 
 		Expect(string(smbiosJson)).To(BeEquivalentTo(string(resultJson)))
 	},
-		table.Entry("when values set, should equal to result", `{"Family":"test","Product":"test", "Manufacturer":"None"}`, cmdv1.SMBios{Family: "test", Product: "test", Manufacturer: "None"}),
-		table.Entry("When an invalid smbios value is set, should return default values", `{"invalid":"invalid"}`, cmdv1.SMBios{Family: "KubeVirt", Product: "None", Manufacturer: "KubeVirt"}),
+		table.Entry("when values set, should equal to result", `{"Family":"test","Product":"test", "Manufacturer":"None"}`, &cmdv1.SMBios{Family: "test", Product: "test", Manufacturer: "None"}),
+		table.Entry("When an invalid smbios value is set, should return default values", `{"invalid":"invalid"}`, &cmdv1.SMBios{Family: "KubeVirt", Product: "None", Manufacturer: "KubeVirt"}),
 	)
 
 	table.DescribeTable(" when SELinuxLauncherType", func(value string, result string) {
@@ -339,7 +329,68 @@ var _ = Describe("ConfigMap", func() {
 		table.Entry("when unset, GetOVMFPath should return the default", "", virtconfig.DefaultOVMFPath),
 	)
 
-	table.DescribeTable("when kubevirt CR holds config", func(value string, result v1.KubeVirtConfiguration) {
+	It("verifies that SetConfigModifiedCallback works as expected ", func() {
+		var callbackSet1, callbackSet2 bool
+		callback1 := func() {
+			callbackSet1 = true
+		}
+		callback2 := func() {
+			callbackSet2 = true
+		}
+		KV := &v1.KubeVirt{
+			ObjectMeta: metav1.ObjectMeta{
+				ResourceVersion: rand.String(10),
+				Name:            "kubevirt",
+				Namespace:       "kubevirt",
+			},
+			Spec: v1.KubeVirtSpec{
+				Configuration: v1.KubeVirtConfiguration{
+					DeveloperConfiguration: &v1.DeveloperConfiguration{
+						LogVerbosity: &v1.LogVerbosity{
+							VirtLauncher: 3,
+						},
+					},
+				},
+			},
+			Status: v1.KubeVirtStatus{
+				Phase: v1.KubeVirtPhaseDeploying,
+			},
+		}
+		clusterConfig, _, _, kubeVirtInformer := testutils.NewFakeClusterConfigUsingKV(KV)
+		callbackSet1 = false
+		callbackSet2 = false
+		clusterConfig.SetConfigModifiedCallback(callback1)
+		clusterConfig.SetConfigModifiedCallback(callback2)
+
+		Expect(clusterConfig.GetVirtLauncherVerbosity()).To(Equal(uint(3)))
+		KV.Spec.Configuration.DeveloperConfiguration.LogVerbosity.VirtLauncher = 6
+		testutils.UpdateFakeKubeVirtClusterConfig(kubeVirtInformer, KV)
+		Expect(clusterConfig.GetVirtLauncherVerbosity()).To(Equal(uint(6)))
+		Eventually(func() bool {
+			return callbackSet1 && callbackSet2
+		}).Should(BeTrue())
+	})
+
+	It("Should still get GetPermittedHostDevices after invalid update", func() {
+		expectedDevices := `{"pciHostDevices":[{"pciVendorSelector":"10DE:1EB8","resourceName":"nvidia.com/TU104GL_Tesla_T4"}],"mediatedDevices":[{"mdevNameSelector":"GRID T4-1Q","resourceName":"nvidia.com/GRID_T4-1Q"}]}`
+		invalidPermittedHostDevicesConfig := "something wrong"
+		clusterConfig, store, _, _ := testutils.NewFakeClusterConfig(&kubev1.ConfigMap{})
+		testutils.UpdateFakeClusterConfig(store, &kubev1.ConfigMap{
+			Data: map[string]string{virtconfig.PermittedHostDevicesKey: expectedDevices},
+		})
+		clusterConfig.GetPermittedHostDevices()
+		testutils.UpdateFakeClusterConfig(store, &kubev1.ConfigMap{
+			Data: map[string]string{virtconfig.PermittedHostDevicesKey: invalidPermittedHostDevicesConfig},
+		})
+		hostdevs := clusterConfig.GetPermittedHostDevices()
+
+		hostdevsJson, err := json.Marshal(hostdevs)
+		Expect(err).ToNot(HaveOccurred())
+
+		Expect(string(hostdevsJson)).To(BeEquivalentTo(expectedDevices))
+	})
+
+	table.DescribeTable("when kubevirt CR holds config", func(value v1.KubeVirtConfiguration, getPart func(*v1.KubeVirtConfiguration) interface{}, result string) {
 		clusterConfig, _, _, _ := testutils.NewFakeClusterConfigUsingKV(&v1.KubeVirt{
 			ObjectMeta: metav1.ObjectMeta{
 				ResourceVersion: rand.String(10),
@@ -347,7 +398,7 @@ var _ = Describe("ConfigMap", func() {
 				Namespace:       "kubevirt",
 			},
 			Spec: v1.KubeVirtSpec{
-				Configuration: result,
+				Configuration: value,
 			},
 			Status: v1.KubeVirtStatus{
 				Phase: v1.KubeVirtPhaseDeploying,
@@ -355,28 +406,47 @@ var _ = Describe("ConfigMap", func() {
 		})
 
 		kubevirtConfig := clusterConfig.GetConfig()
-		kubevirtConfigJson, err := json.Marshal(kubevirtConfig)
+		partJson, err := json.Marshal(getPart(kubevirtConfig))
 		Expect(err).ToNot(HaveOccurred())
 
-		// applying the new config to resultJson
-		kubevirtConfig = clusterConfig.GetDefaultClusterConfig()
-		resultJson, err := json.Marshal(result)
-		err = json.Unmarshal(resultJson, kubevirtConfig)
-		Expect(err).ToNot(HaveOccurred())
-		resultJson, err = json.Marshal(kubevirtConfig)
-		Expect(err).ToNot(HaveOccurred())
-		Expect(string(kubevirtConfigJson)).To(BeEquivalentTo(string(resultJson)))
-
+		Expect(string(partJson)).To(BeEquivalentTo(result))
 	},
-		table.Entry("when values set, should equal to result",
-			`{"machineType":"test","cpuModel":"test"}`,
-			v1.KubeVirtConfiguration{CPURequest: &defaultCPURequest, MachineType: "test", CPUModel: "test"}),
-		table.Entry("when networkConfigurations set in kubevirt.yaml, should equal to result",
-			`{"network":{"defaultNetworkInterface":"test","permitSlirpInterface":"true","permitBridgeInterfaceOnPodNetwork":"true"}}`,
-			v1.KubeVirtConfiguration{CPURequest: &defaultCPURequest, NetworkConfiguration: &v1.NetworkConfiguration{NetworkInterface: "test", PermitSlirpInterface: true, PermitBridgeInterfaceOnPodNetwork: true}}),
-		table.Entry("when developerConfigurations set in kubevirt.yaml, should equal to result",
-			`{"dev":{"useEmulation":"true","featureGates":["test1","test2"],"nodeSelectors": {"test":"test"},"pvcTolerateLessSpaceUpToPercent":"5", "memoryOvercommit": "150"}}`,
-			v1.KubeVirtConfiguration{CPURequest: &defaultCPURequest, DeveloperConfiguration: &v1.DeveloperConfiguration{UseEmulation: true, FeatureGates: []string{"test1", "test2"}, NodeSelectors: map[string]string{"test": "test"}, LessPVCSpaceToleration: 5, MemoryOvercommit: 150}}))
+		table.Entry("when machineType set, should equal to result",
+			v1.KubeVirtConfiguration{
+				MachineType: "test",
+			},
+			func(c *v1.KubeVirtConfiguration) interface{} {
+				return c.MachineType
+			},
+			`"test"`),
+		table.Entry("when developerConfiguration set, should equal to result",
+			v1.KubeVirtConfiguration{
+				DeveloperConfiguration: &v1.DeveloperConfiguration{
+					FeatureGates:           []string{"test1", "test2"},
+					LessPVCSpaceToleration: 5,
+					MemoryOvercommit:       150,
+					NodeSelectors:          map[string]string{"test": "test"},
+					UseEmulation:           true,
+					CPUAllocationRatio:     25,
+				},
+			},
+			func(c *v1.KubeVirtConfiguration) interface{} {
+				return c.DeveloperConfiguration
+			},
+			`{"featureGates":["test1","test2"],"pvcTolerateLessSpaceUpToPercent":5,"memoryOvercommit":150,"nodeSelectors":{"test":"test"},"useEmulation":true,"cpuAllocationRatio":25,"logVerbosity":{"virtAPI":2,"virtController":2,"virtHandler":2,"virtLauncher":2,"virtOperator":2}}`),
+		table.Entry("when networkConfiguration set, should equal to result",
+			v1.KubeVirtConfiguration{
+				NetworkConfiguration: &v1.NetworkConfiguration{
+					NetworkInterface:                  "test",
+					PermitSlirpInterface:              pointer.BoolPtr(true),
+					PermitBridgeInterfaceOnPodNetwork: pointer.BoolPtr(false),
+				},
+			},
+			func(c *v1.KubeVirtConfiguration) interface{} {
+				return c.NetworkConfiguration
+			},
+			`{"defaultNetworkInterface":"test","permitSlirpInterface":true,"permitBridgeInterfaceOnPodNetwork":false}`),
+	)
 
 	It("should use configmap value over kubevirt configuration", func() {
 		clusterConfig, cminformer, _, _ := testutils.NewFakeClusterConfigUsingKV(&v1.KubeVirt{

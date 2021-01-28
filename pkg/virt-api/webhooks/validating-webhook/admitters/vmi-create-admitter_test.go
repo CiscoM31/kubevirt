@@ -40,6 +40,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/apimachinery/pkg/util/validation"
 	k8sfield "k8s.io/apimachinery/pkg/util/validation/field"
+	"k8s.io/utils/pointer"
 
 	v1 "kubevirt.io/client-go/api/v1"
 	"kubevirt.io/kubevirt/pkg/hooks"
@@ -49,27 +50,46 @@ import (
 )
 
 var _ = Describe("Validating VMICreate Admitter", func() {
-	config, configMapInformer, _, _ := testutils.NewFakeClusterConfig(&k8sv1.ConfigMap{})
+	kv := &v1.KubeVirt{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "kubevirt",
+			Namespace: "kubevirt",
+		},
+		Spec: v1.KubeVirtSpec{
+			Configuration: v1.KubeVirtConfiguration{
+				DeveloperConfiguration: &v1.DeveloperConfiguration{},
+			},
+		},
+		Status: v1.KubeVirtStatus{
+			Phase: v1.KubeVirtPhaseDeploying,
+		},
+	}
+	config, _, _, kvInformer := testutils.NewFakeClusterConfigUsingKV(kv)
 	vmiCreateAdmitter := &VMICreateAdmitter{ClusterConfig: config}
 
 	dnsConfigTestOption := "test"
 	enableFeatureGate := func(featureGate string) {
-		testutils.UpdateFakeClusterConfig(configMapInformer, &k8sv1.ConfigMap{
-			Data: map[string]string{virtconfig.FeatureGatesKey: featureGate},
-		})
+		kvConfig := kv.DeepCopy()
+		kvConfig.Spec.Configuration.DeveloperConfiguration.FeatureGates = []string{featureGate}
+		testutils.UpdateFakeKubeVirtClusterConfig(kvInformer, kvConfig)
 	}
 	disableFeatureGates := func() {
-		testutils.UpdateFakeClusterConfig(configMapInformer, &k8sv1.ConfigMap{})
+		testutils.UpdateFakeKubeVirtClusterConfig(kvInformer, kv)
 	}
 	enableSlirpInterface := func() {
-		testutils.UpdateFakeClusterConfig(configMapInformer, &k8sv1.ConfigMap{
-			Data: map[string]string{virtconfig.PermitSlirpInterface: "true"},
-		})
+		kvConfig := kv.DeepCopy()
+		kvConfig.Spec.Configuration.NetworkConfiguration = &v1.NetworkConfiguration{
+			PermitSlirpInterface: pointer.BoolPtr(true),
+		}
+		testutils.UpdateFakeKubeVirtClusterConfig(kvInformer, kvConfig)
 	}
 	disableBridgeOnPodNetwork := func() {
-		testutils.UpdateFakeClusterConfig(configMapInformer, &k8sv1.ConfigMap{
-			Data: map[string]string{virtconfig.PermitBridgeInterfaceOnPodNetwork: "false"},
-		})
+		kvConfig := kv.DeepCopy()
+		kvConfig.Spec.Configuration.NetworkConfiguration = &v1.NetworkConfiguration{
+			PermitBridgeInterfaceOnPodNetwork: pointer.BoolPtr(false),
+		}
+
+		testutils.UpdateFakeKubeVirtClusterConfig(kvInformer, kvConfig)
 	}
 
 	AfterEach(func() {
@@ -1114,6 +1134,30 @@ var _ = Describe("Validating VMICreate Admitter", func() {
 			Expect(causes[0].Field).To(Equal("fake.networks[1].name"))
 			Expect(causes[0].Message).To(Equal("Network with name \"default\" already exists, every network must have a unique name"))
 		})
+		It("should reject interface named with unsupported characters", func() {
+			vmi := v1.NewMinimalVMI("testvm")
+			vmi.Spec.Domain.Devices.Interfaces = []v1.Interface{
+				{
+					Name: "d.efault",
+					InterfaceBindingMethod: v1.InterfaceBindingMethod{
+						Bridge: &v1.InterfaceBridge{},
+					},
+				},
+			}
+			vmi.Spec.Networks = []v1.Network{
+				v1.Network{
+					Name: "d.efault",
+					NetworkSource: v1.NetworkSource{
+						Pod: &v1.PodNetwork{},
+					},
+				},
+			}
+
+			causes := ValidateVirtualMachineInstanceSpec(k8sfield.NewPath("fake"), &vmi.Spec, config)
+			Expect(len(causes)).To(Equal(1))
+			Expect(causes[0].Field).To(Equal("fake.domain.devices.interfaces[0].name"))
+			Expect(causes[0].Message).To(Equal("Network interface name can only contain alphabetical characters, numbers, dashes (-) or underscores (_)"))
+		})
 		It("should reject unassign multus network", func() {
 			vm := v1.NewMinimalVMI("testvm")
 			vm.Spec.Domain.Devices.Interfaces = []v1.Interface{*v1.DefaultBridgeNetworkInterface()}
@@ -1482,6 +1526,69 @@ var _ = Describe("Validating VMICreate Admitter", func() {
 			causes := ValidateVirtualMachineInstanceSpec(k8sfield.NewPath("fake"), &vm.Spec, config)
 			Expect(len(causes)).To(Equal(0))
 		})
+		It("should reject a macvtap interface on a network different than multus", func() {
+			vm := v1.NewMinimalVMI("testvm")
+			vm.Spec.Domain.Devices.Interfaces = []v1.Interface{v1.Interface{
+				Name: "default",
+				InterfaceBindingMethod: v1.InterfaceBindingMethod{
+					Macvtap: &v1.InterfaceMacvtap{},
+				},
+			}}
+
+			vm.Spec.Networks = []v1.Network{
+				v1.Network{
+					Name:          "default",
+					NetworkSource: v1.NetworkSource{Pod: &v1.PodNetwork{}},
+				},
+			}
+
+			enableFeatureGate(virtconfig.MacvtapGate)
+			causes := ValidateVirtualMachineInstanceSpec(k8sfield.NewPath("fake"), &vm.Spec, config)
+			Expect(causes).To(HaveLen(1))
+			Expect(causes[0].Field).To(Equal("fake.domain.devices.interfaces[0].name"))
+			Expect(causes[0].Message).To(Equal("Macvtap interface only implemented with Multus network"))
+		})
+		It("should reject a macvtap interface on a multus network when the feature is inactive", func() {
+			vm := v1.NewMinimalVMI("testvm")
+			vm.Spec.Domain.Devices.Interfaces = []v1.Interface{v1.Interface{
+				Name: "default",
+				InterfaceBindingMethod: v1.InterfaceBindingMethod{
+					Macvtap: &v1.InterfaceMacvtap{},
+				},
+			}}
+
+			vm.Spec.Networks = []v1.Network{
+				v1.Network{
+					Name:          "default",
+					NetworkSource: v1.NetworkSource{Multus: &v1.MultusNetwork{NetworkName: "test"}},
+				},
+			}
+
+			causes := ValidateVirtualMachineInstanceSpec(k8sfield.NewPath("fake"), &vm.Spec, config)
+			Expect(causes).To(HaveLen(1))
+			Expect(causes[0].Field).To(Equal("fake.domain.devices.interfaces[0].name"))
+			Expect(causes[0].Message).To(Equal("Macvtap feature gate is not enabled"))
+		})
+		It("should accept a macvtap interface on a multus network when the feature is active", func() {
+			vm := v1.NewMinimalVMI("testvm")
+			vm.Spec.Domain.Devices.Interfaces = []v1.Interface{v1.Interface{
+				Name: "default",
+				InterfaceBindingMethod: v1.InterfaceBindingMethod{
+					Macvtap: &v1.InterfaceMacvtap{},
+				},
+			}}
+
+			vm.Spec.Networks = []v1.Network{
+				v1.Network{
+					Name:          "default",
+					NetworkSource: v1.NetworkSource{Multus: &v1.MultusNetwork{NetworkName: "test"}},
+				},
+			}
+
+			enableFeatureGate(virtconfig.MacvtapGate)
+			causes := ValidateVirtualMachineInstanceSpec(k8sfield.NewPath("fake"), &vm.Spec, config)
+			Expect(causes).To(HaveLen(0))
+		})
 		It("should reject port out of range", func() {
 			enableSlirpInterface()
 			vm := v1.NewMinimalVMI("testvm")
@@ -1792,7 +1899,174 @@ var _ = Describe("Validating VMICreate Admitter", func() {
 			Expect(len(causes)).To(Equal(1))
 			Expect(causes[0].Field).To(Equal("fake.GPUs"))
 		})
+		It("should reject virtiofs filesystems when feature gate is disabled", func() {
+			vmi := v1.NewMinimalVMI("testvm")
+			guestMemory := resource.MustParse("64Mi")
 
+			vmi.Spec.Domain.Resources.Requests = k8sv1.ResourceList{
+				k8sv1.ResourceMemory: resource.MustParse("64Mi"),
+			}
+			vmi.Spec.Domain.Memory = &v1.Memory{
+				Hugepages: &v1.Hugepages{},
+				Guest:     &guestMemory,
+			}
+			vmi.Spec.Domain.Memory.Hugepages.PageSize = "2Mi"
+			vmi.Spec.Domain.Devices.Filesystems = []v1.Filesystem{
+				v1.Filesystem{
+					Name:     "sharednfstest",
+					Virtiofs: &v1.FilesystemVirtiofs{},
+				},
+			}
+
+			causes := ValidateVirtualMachineInstanceSpec(k8sfield.NewPath("fake"), &vmi.Spec, config)
+			Expect(len(causes)).To(Equal(1))
+			Expect(causes[0].Field).To(Equal("fake.Filesystems"))
+		})
+		It("should allow virtiofs filesystems when feature gate is enabled", func() {
+			enableFeatureGate(virtconfig.VirtIOFSGate)
+			vmi := v1.NewMinimalVMI("testvm")
+			guestMemory := resource.MustParse("64Mi")
+
+			vmi.Spec.Domain.Resources.Requests = k8sv1.ResourceList{
+				k8sv1.ResourceMemory: resource.MustParse("64Mi"),
+			}
+			vmi.Spec.Domain.Memory = &v1.Memory{Guest: &guestMemory}
+			vmi.Spec.Domain.Memory = &v1.Memory{
+				Hugepages: &v1.Hugepages{},
+				Guest:     &guestMemory,
+			}
+			vmi.Spec.Domain.Memory.Hugepages.PageSize = "2Mi"
+			vmi.Spec.Domain.Devices.Filesystems = []v1.Filesystem{
+				v1.Filesystem{
+					Name:     "sharednfstest",
+					Virtiofs: &v1.FilesystemVirtiofs{},
+				},
+			}
+
+			causes := ValidateVirtualMachineInstanceSpec(k8sfield.NewPath("fake"), &vmi.Spec, config)
+			Expect(len(causes)).To(Equal(0))
+		})
+
+		It("should reject GPU devices that are not permitted in the hostdev config", func() {
+			kvConfig := kv.DeepCopy()
+			kvConfig.Spec.Configuration.DeveloperConfiguration.FeatureGates = []string{virtconfig.GPUGate}
+			kvConfig.Spec.Configuration.PermittedHostDevices = &v1.PermittedHostDevices{
+				PciHostDevices: []v1.PciHostDevice{
+					{
+						PCIVendorSelector: "DEAD:BEEF",
+						ResourceName:      "example.org/deadbeef",
+					},
+				},
+			}
+			testutils.UpdateFakeKubeVirtClusterConfig(kvInformer, kvConfig)
+
+			vmi := v1.NewMinimalVMI("testvm")
+			vmi.Spec.Domain.Devices.GPUs = []v1.GPU{
+				v1.GPU{
+					Name:       "gpu1",
+					DeviceName: "example.org/deadbeef1",
+				},
+			}
+			causes := ValidateVirtualMachineInstanceSpec(k8sfield.NewPath("fake"), &vmi.Spec, config)
+			Expect(len(causes)).To(Equal(1))
+			Expect(causes[0].Field).To(Equal("fake.GPUs"))
+		})
+		It("should accept legacy GPU devices if PermittedHostDevices aren't set", func() {
+			kvConfig := kv.DeepCopy()
+			kvConfig.Spec.Configuration.DeveloperConfiguration.FeatureGates = []string{virtconfig.GPUGate}
+			testutils.UpdateFakeKubeVirtClusterConfig(kvInformer, kvConfig)
+
+			vmi := v1.NewMinimalVMI("testvm")
+			vmi.Spec.Domain.Devices.GPUs = []v1.GPU{
+				v1.GPU{
+					Name:       "gpu1",
+					DeviceName: "example.org/deadbeef",
+				},
+			}
+			causes := ValidateVirtualMachineInstanceSpec(k8sfield.NewPath("fake"), &vmi.Spec, config)
+			Expect(len(causes)).To(Equal(0))
+		})
+		It("should accept permitted GPU devices", func() {
+			kvConfig := kv.DeepCopy()
+			kvConfig.Spec.Configuration.DeveloperConfiguration.FeatureGates = []string{virtconfig.GPUGate}
+			kvConfig.Spec.Configuration.PermittedHostDevices = &v1.PermittedHostDevices{
+				PciHostDevices: []v1.PciHostDevice{
+					{
+						PCIVendorSelector: "DEAD:BEEF",
+						ResourceName:      "example.org/deadbeef",
+					},
+				},
+			}
+			testutils.UpdateFakeKubeVirtClusterConfig(kvInformer, kvConfig)
+
+			vmi := v1.NewMinimalVMI("testvm")
+			vmi.Spec.Domain.Devices.GPUs = []v1.GPU{
+				v1.GPU{
+					Name:       "gpu1",
+					DeviceName: "example.org/deadbeef",
+				},
+			}
+			causes := ValidateVirtualMachineInstanceSpec(k8sfield.NewPath("fake"), &vmi.Spec, config)
+			Expect(len(causes)).To(Equal(0))
+		})
+		It("should reject host devices when feature gate is disabled", func() {
+			vmi := v1.NewMinimalVMI("testvm")
+			vmi.Spec.Domain.Devices.HostDevices = []v1.HostDevice{
+				v1.HostDevice{
+					Name:       "hostdev1",
+					DeviceName: "vendor.com/hostdev_name",
+				},
+			}
+
+			causes := ValidateVirtualMachineInstanceSpec(k8sfield.NewPath("fake"), &vmi.Spec, config)
+			Expect(len(causes)).To(Equal(1))
+			Expect(causes[0].Field).To(Equal("fake.HostDevices"))
+		})
+		It("should reject host devices that are not permitted in the hostdev config", func() {
+			kvConfig := kv.DeepCopy()
+			kvConfig.Spec.Configuration.DeveloperConfiguration.FeatureGates = []string{virtconfig.HostDevicesGate}
+			kvConfig.Spec.Configuration.PermittedHostDevices = &v1.PermittedHostDevices{
+				PciHostDevices: []v1.PciHostDevice{
+					{
+						PCIVendorSelector: "DEAD:BEEF",
+						ResourceName:      "example.org/deadbeef",
+					},
+				},
+			}
+			testutils.UpdateFakeKubeVirtClusterConfig(kvInformer, kvConfig)
+			vmi := v1.NewMinimalVMI("testvm")
+			vmi.Spec.Domain.Devices.HostDevices = []v1.HostDevice{
+				v1.HostDevice{
+					Name:       "hostdev1",
+					DeviceName: "example.org/deadbeef1",
+				},
+			}
+			causes := ValidateVirtualMachineInstanceSpec(k8sfield.NewPath("fake"), &vmi.Spec, config)
+			Expect(len(causes)).To(Equal(1))
+			Expect(causes[0].Field).To(Equal("fake.HostDevices"))
+		})
+		It("should accept permitted host devices", func() {
+			kvConfig := kv.DeepCopy()
+			kvConfig.Spec.Configuration.DeveloperConfiguration.FeatureGates = []string{virtconfig.HostDevicesGate}
+			kvConfig.Spec.Configuration.PermittedHostDevices = &v1.PermittedHostDevices{
+				PciHostDevices: []v1.PciHostDevice{
+					{
+						PCIVendorSelector: "DEAD:BEEF",
+						ResourceName:      "example.org/deadbeef",
+					},
+				},
+			}
+			testutils.UpdateFakeKubeVirtClusterConfig(kvInformer, kvConfig)
+			vmi := v1.NewMinimalVMI("testvm")
+			vmi.Spec.Domain.Devices.HostDevices = []v1.HostDevice{
+				v1.HostDevice{
+					Name:       "hostdev1",
+					DeviceName: "example.org/deadbeef",
+				},
+			}
+			causes := ValidateVirtualMachineInstanceSpec(k8sfield.NewPath("fake"), &vmi.Spec, config)
+			Expect(len(causes)).To(Equal(0))
+		})
 		table.DescribeTable("Should accept valid DNSPolicy and DNSConfig",
 			func(dnsPolicy k8sv1.DNSPolicy, dnsConfig *k8sv1.PodDNSConfig) {
 				vmi := v1.NewMinimalVMI("testvmi")
@@ -1841,7 +2115,7 @@ var _ = Describe("Validating VMICreate Admitter", func() {
 				Nameservers: []string{"1.2.3.4"},
 				Searches:    []string{"1", "2", "3", "4", "5", "6", "7"},
 			}, 1, []string{"must not have more than 6 search paths"}),
-			table.Entry("with DNSPolicy None and seach domain exceeding max length", k8sv1.DNSNone, &k8sv1.PodDNSConfig{
+			table.Entry("with DNSPolicy None and search domain exceeding max length", k8sv1.DNSNone, &k8sv1.PodDNSConfig{
 				Nameservers: []string{"1.2.3.4"},
 				Searches:    []string{strings.Repeat("a", maxDNSSearchListChars/2), strings.Repeat("b", (maxDNSSearchListChars / 2))},
 			}, 1, []string{fmt.Sprintf("must not have more than %v characters (including spaces) in the search list", maxDNSSearchListChars)}),
@@ -1942,6 +2216,219 @@ var _ = Describe("Validating VMICreate Admitter", func() {
 			causes := ValidateVirtualMachineInstanceSpec(k8sfield.NewPath("fake"), &vmi.Spec, config)
 			Expect(len(causes)).To(Equal(1))
 			Expect(causes[0].Field).To(Equal("fake.domain.resources.requests.memory"))
+		})
+	})
+
+	Context("with AccessCredentials", func() {
+		It("should accept a valid ssh access credential with configdrive propagation", func() {
+			vmi := v1.NewMinimalVMI("testvmi")
+			vmi.Spec.Domain.Devices.Disks = append(vmi.Spec.Domain.Devices.Disks, v1.Disk{
+				Name: "testdisk",
+			})
+			vmi.Spec.Volumes = append(vmi.Spec.Volumes, v1.Volume{
+				Name: "testdisk",
+				VolumeSource: v1.VolumeSource{
+					CloudInitConfigDrive: &v1.CloudInitConfigDriveSource{UserData: " "},
+				},
+			})
+
+			vmi.Spec.AccessCredentials = []v1.AccessCredential{
+				{
+					SSHPublicKey: &v1.SSHPublicKeyAccessCredential{
+						Source: v1.SSHPublicKeyAccessCredentialSource{
+							Secret: &v1.AccessCredentialSecretSource{
+								SecretName: "my-pkey",
+							},
+						},
+						PropagationMethod: v1.SSHPublicKeyAccessCredentialPropagationMethod{
+							ConfigDrive: &v1.ConfigDriveSSHPublicKeyAccessCredentialPropagation{},
+						},
+					},
+				},
+			}
+			causes := ValidateVirtualMachineInstanceSpec(k8sfield.NewPath("fake"), &vmi.Spec, config)
+			Expect(len(causes)).To(Equal(0))
+		})
+
+		It("should accept a valid ssh access credential with qemu agent propagation", func() {
+			vmi := v1.NewMinimalVMI("testvmi")
+
+			vmi.Spec.AccessCredentials = []v1.AccessCredential{
+				{
+					SSHPublicKey: &v1.SSHPublicKeyAccessCredential{
+						Source: v1.SSHPublicKeyAccessCredentialSource{
+							Secret: &v1.AccessCredentialSecretSource{
+								SecretName: "my-pkey",
+							},
+						},
+						PropagationMethod: v1.SSHPublicKeyAccessCredentialPropagationMethod{
+							QemuGuestAgent: &v1.QemuGuestAgentSSHPublicKeyAccessCredentialPropagation{
+								Users: []string{"madeup"},
+							},
+						},
+					},
+				},
+			}
+			causes := ValidateVirtualMachineInstanceSpec(k8sfield.NewPath("fake"), &vmi.Spec, config)
+			Expect(len(causes)).To(Equal(0))
+		})
+
+		It("should accept a valid user password access credential with qemu agent propagation", func() {
+			vmi := v1.NewMinimalVMI("testvmi")
+
+			vmi.Spec.AccessCredentials = []v1.AccessCredential{
+				{
+					UserPassword: &v1.UserPasswordAccessCredential{
+						Source: v1.UserPasswordAccessCredentialSource{
+							Secret: &v1.AccessCredentialSecretSource{
+								SecretName: "my-pkey",
+							},
+						},
+						PropagationMethod: v1.UserPasswordAccessCredentialPropagationMethod{
+							QemuGuestAgent: &v1.QemuGuestAgentUserPasswordAccessCredentialPropagation{},
+						},
+					},
+				},
+			}
+			causes := ValidateVirtualMachineInstanceSpec(k8sfield.NewPath("fake"), &vmi.Spec, config)
+			Expect(len(causes)).To(Equal(0))
+		})
+
+		It("should reject a configDrive ssh access credential when no configDrive volume exists", func() {
+			vmi := v1.NewMinimalVMI("testvmi")
+			vmi.Spec.Domain.Devices.Disks = append(vmi.Spec.Domain.Devices.Disks, v1.Disk{
+				Name: "testdisk",
+			})
+
+			vmi.Spec.Volumes = append(vmi.Spec.Volumes, v1.Volume{
+				Name: "testdisk",
+				VolumeSource: v1.VolumeSource{
+					CloudInitNoCloud: &v1.CloudInitNoCloudSource{UserData: " "},
+				},
+			})
+
+			vmi.Spec.AccessCredentials = []v1.AccessCredential{
+				{
+					SSHPublicKey: &v1.SSHPublicKeyAccessCredential{
+						Source: v1.SSHPublicKeyAccessCredentialSource{
+							Secret: &v1.AccessCredentialSecretSource{
+								SecretName: "my-pkey",
+							},
+						},
+						PropagationMethod: v1.SSHPublicKeyAccessCredentialPropagationMethod{
+							ConfigDrive: &v1.ConfigDriveSSHPublicKeyAccessCredentialPropagation{},
+						},
+					},
+				},
+			}
+			causes := ValidateVirtualMachineInstanceSpec(k8sfield.NewPath("fake"), &vmi.Spec, config)
+			Expect(len(causes)).To(Equal(1))
+		})
+		It("should reject a ssh access credential without a source", func() {
+			vmi := v1.NewMinimalVMI("testvmi")
+			vmi.Spec.Domain.Devices.Disks = append(vmi.Spec.Domain.Devices.Disks, v1.Disk{
+				Name: "testdisk",
+			})
+			vmi.Spec.Volumes = append(vmi.Spec.Volumes, v1.Volume{
+				Name: "testdisk",
+				VolumeSource: v1.VolumeSource{
+					CloudInitConfigDrive: &v1.CloudInitConfigDriveSource{UserData: " "},
+				},
+			})
+
+			vmi.Spec.AccessCredentials = []v1.AccessCredential{
+				{
+					SSHPublicKey: &v1.SSHPublicKeyAccessCredential{
+						PropagationMethod: v1.SSHPublicKeyAccessCredentialPropagationMethod{
+							ConfigDrive: &v1.ConfigDriveSSHPublicKeyAccessCredentialPropagation{},
+						},
+					},
+				},
+			}
+			causes := ValidateVirtualMachineInstanceSpec(k8sfield.NewPath("fake"), &vmi.Spec, config)
+			Expect(len(causes)).To(Equal(1))
+		})
+
+		It("should reject a ssh access credential with qemu agent propagation with no authorized key files listed", func() {
+			vmi := v1.NewMinimalVMI("testvmi")
+			vmi.Spec.AccessCredentials = []v1.AccessCredential{
+				{
+					SSHPublicKey: &v1.SSHPublicKeyAccessCredential{
+						Source: v1.SSHPublicKeyAccessCredentialSource{
+							Secret: &v1.AccessCredentialSecretSource{
+								SecretName: "my-pkey",
+							},
+						},
+						PropagationMethod: v1.SSHPublicKeyAccessCredentialPropagationMethod{
+							QemuGuestAgent: &v1.QemuGuestAgentSSHPublicKeyAccessCredentialPropagation{},
+						},
+					},
+				},
+			}
+			causes := ValidateVirtualMachineInstanceSpec(k8sfield.NewPath("fake"), &vmi.Spec, config)
+			Expect(len(causes)).To(Equal(1))
+		})
+
+		It("should reject a userpassword access credential without a source", func() {
+			vmi := v1.NewMinimalVMI("testvmi")
+			vmi.Spec.AccessCredentials = []v1.AccessCredential{
+				{
+					UserPassword: &v1.UserPasswordAccessCredential{
+						PropagationMethod: v1.UserPasswordAccessCredentialPropagationMethod{
+							QemuGuestAgent: &v1.QemuGuestAgentUserPasswordAccessCredentialPropagation{},
+						},
+					},
+				},
+			}
+			causes := ValidateVirtualMachineInstanceSpec(k8sfield.NewPath("fake"), &vmi.Spec, config)
+
+			fmt.Printf("%v\n", causes)
+
+			Expect(len(causes)).To(Equal(1))
+		})
+
+		It("should reject a ssh access credential without a propagationMethod", func() {
+			vmi := v1.NewMinimalVMI("testvmi")
+			vmi.Spec.Domain.Devices.Disks = append(vmi.Spec.Domain.Devices.Disks, v1.Disk{
+				Name: "testdisk",
+			})
+			vmi.Spec.Volumes = append(vmi.Spec.Volumes, v1.Volume{
+				Name: "testdisk",
+				VolumeSource: v1.VolumeSource{
+					CloudInitConfigDrive: &v1.CloudInitConfigDriveSource{UserData: " "},
+				},
+			})
+
+			vmi.Spec.AccessCredentials = []v1.AccessCredential{
+				{
+					SSHPublicKey: &v1.SSHPublicKeyAccessCredential{
+						Source: v1.SSHPublicKeyAccessCredentialSource{
+							Secret: &v1.AccessCredentialSecretSource{
+								SecretName: "my-pkey",
+							},
+						},
+					},
+				},
+			}
+			causes := ValidateVirtualMachineInstanceSpec(k8sfield.NewPath("fake"), &vmi.Spec, config)
+			Expect(len(causes)).To(Equal(1))
+		})
+
+		It("should reject a userpassword credential without a propagationMethod", func() {
+			vmi := v1.NewMinimalVMI("testvmi")
+			vmi.Spec.AccessCredentials = []v1.AccessCredential{
+				{
+					UserPassword: &v1.UserPasswordAccessCredential{
+						Source: v1.UserPasswordAccessCredentialSource{
+							Secret: &v1.AccessCredentialSecretSource{
+								SecretName: "my-pkey",
+							},
+						},
+					},
+				},
+			}
+			causes := ValidateVirtualMachineInstanceSpec(k8sfield.NewPath("fake"), &vmi.Spec, config)
+			Expect(len(causes)).To(Equal(1))
 		})
 	})
 
@@ -2344,7 +2831,7 @@ var _ = Describe("Validating VMICreate Admitter", func() {
 			})
 
 			causes := validateVolumes(k8sfield.NewPath("fake"), vmi.Spec.Volumes, config)
-			Expect(len(causes)).To(Equal(1))
+			Expect(causes).To(HaveLen(1))
 		})
 
 		It("should accept hostDisk volumes if the feature gate is enabled", func() {
@@ -2362,8 +2849,73 @@ var _ = Describe("Validating VMICreate Admitter", func() {
 			})
 
 			causes := validateVolumes(k8sfield.NewPath("fake"), vmi.Spec.Volumes, config)
-			Expect(len(causes)).To(Equal(0))
+			Expect(causes).To(BeEmpty())
 		})
+
+		It("should reject CloudInitNoCloud volume if either userData or networkData is missing", func() {
+			vmi := v1.NewMinimalVMI("testvmi")
+			vmi.Spec.Domain.Devices.Disks = append(vmi.Spec.Domain.Devices.Disks, v1.Disk{
+				Name: "testdisk",
+			})
+
+			vmi.Spec.Volumes = append(vmi.Spec.Volumes, v1.Volume{
+				Name: "testdisk",
+				VolumeSource: v1.VolumeSource{
+					CloudInitNoCloud: &v1.CloudInitNoCloudSource{},
+				},
+			})
+			causes := validateVolumes(k8sfield.NewPath("fake"), vmi.Spec.Volumes, config)
+			Expect(causes).To(HaveLen(1))
+		})
+
+		It("should accept CloudInitNoCloud volume if it has only a userData source", func() {
+			vmi := v1.NewMinimalVMI("testvmi")
+			vmi.Spec.Domain.Devices.Disks = append(vmi.Spec.Domain.Devices.Disks, v1.Disk{
+				Name: "testdisk",
+			})
+
+			vmi.Spec.Volumes = append(vmi.Spec.Volumes, v1.Volume{
+				Name: "testdisk",
+				VolumeSource: v1.VolumeSource{
+					CloudInitNoCloud: &v1.CloudInitNoCloudSource{UserData: " "},
+				},
+			})
+			causes := validateVolumes(k8sfield.NewPath("fake"), vmi.Spec.Volumes, config)
+			Expect(causes).To(BeEmpty())
+		})
+
+		It("should accept CloudInitNoCloud volume if it has only a networkData source", func() {
+			vmi := v1.NewMinimalVMI("testvmi")
+			vmi.Spec.Domain.Devices.Disks = append(vmi.Spec.Domain.Devices.Disks, v1.Disk{
+				Name: "testdisk",
+			})
+
+			vmi.Spec.Volumes = append(vmi.Spec.Volumes, v1.Volume{
+				Name: "testdisk",
+				VolumeSource: v1.VolumeSource{
+					CloudInitNoCloud: &v1.CloudInitNoCloudSource{NetworkData: " "},
+				},
+			})
+			causes := validateVolumes(k8sfield.NewPath("fake"), vmi.Spec.Volumes, config)
+			Expect(causes).To(BeEmpty())
+		})
+
+		It("should accept CloudInitNoCloud volume if it has both userData and networkData sources", func() {
+			vmi := v1.NewMinimalVMI("testvmi")
+			vmi.Spec.Domain.Devices.Disks = append(vmi.Spec.Domain.Devices.Disks, v1.Disk{
+				Name: "testdisk",
+			})
+
+			vmi.Spec.Volumes = append(vmi.Spec.Volumes, v1.Volume{
+				Name: "testdisk",
+				VolumeSource: v1.VolumeSource{
+					CloudInitNoCloud: &v1.CloudInitNoCloudSource{UserData: " ", NetworkData: " "},
+				},
+			})
+			causes := validateVolumes(k8sfield.NewPath("fake"), vmi.Spec.Volumes, config)
+			Expect(causes).To(BeEmpty())
+		})
+
 	})
 
 	Context("with bootloader", func() {
@@ -2560,6 +3112,7 @@ var _ = Describe("Function getNumberOfPodInterfaces()", func() {
 				Pod:    &v1.PodNetwork{},
 				Multus: &v1.MultusNetwork{NetworkName: "testnet1"},
 			},
+			Name: "testnet",
 		}
 		iface1 := v1.Interface{Name: net1.Name}
 		spec.Networks = []v1.Network{net1}

@@ -33,8 +33,8 @@ type Option func(vmi *kvirtv1.VirtualMachineInstance)
 
 // New instantiates a new VMI configuration,
 // building its properties based on the specified With* options.
-func New(namespace, name string, opts ...Option) *kvirtv1.VirtualMachineInstance {
-	vmi := baseVmi(namespace, name)
+func New(name string, opts ...Option) *kvirtv1.VirtualMachineInstance {
+	vmi := baseVmi(name)
 
 	for _, f := range opts {
 		f(vmi)
@@ -43,9 +43,9 @@ func New(namespace, name string, opts ...Option) *kvirtv1.VirtualMachineInstance
 	return vmi
 }
 
-// RandName returns a random name by concatanating the given name with a random string.
+// RandName returns a random name by concatenating the given name with a hyphen and a random string.
 func RandName(name string) string {
-	return name + rand.String(48)
+	return name + "-" + rand.String(5)
 }
 
 // WithTerminationGracePeriod specifies the termination grace period in seconds.
@@ -71,8 +71,8 @@ func WithResourceMemory(value string) Option {
 	}
 }
 
-func baseVmi(namespace, name string) *kvirtv1.VirtualMachineInstance {
-	vmi := kvirtv1.NewVMIReferenceFromNameWithNS(namespace, name)
+func baseVmi(name string) *kvirtv1.VirtualMachineInstance {
+	vmi := kvirtv1.NewVMIReferenceFromNameWithNS("", name)
 	vmi.Spec = kvirtv1.VirtualMachineInstanceSpec{Domain: kvirtv1.DomainSpec{}}
 	vmi.TypeMeta = k8smetav1.TypeMeta{
 		APIVersion: kvirtv1.GroupVersion.String(),

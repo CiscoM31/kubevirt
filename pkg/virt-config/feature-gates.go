@@ -31,8 +31,12 @@ const (
 	HypervStrictCheckGate = "HypervStrictCheck"
 	SidecarGate           = "Sidecar"
 	GPUGate               = "GPU"
+	HostDevicesGate       = "HostDevices"
 	SnapshotGate          = "Snapshot"
+	HotplugVolumesGate    = "HotplugVolumes"
 	HostDiskGate          = "HostDisk"
+	VirtIOFSGate          = "ExperimentalVirtiofsSupport"
+	MacvtapGate           = "Macvtap"
 )
 
 func (c *ClusterConfig) isFeatureGateEnabled(featureGate string) bool {
@@ -76,6 +80,22 @@ func (config *ClusterConfig) SnapshotEnabled() bool {
 	return config.isFeatureGateEnabled(SnapshotGate)
 }
 
+func (config *ClusterConfig) HotplugVolumesEnabled() bool {
+	return config.isFeatureGateEnabled(HotplugVolumesGate)
+}
+
 func (config *ClusterConfig) HostDiskEnabled() bool {
 	return config.isFeatureGateEnabled(HostDiskGate)
+}
+
+func (config *ClusterConfig) VirtiofsEnabled() bool {
+	return config.isFeatureGateEnabled(VirtIOFSGate)
+}
+
+func (config *ClusterConfig) MacvtapEnabled() bool {
+	return config.isFeatureGateEnabled(MacvtapGate)
+}
+
+func (config *ClusterConfig) HostDevicesPassthroughEnabled() bool {
+	return config.isFeatureGateEnabled(HostDevicesGate)
 }

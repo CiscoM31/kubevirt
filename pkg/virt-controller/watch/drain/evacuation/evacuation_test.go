@@ -94,6 +94,15 @@ var _ = Describe("Evacuation", func() {
 		syncCaches(stop)
 	})
 
+	Context("migration object creation", func() {
+		It("should have expected values and annotations", func() {
+			migration := evacuation.GenerateNewMigration("my-vmi", "somenode")
+			Expect(migration.Spec.VMIName).To(Equal("my-vmi"))
+			Expect(migration.Annotations[v1.EvacuationMigrationAnnotation]).To(Equal("somenode"))
+		})
+
+	})
+
 	Context("no node eviction in progress", func() {
 
 		It("should do nothing with VMIs", func() {
@@ -212,6 +221,131 @@ var _ = Describe("Evacuation", func() {
 			controller.Execute()
 			testutils.ExpectEvent(recorder, evacuation.SuccessfulCreateVirtualMachineInstanceMigrationReason)
 		})
+	})
+
+	Context("VMIs marked for eviction", func() {
+
+		It("Should evict the VMI", func() {
+			node := newNode("foo")
+			addNode(node)
+			vmi := newVirtualMachine("testvm", node.Name)
+			vmi.Spec.EvictionStrategy = newEvictionStrategy()
+			vmi.Status.EvacuationNodeName = node.Name
+			vmiFeeder.Add(vmi)
+			migrationInterface.EXPECT().Create(gomock.Any()).Return(&v1.VirtualMachineInstanceMigration{ObjectMeta: v13.ObjectMeta{Name: "something"}}, nil)
+			controller.Execute()
+			testutils.ExpectEvent(recorder, evacuation.SuccessfulCreateVirtualMachineInstanceMigrationReason)
+		})
+
+		It("Should record a warning on a not migratable VMI", func() {
+			node := newNode("foo")
+			addNode(node)
+			vmi := newVirtualMachine("testvm", node.Name)
+			vmi.Spec.EvictionStrategy = newEvictionStrategy()
+			vmi.Status.Conditions = []v1.VirtualMachineInstanceCondition{
+				{
+					Type:   v1.VirtualMachineInstanceIsMigratable,
+					Status: v12.ConditionFalse,
+				},
+			}
+			vmi.Status.Conditions = []v1.VirtualMachineInstanceCondition{
+				{
+					Type:   v1.VirtualMachineInstanceIsMigratable,
+					Status: v12.ConditionFalse,
+				},
+			}
+			vmi.Status.EvacuationNodeName = vmi.Status.NodeName
+			vmiFeeder.Add(vmi)
+			controller.Execute()
+			testutils.ExpectEvent(recorder, evacuation.FailedCreateVirtualMachineInstanceMigrationReason)
+		})
+
+		It("Should not evict VMI if max migrations are in progress", func() {
+			node := newNode("foo")
+			addNode(node)
+			vmi := newVirtualMachine("testvm", node.Name)
+			vmi.Spec.EvictionStrategy = newEvictionStrategy()
+			vmi.Status.Conditions = []v1.VirtualMachineInstanceCondition{
+				{
+					Type:   v1.VirtualMachineInstanceIsMigratable,
+					Status: v12.ConditionFalse,
+				},
+			}
+			vmi.Status.EvacuationNodeName = node.Name
+			vmiFeeder.Add(vmi)
+			migrationFeeder.Add(newMigration("mig1", vmi.Name, v1.MigrationRunning))
+			migrationFeeder.Add(newMigration("mig2", vmi.Name, v1.MigrationRunning))
+			migrationFeeder.Add(newMigration("mig3", vmi.Name, v1.MigrationRunning))
+			migrationFeeder.Add(newMigration("mig4", vmi.Name, v1.MigrationRunning))
+			migrationFeeder.Add(newMigration("mig5", vmi.Name, v1.MigrationRunning))
+			controller.Execute()
+		})
+
+		It("Should start a migration when we have a free spot", func() {
+			node := newNode("foo")
+			addNode(node)
+			vmi := newVirtualMachine("testvm", node.Name)
+			vmi.Status.Conditions = []v1.VirtualMachineInstanceCondition{
+				{
+					Type:   v1.VirtualMachineInstanceIsMigratable,
+					Status: v12.ConditionTrue,
+				},
+			}
+			vmi.Spec.EvictionStrategy = newEvictionStrategy()
+			vmi.Status.EvacuationNodeName = node.Name
+			vmiFeeder.Add(vmi)
+
+			vmi1 := newVirtualMachine("testvm1", node.Name)
+			vmi1.Spec.EvictionStrategy = newEvictionStrategy()
+			vmi1.Status.Conditions = []v1.VirtualMachineInstanceCondition{
+				{
+					Type:   v1.VirtualMachineInstanceIsMigratable,
+					Status: v12.ConditionTrue,
+				},
+			}
+			vmi1.Status.EvacuationNodeName = node.Name
+			vmiFeeder.Add(vmi1)
+
+			migration := newMigration("mig1", vmi.Name, v1.MigrationRunning)
+			migrationFeeder.Add(migration)
+			migrationFeeder.Add(newMigration("mig2", vmi.Name, v1.MigrationRunning))
+			migrationFeeder.Add(newMigration("mig3", vmi.Name, v1.MigrationRunning))
+			migrationFeeder.Add(newMigration("mig4", vmi.Name, v1.MigrationRunning))
+			migrationFeeder.Add(newMigration("mig5", vmi.Name, v1.MigrationRunning))
+
+			controller.Execute()
+
+			migration.Status.Phase = v1.MigrationSucceeded
+			migrationFeeder.Modify(migration)
+
+			migrationInterface.EXPECT().Create(gomock.Any()).
+				Return(&v1.VirtualMachineInstanceMigration{ObjectMeta: v13.ObjectMeta{Name: "something"}}, nil)
+			controller.Execute()
+			testutils.ExpectEvent(recorder, evacuation.SuccessfulCreateVirtualMachineInstanceMigrationReason)
+		})
+
+		It("Should not create a migration if one is already in progress", func() {
+			node := newNode("foo")
+			addNode(node)
+			vmi := newVirtualMachine("testvm", node.Name)
+			vmi.Status.Conditions = []v1.VirtualMachineInstanceCondition{
+				{
+					Type:   v1.VirtualMachineInstanceIsMigratable,
+					Status: v12.ConditionTrue,
+				},
+			}
+			vmi.Spec.EvictionStrategy = newEvictionStrategy()
+			vmi.Status.EvacuationNodeName = node.Name
+			vmiFeeder.Add(vmi)
+
+			migration := newMigration("mig1", vmi.Name, v1.MigrationRunning)
+			migration.Status.Phase = v1.MigrationRunning
+
+			migrationFeeder.Add(migration)
+
+			controller.Execute()
+		})
+
 	})
 
 	AfterEach(func() {

@@ -75,6 +75,11 @@ type MountInfo struct {
 	MountPoint           string
 }
 
+// The unit test suite overwrites this function
+var mountInfoFunc = func(pid int) string {
+	return fmt.Sprintf("/proc/%d/mountinfo", pid)
+}
+
 type socketBasedIsolationDetector struct {
 	socketDir  string
 	controller []string
@@ -113,29 +118,13 @@ func (s *socketBasedIsolationDetector) Whitelist(controller []string) PodIsolati
 }
 
 func (s *socketBasedIsolationDetector) Detect(vm *v1.VirtualMachineInstance) (IsolationResult, error) {
-	var pid int
-	var slice string
-	var err error
-	var controller []string
-
 	// Look up the socket of the virt-launcher Pod which was created for that VM, and extract the PID from it
 	socket, err := cmdclient.FindSocketOnHost(vm)
 	if err != nil {
 		return nil, err
 	}
 
-	if pid, err = s.getPid(socket); err != nil {
-		log.Log.Object(vm).Reason(err).Errorf("Could not get owner Pid of socket %s", socket)
-		return nil, err
-	}
-
-	// Look up the cgroup slice based on the whitelisted controller
-	if controller, slice, err = s.getSlice(pid); err != nil {
-		log.Log.Object(vm).Reason(err).Errorf("Could not get cgroup slice for Pid %d", pid)
-		return nil, err
-	}
-
-	return NewIsolationResult(pid, slice, controller), nil
+	return s.DetectForSocket(vm, socket)
 }
 
 // standard golang libraries don't provide API to set runtime limits
@@ -144,7 +133,7 @@ func prLimit(pid int, limit uintptr, rlimit *unix.Rlimit) error {
 	_, _, errno := unix.RawSyscall6(unix.SYS_PRLIMIT64,
 		uintptr(pid),
 		limit,
-		uintptr(unsafe.Pointer(rlimit)),
+		uintptr(unsafe.Pointer(rlimit)), // #nosec used in unix RawSyscall6
 		0, 0, 0)
 	if errno != 0 {
 		return fmt.Errorf("Error setting prlimit: %v", errno)
@@ -154,7 +143,7 @@ func prLimit(pid int, limit uintptr, rlimit *unix.Rlimit) error {
 
 func (s *socketBasedIsolationDetector) AdjustResources(vm *v1.VirtualMachineInstance) error {
 	// only VFIO attached domains require MEMLOCK adjustment
-	if !util.IsSRIOVVmi(vm) && !util.IsGPUVMI(vm) {
+	if !util.IsVFIOVMI(vm) {
 		return nil
 	}
 
@@ -275,16 +264,15 @@ func (r *realIsolationResult) MountNamespace() string {
 }
 
 func (r *realIsolationResult) mountInfo() string {
-	return fmt.Sprintf("/proc/%d/mountinfo", r.pid)
+	return mountInfoFunc(r.pid)
 }
 
-// MountInfoRoot returns information about the root entry in /proc/mountinfo
-func (r *realIsolationResult) MountInfoRoot() (*MountInfo, error) {
-	in, err := os.Open(r.mountInfo())
+func forEachRecord(filepath string, f func(record []string) bool) error {
+	in, err := os.Open(filepath)
 	if err != nil {
-		return nil, fmt.Errorf("could not open mountinfo: %v", err)
+		return fmt.Errorf("could not open file %s: %v", filepath, err)
 	}
-	defer in.Close()
+	defer util.CloseIOAndCheckErr(in, nil)
 	c := csv.NewReader(in)
 	c.Comma = ' '
 	c.LazyQuotes = true
@@ -296,101 +284,108 @@ func (r *realIsolationResult) MountInfoRoot() (*MountInfo, error) {
 		if err != nil {
 			if e, ok := err.(*csv.ParseError); ok {
 				if e.Err != csv.ErrFieldCount {
-					return nil, err
+					return err
 				}
 			} else {
-				return nil, err
+				return err
 			}
 		}
 
+		if f(record) {
+			break
+		}
+	}
+	return nil
+}
+
+// MountInfoRoot returns information about the root entry in /proc/mountinfo
+func (r *realIsolationResult) MountInfoRoot() (mountInfo *MountInfo, err error) {
+	if err = forEachRecord(r.mountInfo(), func(record []string) bool {
 		if record[4] == "/" {
-			return &MountInfo{
+			mountInfo = &MountInfo{
 				DeviceContainingFile: record[2],
 				Root:                 record[3],
 				MountPoint:           record[4],
-			}, nil
+			}
 		}
+		return mountInfo != nil
+	}); err != nil {
+		return nil, err
 	}
-
-	//impossible
-	return nil, fmt.Errorf("process has no root entry")
+	if mountInfo == nil {
+		//impossible
+		err = fmt.Errorf("process has no root entry")
+	}
+	return
 }
 
 // IsMounted checks if a path in the mount namespace of a
 // given process isolation result is a mount point. Works with symlinks.
-func (r *realIsolationResult) IsMounted(mountPoint string) (bool, error) {
-	mountPoint, err := filepath.EvalSymlinks(mountPoint)
+func (r *realIsolationResult) IsMounted(mountPoint string) (isMounted bool, err error) {
+	mountPoint, err = filepath.EvalSymlinks(mountPoint)
 	if os.IsNotExist(err) {
 		return false, nil
 	}
 	if err != nil {
 		return false, fmt.Errorf("could not resolve mount point path: %v", err)
 	}
-	in, err := os.Open(r.mountInfo())
-	if err != nil {
-		return false, fmt.Errorf("could not open mountinfo: %v", err)
+	if err = forEachRecord(r.mountInfo(), func(record []string) bool {
+		isMounted = record[4] == mountPoint
+		return isMounted
+	}); err != nil {
+		return false, err
 	}
-	defer in.Close()
-	c := csv.NewReader(in)
-	c.Comma = ' '
-	c.LazyQuotes = true
-	for {
-		record, err := c.Read()
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			if e, ok := err.(*csv.ParseError); ok {
-				if e.Err != csv.ErrFieldCount {
-					return false, err
-				}
-			} else {
-				return false, err
-			}
-		}
+	return
+}
 
-		if record[4] == mountPoint {
+// IsBlockDevice check if the path given is a block device or not.
+func (r *realIsolationResult) IsBlockDevice(path string) (bool, error) {
+	fileInfo, err := os.Stat(path)
+	if err == nil {
+		if !fileInfo.IsDir() && (fileInfo.Mode()&os.ModeDevice) != 0 {
 			return true, nil
 		}
+		return false, fmt.Errorf("found %v, but it's not a block device", path)
 	}
-	return false, nil
+	return false, fmt.Errorf("error checking for block device: %v", err)
 }
 
 // ParentMountInfoFor takes the mount info from a container, and looks the corresponding
 // entry in /proc/mountinfo of the isolation result of the given process.
-func (r *realIsolationResult) ParentMountInfoFor(mountInfo *MountInfo) (*MountInfo, error) {
-	in, err := os.Open(r.mountInfo())
-	if err != nil {
-		return nil, fmt.Errorf("could not open mountinfo: %v", err)
-	}
-	defer in.Close()
-	c := csv.NewReader(in)
-	c.Comma = ' '
-	c.LazyQuotes = true
-	for {
-		record, err := c.Read()
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			if e, ok := err.(*csv.ParseError); ok {
-				if e.Err != csv.ErrFieldCount {
-					return nil, err
-				}
-			} else {
-				return nil, err
-			}
-		}
-
+func (r *realIsolationResult) ParentMountInfoFor(mountInfo *MountInfo) (parentMountInfo *MountInfo, err error) {
+	if err = forEachRecord(r.mountInfo(), func(record []string) bool {
 		if record[2] == mountInfo.DeviceContainingFile {
-			return &MountInfo{
+			parentMountInfo = &MountInfo{
 				DeviceContainingFile: record[2],
 				Root:                 record[3],
 				MountPoint:           record[4],
-			}, nil
+			}
 		}
+		return parentMountInfo != nil
+	}); err != nil {
+		return nil, err
 	}
-	return nil, fmt.Errorf("no parent entry for %v found in the mount namespace of %d", mountInfo.DeviceContainingFile, r.pid)
+	if parentMountInfo == nil {
+		err = fmt.Errorf("no parent entry for %v found in the mount namespace of %d", mountInfo.DeviceContainingFile, r.pid)
+	}
+	return
+}
+
+// FullPath takes the mount info from a container and composes the full path starting from
+// the root mount of the given process.
+func (r *realIsolationResult) FullPath(mountInfo *MountInfo) (path string, err error) {
+	// Handle btrfs subvolumes: mountInfo.Root seems to already provide the needed path
+	if strings.HasPrefix(mountInfo.Root, "/@") {
+		path = filepath.Join(r.MountRoot(), strings.TrimPrefix(mountInfo.Root, "/@"))
+		return
+	}
+
+	parentMountInfo, err := r.ParentMountInfoFor(mountInfo)
+	if err != nil {
+		return
+	}
+	path = filepath.Join(r.MountRoot(), parentMountInfo.Root, parentMountInfo.MountPoint, mountInfo.Root)
+	return
 }
 
 func (r *realIsolationResult) NetNamespace() string {
@@ -438,8 +433,7 @@ func (s *socketBasedIsolationDetector) getSlice(pid int) (controller []string, s
 	if err != nil {
 		return
 	}
-	defer cgroups.Close()
-
+	defer util.CloseIOAndCheckErr(cgroups, nil)
 	scanner := bufio.NewScanner(cgroups)
 	for scanner.Scan() {
 		cgEntry := strings.SplitN(scanner.Text(), ":", 3)

@@ -97,10 +97,10 @@ var _ = Describe("CloudInit", func() {
 	})
 	Describe("Data Model", func() {
 		Context("verify meta-data model", func() {
-			It("shuold match the generated devices metadata", func() {
+			It("should match the generated configdrive metadata", func() {
 				exampleJSONParsed := `{
-  "instance-id": "fake.fake-namespace",
-  "local-hostname": "fake",
+  "instance_id": "fake.fake-namespace",
+  "local_hostname": "fake",
   "uuid": "5d307ca9-b3ef-428c-8861-06e72d69f223",
   "devices": [
     {
@@ -112,7 +112,10 @@ var _ = Describe("CloudInit", func() {
         "testtag"
       ]
     }
-  ]
+  ],
+  "public_keys": {
+    "0": "somekey"
+  }
 }`
 				devices := []DeviceData{
 					{
@@ -124,11 +127,26 @@ var _ = Describe("CloudInit", func() {
 					},
 				}
 
-				metadataStruct := Metadata{
+				metadataStruct := ConfigDriveMetadata{
 					InstanceID:    "fake.fake-namespace",
 					LocalHostname: "fake",
 					UUID:          "5d307ca9-b3ef-428c-8861-06e72d69f223",
 					Devices:       &devices,
+					PublicSSHKeys: map[string]string{"0": "somekey"},
+				}
+				buf, err := json.MarshalIndent(metadataStruct, "", "  ")
+				Expect(err).To(BeNil())
+				Expect(string(buf)).To(Equal(exampleJSONParsed))
+			})
+			It("should match the generated nocloud metadata", func() {
+				exampleJSONParsed := `{
+  "instance-id": "fake.fake-namespace",
+  "local-hostname": "fake"
+}`
+
+				metadataStruct := NoCloudMetadata{
+					InstanceID:    "fake.fake-namespace",
+					LocalHostname: "fake",
 				}
 				buf, err := json.MarshalIndent(metadataStruct, "", "  ")
 				Expect(err).To(BeNil())
@@ -305,6 +323,14 @@ var _ = Describe("CloudInit", func() {
 					verifyCloudInitNoCloudIso(cloudInitData)
 				})
 
+				It("should succeed to verify networkData if there is no userData", func() {
+					networkData := "fake\nnetwork\ndata\n"
+					cloudInitData := &v1.CloudInitNoCloudSource{
+						NetworkData: networkData,
+					}
+					verifyCloudInitNoCloudIso(cloudInitData)
+				})
+
 				It("should fail to verify bad cloudInitNoCloud UserDataBase64", func() {
 					source := &v1.CloudInitNoCloudSource{
 						UserDataBase64: "#######garbage******",
@@ -322,13 +348,10 @@ var _ = Describe("CloudInit", func() {
 					Expect(err.Error()).Should(Equal("illegal base64 data at input byte 0"))
 				})
 
-				It("should fail to verify networkData without userData", func() {
-					networkData := "FakeNetwork"
-					source := &v1.CloudInitNoCloudSource{
-						NetworkData: networkData,
-					}
+				It("should fail to verify if there is no userData nor networkData", func() {
+					source := &v1.CloudInitNoCloudSource{}
 					_, err := readCloudInitNoCloudSource(source)
-					Expect(err).Should(MatchError("userDataBase64 or userData is required for a cloud-init data source"))
+					Expect(err).Should(MatchError("userDataBase64, userData, networkDataBase64 or networkData is required for a cloud-init data source"))
 				})
 
 				Context("with secretRefs", func() {
@@ -352,7 +375,20 @@ var _ = Describe("CloudInit", func() {
 							"userdata":    "secret-userdata",
 							"networkdata": "secret-networkdata",
 						})
-						err := ResolveNoCloudSecrets(vmi, tmpDir)
+						err := resolveNoCloudSecrets(vmi, tmpDir)
+						Expect(err).To(Not(HaveOccurred()), "could not resolve secret volume")
+						Expect(testVolume.CloudInitNoCloud.UserData).To(Equal("secret-userdata"))
+						Expect(testVolume.CloudInitNoCloud.NetworkData).To(Equal("secret-networkdata"))
+					})
+
+					It("should resolve camel-case no-cloud data from volume", func() {
+						testVolume := createCloudInitSecretRefVolume("test-volume", "test-secret")
+						vmi := createEmptyVMIWithVolumes([]v1.Volume{*testVolume})
+						fakeVolumeMountDir("test-volume", map[string]string{
+							"userData":    "secret-userdata",
+							"networkData": "secret-networkdata",
+						})
+						err := resolveNoCloudSecrets(vmi, tmpDir)
 						Expect(err).To(Not(HaveOccurred()), "could not resolve secret volume")
 						Expect(testVolume.CloudInitNoCloud.UserData).To(Equal("secret-userdata"))
 						Expect(testVolume.CloudInitNoCloud.NetworkData).To(Equal("secret-networkdata"))
@@ -360,14 +396,14 @@ var _ = Describe("CloudInit", func() {
 
 					It("should resolve empty no-cloud volume and do nothing", func() {
 						vmi := createEmptyVMIWithVolumes([]v1.Volume{})
-						err := ResolveNoCloudSecrets(vmi, tmpDir)
+						err := resolveNoCloudSecrets(vmi, tmpDir)
 						Expect(err).To(Not(HaveOccurred()), "failed to resolve empty volumes")
 					})
 
 					It("should fail if both userdata and network data does not exist", func() {
 						testVolume := createCloudInitSecretRefVolume("test-volume", "test-secret")
 						vmi := createEmptyVMIWithVolumes([]v1.Volume{*testVolume})
-						err := ResolveNoCloudSecrets(vmi, tmpDir)
+						err := resolveNoCloudSecrets(vmi, tmpDir)
 						Expect(err).To(HaveOccurred(), "expected a failure when no sources found")
 						Expect(err.Error()).To(Equal("no cloud-init data-source found at volume: test-volume"))
 					})
@@ -433,15 +469,6 @@ var _ = Describe("CloudInit", func() {
 					Expect(err.Error()).Should(Equal("illegal base64 data at input byte 0"))
 				})
 
-				It("should fail to verify networkData without userData", func() {
-					networkData := "FakeNetwork"
-					source := &v1.CloudInitConfigDriveSource{
-						NetworkData: networkData,
-					}
-					_, err := readCloudInitConfigDriveSource(source)
-					Expect(err).Should(MatchError("userDataBase64 or userData is required for a cloud-init data source"))
-				})
-
 				Context("with secretRefs", func() {
 					createCloudInitConfigDriveVolume := func(name, secret string) *v1.Volume {
 						return &v1.Volume{
@@ -458,33 +485,73 @@ var _ = Describe("CloudInit", func() {
 					It("should resolve config-drive data from volume", func() {
 						testVolume := createCloudInitConfigDriveVolume("test-volume", "test-secret")
 						vmi := createEmptyVMIWithVolumes([]v1.Volume{*testVolume})
+
+						vmi.Spec.AccessCredentials = []v1.AccessCredential{
+							{
+								SSHPublicKey: &v1.SSHPublicKeyAccessCredential{
+									Source: v1.SSHPublicKeyAccessCredentialSource{
+										Secret: &v1.AccessCredentialSecretSource{
+											SecretName: "my-pkey",
+										},
+									},
+									PropagationMethod: v1.SSHPublicKeyAccessCredentialPropagationMethod{
+										ConfigDrive: &v1.ConfigDriveSSHPublicKeyAccessCredentialPropagation{},
+									},
+								},
+							},
+						}
+
 						fakeVolumeMountDir("test-volume", map[string]string{
 							"userdata":    "secret-userdata",
 							"networkdata": "secret-networkdata",
 						})
-						err := ResolveConfigDriveSecrets(vmi, tmpDir)
+
+						fakeVolumeMountDir("my-pkey-access-cred", map[string]string{
+							"somekey":      "ssh-1234",
+							"someotherkey": "ssh-5678",
+						})
+						keys, err := resolveConfigDriveSecrets(vmi, tmpDir)
 						Expect(err).To(Not(HaveOccurred()), "could not resolve secret volume")
 						Expect(testVolume.CloudInitConfigDrive.UserData).To(Equal("secret-userdata"))
 						Expect(testVolume.CloudInitConfigDrive.NetworkData).To(Equal("secret-networkdata"))
+						Expect(len(keys)).To(Equal(2))
 					})
 
 					It("should resolve empty config-drive volume and do nothing", func() {
 						vmi := createEmptyVMIWithVolumes([]v1.Volume{})
-						err := ResolveConfigDriveSecrets(vmi, tmpDir)
+						keys, err := resolveConfigDriveSecrets(vmi, tmpDir)
 						Expect(err).To(Not(HaveOccurred()), "failed to resolve empty volumes")
+						Expect(len(keys)).To(Equal(0))
 					})
 
 					It("should fail if both userdata and network data does not exist", func() {
 						testVolume := createCloudInitConfigDriveVolume("test-volume", "test-secret")
 						vmi := createEmptyVMIWithVolumes([]v1.Volume{*testVolume})
-						err := ResolveConfigDriveSecrets(vmi, tmpDir)
+						keys, err := resolveConfigDriveSecrets(vmi, tmpDir)
 						Expect(err).To(HaveOccurred(), "expected a failure when no sources found")
 						Expect(err.Error()).To(Equal("no cloud-init data-source found at volume: test-volume"))
+						Expect(len(keys)).To(Equal(0))
 
 					})
-
 				})
 			})
 		})
+	})
+	Describe("GenerateLocalData", func() {
+		It("should cleanly run twice", func() {
+			namespace := "fake-namespace"
+			domain := "fake-domain"
+			userData := "fake\nuser\ndata\n"
+			source := &v1.CloudInitNoCloudSource{
+				UserDataBase64: base64.StdEncoding.EncodeToString([]byte(userData)),
+			}
+			cloudInitData, err := readCloudInitNoCloudSource(source)
+			Expect(err).NotTo(HaveOccurred())
+			err = GenerateLocalData(domain, namespace, cloudInitData)
+			Expect(err).NotTo(HaveOccurred())
+			err = GenerateLocalData(domain, namespace, cloudInitData)
+			Expect(err).NotTo(HaveOccurred())
+		})
+
 	})
 })

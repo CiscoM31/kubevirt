@@ -24,8 +24,9 @@ openapi-gen --input-dirs kubevirt.io/client-go/apis/snapshot/v1alpha1,k8s.io/api
 if cmp ${KUBEVIRT_DIR}/api/api-rule-violations.list ${KUBEVIRT_DIR}/api/api-rule-violations-known.list; then
     echo "openapi generated"
 else
-    diff ${KUBEVIRT_DIR}/api/api-rule-violations.list ${KUBEVIRT_DIR}/api/api-rule-violations-known.list
+    diff -u ${KUBEVIRT_DIR}/api/api-rule-violations-known.list ${KUBEVIRT_DIR}/api/api-rule-violations.list || true
     echo "You introduced new API rule violation"
+    diff ${KUBEVIRT_DIR}/api/api-rule-violations.list ${KUBEVIRT_DIR}/api/api-rule-violations-known.list
     exit 2
 fi
 
@@ -39,7 +40,7 @@ client-gen --clientset-name versioned \
 # dependencies
 client-gen --clientset-name versioned \
     --input-base kubevirt.io/containerized-data-importer/pkg/apis \
-    --input core/v1alpha1,upload/v1alpha1 \
+    --input core/v1alpha1,core/v1beta1,upload/v1alpha1,upload/v1beta1 \
     --output-base ${KUBEVIRT_DIR}/staging/src \
     --output-package ${CLIENT_GEN_BASE}/containerized-data-importer/clientset \
     --go-header-file ${KUBEVIRT_DIR}/hack/boilerplate/boilerplate.go.txt
@@ -68,6 +69,28 @@ client-gen --clientset-name versioned \
 find ${KUBEVIRT_DIR}/pkg/ -name "*generated*.go" -exec rm {} -f \;
 
 ${KUBEVIRT_DIR}/hack/build-go.sh generate ${WHAT}
+
+# Genearte validation with controller-gen and create go file for them
+(
+    cd ${KUBEVIRT_DIR}/staging/src/kubevirt.io/client-go &&
+        # supress -mod=vendor
+        GOFLAGS= controller-gen crd:allowDangerousTypes=true paths=./api/v1/
+    #include snapshot
+    GOFLAGS= controller-gen crd paths=./apis/snapshot/v1alpha1/
+
+    #remove some weird stuff from controller-gen
+    cd config/crd
+    for file in *; do
+        tail -n +3 $file >$file"new"
+        mv $file"new" $file
+    done
+    cd ${KUBEVIRT_DIR}/tools/crd-validation-generator/ && go_build
+
+    cd ${KUBEVIRT_DIR}
+    ${KUBEVIRT_DIR}/tools/crd-validation-generator/crd-validation-generator
+)
+rm -rf ${KUBEVIRT_DIR}/staging/src/kubevirt.io/client-go/config
+
 /${KUBEVIRT_DIR}/hack/bootstrap-ginkgo.sh
 (cd ${KUBEVIRT_DIR}/tools/openapispec/ && go_build)
 
@@ -75,12 +98,21 @@ ${KUBEVIRT_DIR}/tools/openapispec/openapispec --dump-api-spec-path ${KUBEVIRT_DI
 
 (cd ${KUBEVIRT_DIR}/tools/resource-generator/ && go_build)
 (cd ${KUBEVIRT_DIR}/tools/csv-generator/ && go_build)
+(cd ${KUBEVIRT_DIR}/tools/doc-generator/ && go_build)
+(
+    cd ${KUBEVIRT_DIR}/docs
+    ${KUBEVIRT_DIR}/tools/doc-generator/doc-generator
+    mv newmetrics.md ${KUBEVIRT_DIR}/docs/metrics.md
+)
+
 rm -f ${KUBEVIRT_DIR}/manifests/generated/*
 rm -f ${KUBEVIRT_DIR}/examples/*
-${KUBEVIRT_DIR}/tools/resource-generator/resource-generator --type=priorityclass >${KUBEVIRT_DIR}/manifests/generated/kubevirt-priority-class.yaml
-${KUBEVIRT_DIR}/tools/resource-generator/resource-generator --type=kv >${KUBEVIRT_DIR}/manifests/generated/kv-resource.yaml
-${KUBEVIRT_DIR}/tools/resource-generator/resource-generator --type=kv-cr --namespace={{.Namespace}} --pullPolicy={{.ImagePullPolicy}} >${KUBEVIRT_DIR}/manifests/generated/kubevirt-cr.yaml.in
-${KUBEVIRT_DIR}/tools/resource-generator/resource-generator --type=operator-rbac --namespace={{.Namespace}} >${KUBEVIRT_DIR}/manifests/generated/rbac-operator.authorization.k8s.yaml.in
+
+ResourceDir=${KUBEVIRT_DIR}/manifests/generated
+${KUBEVIRT_DIR}/tools/resource-generator/resource-generator --type=priorityclass >${ResourceDir}/kubevirt-priority-class.yaml
+${KUBEVIRT_DIR}/tools/resource-generator/resource-generator --type=kv >${ResourceDir}/kv-resource.yaml
+${KUBEVIRT_DIR}/tools/resource-generator/resource-generator --type=kv-cr --namespace={{.Namespace}} --pullPolicy={{.ImagePullPolicy}} >${ResourceDir}/kubevirt-cr.yaml.in
+${KUBEVIRT_DIR}/tools/resource-generator/resource-generator --type=operator-rbac --namespace={{.Namespace}} >${ResourceDir}/rbac-operator.authorization.k8s.yaml.in
 
 # used for Image fields in manifests
 function getVersion() {

@@ -26,6 +26,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -44,6 +45,7 @@ import (
 	containerdisk "kubevirt.io/kubevirt/pkg/container-disk"
 	ephemeraldisk "kubevirt.io/kubevirt/pkg/ephemeral-disk"
 	"kubevirt.io/kubevirt/pkg/hooks"
+	hotplugdisk "kubevirt.io/kubevirt/pkg/hotplug-disk"
 	"kubevirt.io/kubevirt/pkg/ignition"
 	cmdclient "kubevirt.io/kubevirt/pkg/virt-handler/cmd-client"
 	virtlauncher "kubevirt.io/kubevirt/pkg/virt-launcher"
@@ -147,6 +149,7 @@ func startDomainEventMonitoring(
 func initializeDirs(virtShareDir string,
 	ephemeralDiskDir string,
 	containerDiskDir string,
+	hotplugDiskDir string,
 	uid string) {
 
 	// Resolve permission mismatch when system default mask is set more restrictive than 022.
@@ -174,6 +177,11 @@ func initializeDirs(virtShareDir string,
 		panic(err)
 	}
 
+	err = hotplugdisk.SetLocalDirectory(hotplugDiskDir)
+	if err != nil {
+		panic(err)
+	}
+
 	err = ephemeraldisk.SetLocalDirectory(ephemeralDiskDir + "/disk-data")
 	if err != nil {
 		panic(err)
@@ -190,6 +198,11 @@ func initializeDirs(virtShareDir string,
 	}
 
 	err = virtlauncher.InitializeDisksDirectories(config.SecretDisksDir)
+	if err != nil {
+		panic(err)
+	}
+
+	err = virtlauncher.InitializeDisksDirectories(config.DownwardAPIDisksDir)
 	if err != nil {
 		panic(err)
 	}
@@ -295,6 +308,7 @@ func main() {
 	virtShareDir := pflag.String("kubevirt-share-dir", "/var/run/kubevirt", "Shared directory between virt-handler and virt-launcher")
 	ephemeralDiskDir := pflag.String("ephemeral-disk-dir", "/var/run/kubevirt-ephemeral-disks", "Base directory for ephemeral disk data")
 	containerDiskDir := pflag.String("container-disk-dir", "/var/run/kubevirt/container-disks", "Base directory for container disk data")
+	hotplugDiskDir := pflag.String("hotplug-disk-dir", "/var/run/kubevirt/hotplug-disks", "Base directory for hotplug disk data")
 	name := pflag.String("name", "", "Name of the VirtualMachineInstance")
 	uid := pflag.String("uid", "", "UID of the VirtualMachineInstance")
 	namespace := pflag.String("namespace", "", "Namespace of the VirtualMachineInstance")
@@ -316,8 +330,18 @@ func main() {
 
 	log.InitializeLogging("virt-launcher")
 
+	// check if virt-launcher verbosity should be changed
+	if verbosityStr, ok := os.LookupEnv("VIRT_LAUNCHER_LOG_VERBOSITY"); ok {
+		if verbosity, err := strconv.Atoi(verbosityStr); err == nil {
+			log.Log.SetVerbosityLevel(verbosity)
+			log.Log.V(2).Infof("set log verbosity to %d", verbosity)
+		} else {
+			log.Log.Warningf("failed to set log verbosity. The value of logVerbosity label should be an integer, got %s instead.", verbosityStr)
+		}
+	}
+
 	if !*noFork {
-		exitCode, err := ForkAndMonitor("qemu-kvm", *ephemeralDiskDir, *containerDiskDir)
+		exitCode, err := ForkAndMonitor(*containerDiskDir)
 		if err != nil {
 			log.Log.Reason(err).Error("monitoring virt-launcher failed")
 			os.Exit(1)
@@ -335,7 +359,7 @@ func main() {
 	vm := v1.NewVMIReferenceFromNameWithNS(*namespace, *name)
 
 	// Initialize local and shared directories
-	initializeDirs(*virtShareDir, *ephemeralDiskDir, *containerDiskDir, *uid)
+	initializeDirs(*virtShareDir, *ephemeralDiskDir, *containerDiskDir, *hotplugDiskDir, *uid)
 
 	// Start libvirtd, virtlogd, and establish libvirt connection
 	stopChan := make(chan struct{})
@@ -395,7 +419,7 @@ func main() {
 		}
 	}
 
-	events := make(chan watch.Event, 10)
+	events := make(chan watch.Event, 2)
 	// Send domain notifications to virt-handler
 	startDomainEventMonitoring(notifier, *virtShareDir, domainConn, events, vm.UID, domainName, &agentStore, *qemuAgentSysInterval, *qemuAgentFileInterval, *qemuAgentUserInterval, *qemuAgentVersionInterval)
 
@@ -444,7 +468,7 @@ func main() {
 
 // ForkAndMonitor itself to give qemu an extra grace period to properly terminate
 // in case of virt-launcher crashes
-func ForkAndMonitor(qemuProcessCommandPrefix string, ephemeralDiskDir string, containerDiskDir string) (int, error) {
+func ForkAndMonitor(containerDiskDir string) (int, error) {
 	defer cleanupContainerDiskDirectory(containerDiskDir)
 	cmd := exec.Command(os.Args[0], append(os.Args[1:], "--no-fork", "true")...)
 	cmd.Stdout = os.Stdout
@@ -509,8 +533,10 @@ func ForkAndMonitor(qemuProcessCommandPrefix string, ephemeralDiskDir string, co
 	// are not everywhere available where libvirt and qemu are. There we usually call qemu-kvm
 	// which resides in /usr/libexec/qemu-kvm
 	pid, _ := virtlauncher.FindPid("qemu-system")
+	qemuProcessCommandPrefix := "qemu-system"
 	if pid <= 0 {
 		pid, _ = virtlauncher.FindPid("qemu-kvm")
+		qemuProcessCommandPrefix = "qemu-kvm"
 	}
 	if pid > 0 {
 		p, err := os.FindProcess(pid)

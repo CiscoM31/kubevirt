@@ -74,6 +74,7 @@ var _ = Describe("Template", func() {
 			"/var/lib/kubevirt",
 			"/var/run/kubevirt-ephemeral-disks",
 			"/var/run/kubevirt/container-disks",
+			"/var/run/kubevirt/hotplug-disks",
 			"pull-secret-1",
 			pvcCache,
 			virtClient,
@@ -130,7 +131,11 @@ var _ = Describe("Template", func() {
 						Annotations: vmiAnnotation,
 					},
 					Spec: v1.VirtualMachineInstanceSpec{
-						Domain: v1.DomainSpec{},
+						Domain: v1.DomainSpec{
+							Devices: v1.Devices{
+								DisableHotplug: true,
+							},
+						},
 					},
 				})
 
@@ -206,7 +211,11 @@ var _ = Describe("Template", func() {
 						Annotations: annotations,
 					},
 					Spec: v1.VirtualMachineInstanceSpec{
-						Domain: v1.DomainSpec{},
+						Domain: v1.DomainSpec{
+							Devices: v1.Devices{
+								DisableHotplug: true,
+							},
+						},
 					},
 				})
 				Expect(err).ToNot(HaveOccurred())
@@ -250,6 +259,7 @@ var _ = Describe("Template", func() {
 				Expect(pod.Spec.Containers[1].Image).To(Equal("some-image:v1"))
 				Expect(pod.Spec.Containers[1].ImagePullPolicy).To(Equal(kubev1.PullPolicy("IfNotPresent")))
 				Expect(*pod.Spec.TerminationGracePeriodSeconds).To(Equal(int64(60)))
+				Expect(len(pod.Spec.InitContainers)).To(Equal(0))
 				By("setting the right hostname")
 				Expect(pod.Spec.Hostname).To(Equal("testvmi"))
 				Expect(pod.Spec.Subdomain).To(BeEmpty())
@@ -261,7 +271,11 @@ var _ = Describe("Template", func() {
 					ObjectMeta: metav1.ObjectMeta{
 						Name: "testvmi", Namespace: "default", UID: "1234",
 					},
-					Spec: v1.VirtualMachineInstanceSpec{Volumes: []v1.Volume{}, Domain: v1.DomainSpec{}},
+					Spec: v1.VirtualMachineInstanceSpec{Volumes: []v1.Volume{}, Domain: v1.DomainSpec{
+						Devices: v1.Devices{
+							DisableHotplug: true,
+						},
+					}},
 				}
 				pod, err := svc.RenderLaunchManifest(&vmi)
 				Expect(err).ToNot(HaveOccurred())
@@ -278,7 +292,11 @@ var _ = Describe("Template", func() {
 					ObjectMeta: metav1.ObjectMeta{
 						Name: "testvmi", Namespace: "default", UID: "1234",
 					},
-					Spec: v1.VirtualMachineInstanceSpec{Volumes: []v1.Volume{}, Domain: v1.DomainSpec{}},
+					Spec: v1.VirtualMachineInstanceSpec{Volumes: []v1.Volume{}, Domain: v1.DomainSpec{
+						Devices: v1.Devices{
+							DisableHotplug: true,
+						},
+					}},
 				}
 				pod, err := svc.RenderLaunchManifest(&vmi)
 				Expect(err).ToNot(HaveOccurred())
@@ -321,7 +339,11 @@ var _ = Describe("Template", func() {
 					},
 					Spec: v1.VirtualMachineInstanceSpec{
 						Volumes: volumes,
-						Domain:  v1.DomainSpec{},
+						Domain: v1.DomainSpec{
+							Devices: v1.Devices{
+								DisableHotplug: true,
+							},
+						},
 					},
 				}
 				pod, err := svc.RenderLaunchManifest(&vmi)
@@ -345,7 +367,11 @@ var _ = Describe("Template", func() {
 						},
 					},
 					Spec: v1.VirtualMachineInstanceSpec{
-						Domain: v1.DomainSpec{},
+						Domain: v1.DomainSpec{
+							Devices: v1.Devices{
+								DisableHotplug: true,
+							},
+						},
 					},
 				}
 
@@ -362,6 +388,153 @@ var _ = Describe("Template", func() {
 				Expect(debugLogsValue).To(Equal("1"))
 			})
 		})
+
+		Context("with access credentials", func() {
+			It("should add volume with secret referenced by cloud-init user secret ref", func() {
+				vmi := v1.VirtualMachineInstance{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "testvmi",
+						Namespace: "default",
+						UID:       "1234",
+					},
+					Spec: v1.VirtualMachineInstanceSpec{
+						Volumes: []v1.Volume{
+							{
+								Name: "cloud-init-user-data-secret-ref",
+								VolumeSource: v1.VolumeSource{
+									CloudInitConfigDrive: &v1.CloudInitConfigDriveSource{
+
+										UserData: "somedata",
+									},
+								},
+							},
+						},
+						AccessCredentials: []v1.AccessCredential{
+							{
+								SSHPublicKey: &v1.SSHPublicKeyAccessCredential{
+									Source: v1.SSHPublicKeyAccessCredentialSource{
+										Secret: &v1.AccessCredentialSecretSource{
+											SecretName: "my-pkey",
+										},
+									},
+									PropagationMethod: v1.SSHPublicKeyAccessCredentialPropagationMethod{
+										ConfigDrive: &v1.ConfigDriveSSHPublicKeyAccessCredentialPropagation{},
+									},
+								},
+							},
+						},
+					},
+				}
+
+				pod, err := svc.RenderLaunchManifest(&vmi)
+				Expect(err).ToNot(HaveOccurred())
+
+				volumeFound := false
+				for _, volume := range pod.Spec.Volumes {
+					if volume.Name == "my-pkey-access-cred" {
+						volumeFound = true
+					}
+				}
+				Expect(volumeFound).To(BeTrue(), "could not find ssh key secret volume")
+
+				volumeMountFound := false
+				for _, volumeMount := range pod.Spec.Containers[0].VolumeMounts {
+					if volumeMount.Name == "my-pkey-access-cred" {
+						volumeMountFound = true
+					}
+				}
+				Expect(volumeMountFound).To(BeTrue(), "could not find ssh key secret volume mount")
+			})
+			It("should add volume with secret referenced by qemu agent access cred", func() {
+				vmi := v1.VirtualMachineInstance{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "testvmi",
+						Namespace: "default",
+						UID:       "1234",
+					},
+					Spec: v1.VirtualMachineInstanceSpec{
+						AccessCredentials: []v1.AccessCredential{
+							{
+								SSHPublicKey: &v1.SSHPublicKeyAccessCredential{
+									Source: v1.SSHPublicKeyAccessCredentialSource{
+										Secret: &v1.AccessCredentialSecretSource{
+											SecretName: "my-pkey",
+										},
+									},
+									PropagationMethod: v1.SSHPublicKeyAccessCredentialPropagationMethod{
+										QemuGuestAgent: &v1.QemuGuestAgentSSHPublicKeyAccessCredentialPropagation{},
+									},
+								},
+							},
+						},
+					},
+				}
+
+				pod, err := svc.RenderLaunchManifest(&vmi)
+				Expect(err).ToNot(HaveOccurred())
+
+				volumeFound := false
+				for _, volume := range pod.Spec.Volumes {
+					if volume.Name == "my-pkey-access-cred" {
+						volumeFound = true
+					}
+				}
+				Expect(volumeFound).To(BeTrue(), "could not find ssh key secret volume")
+
+				volumeMountFound := false
+				for _, volumeMount := range pod.Spec.Containers[0].VolumeMounts {
+					if volumeMount.Name == "my-pkey-access-cred" {
+						volumeMountFound = true
+					}
+				}
+				Expect(volumeMountFound).To(BeTrue(), "could not find ssh key secret volume mount")
+			})
+			It("should add volume with secret referenced by user/password", func() {
+				vmi := v1.VirtualMachineInstance{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "testvmi",
+						Namespace: "default",
+						UID:       "1234",
+					},
+					Spec: v1.VirtualMachineInstanceSpec{
+						AccessCredentials: []v1.AccessCredential{
+							{
+								UserPassword: &v1.UserPasswordAccessCredential{
+									Source: v1.UserPasswordAccessCredentialSource{
+										Secret: &v1.AccessCredentialSecretSource{
+											SecretName: "my-pkey",
+										},
+									},
+									PropagationMethod: v1.UserPasswordAccessCredentialPropagationMethod{
+										QemuGuestAgent: &v1.QemuGuestAgentUserPasswordAccessCredentialPropagation{},
+									},
+								},
+							},
+						},
+					},
+				}
+
+				pod, err := svc.RenderLaunchManifest(&vmi)
+				Expect(err).ToNot(HaveOccurred())
+
+				volumeFound := false
+				for _, volume := range pod.Spec.Volumes {
+					if volume.Name == "my-pkey-access-cred" {
+						volumeFound = true
+					}
+				}
+				Expect(volumeFound).To(BeTrue(), "could not find ssh key secret volume")
+
+				volumeMountFound := false
+				for _, volumeMount := range pod.Spec.Containers[0].VolumeMounts {
+					if volumeMount.Name == "my-pkey-access-cred" {
+						volumeMountFound = true
+					}
+				}
+				Expect(volumeMountFound).To(BeTrue(), "could not find ssh key secret volume mount")
+			})
+		})
+
 		Context("with cloud-init user secret", func() {
 			It("should add volume with secret referenced by cloud-init user secret ref", func() {
 				vmi := v1.VirtualMachineInstance{
@@ -371,6 +544,11 @@ var _ = Describe("Template", func() {
 						UID:       "1234",
 					},
 					Spec: v1.VirtualMachineInstanceSpec{
+						Domain: v1.DomainSpec{
+							Devices: v1.Devices{
+								DisableHotplug: true,
+							},
+						},
 						Volumes: []v1.Volume{
 							{
 								Name: "cloud-init-user-data-secret-ref",
@@ -415,6 +593,11 @@ var _ = Describe("Template", func() {
 						UID:       "1234",
 					},
 					Spec: v1.VirtualMachineInstanceSpec{
+						Domain: v1.DomainSpec{
+							Devices: v1.Devices{
+								DisableHotplug: true,
+							},
+						},
 						Volumes: []v1.Volume{
 							{
 								Name: "cloud-init-network-data-secret-ref",
@@ -452,7 +635,7 @@ var _ = Describe("Template", func() {
 		})
 		Context("with container disk", func() {
 
-			It("should add init container to inject binary", func() {
+			It("should add init containers to inject binary and pre-pull container disks", func() {
 				volumes := []v1.Volume{
 					{
 						Name: "containerdisk1",
@@ -462,19 +645,31 @@ var _ = Describe("Template", func() {
 							},
 						},
 					},
+					{
+						Name: "containerdisk2",
+						VolumeSource: v1.VolumeSource{
+							ContainerDisk: &v1.ContainerDiskSource{
+								Image: "my-image-2",
+							},
+						},
+					},
 				}
 
 				vmi := v1.VirtualMachineInstance{
 					ObjectMeta: metav1.ObjectMeta{
 						Name: "testvmi", Namespace: "default", UID: "1234",
 					},
-					Spec: v1.VirtualMachineInstanceSpec{Volumes: volumes, Domain: v1.DomainSpec{}},
+					Spec: v1.VirtualMachineInstanceSpec{Volumes: volumes, Domain: v1.DomainSpec{
+						Devices: v1.Devices{
+							DisableHotplug: true,
+						},
+					}},
 				}
 
 				pod, err := svc.RenderLaunchManifest(&vmi)
 				Expect(err).ToNot(HaveOccurred())
 
-				Expect(len(pod.Spec.InitContainers)).To(Equal(1))
+				Expect(len(pod.Spec.InitContainers)).To(Equal(3))
 				Expect(pod.Spec.InitContainers[0].VolumeMounts[0].MountPath).To(Equal("/init/usr/bin"))
 				Expect(pod.Spec.InitContainers[0].VolumeMounts[0].Name).To(Equal("virt-bin-share-dir"))
 				Expect(pod.Spec.InitContainers[0].Command).To(Equal([]string{"/usr/bin/cp",
@@ -482,6 +677,12 @@ var _ = Describe("Template", func() {
 					"/init/usr/bin/container-disk",
 				}))
 				Expect(pod.Spec.InitContainers[0].Image).To(Equal("kubevirt/virt-launcher"))
+
+				Expect(pod.Spec.InitContainers[1].Args).To(Equal([]string{"--no-op"}))
+				Expect(pod.Spec.InitContainers[1].Image).To(Equal("my-image-1"))
+				Expect(pod.Spec.InitContainers[2].Args).To(Equal([]string{"--no-op"}))
+				Expect(pod.Spec.InitContainers[2].Image).To(Equal("my-image-2"))
+
 			})
 
 		})
@@ -494,7 +695,11 @@ var _ = Describe("Template", func() {
 						UID:       "1234",
 					},
 					Spec: v1.VirtualMachineInstanceSpec{
-						Domain: v1.DomainSpec{},
+						Domain: v1.DomainSpec{
+							Devices: v1.Devices{
+								DisableHotplug: true,
+							},
+						},
 						Networks: []v1.Network{
 							{Name: "default",
 								NetworkSource: v1.NetworkSource{
@@ -531,7 +736,11 @@ var _ = Describe("Template", func() {
 						UID:       "1234",
 					},
 					Spec: v1.VirtualMachineInstanceSpec{
-						Domain: v1.DomainSpec{},
+						Domain: v1.DomainSpec{
+							Devices: v1.Devices{
+								DisableHotplug: true,
+							},
+						},
 						Networks: []v1.Network{
 							{Name: "default",
 								NetworkSource: v1.NetworkSource{
@@ -564,6 +773,7 @@ var _ = Describe("Template", func() {
 					Spec: v1.VirtualMachineInstanceSpec{
 						Domain: v1.DomainSpec{
 							Devices: v1.Devices{
+								DisableHotplug: true,
 								Interfaces: []v1.Interface{
 									v1.Interface{
 										Name: "test1",
@@ -610,6 +820,7 @@ var _ = Describe("Template", func() {
 					Spec: v1.VirtualMachineInstanceSpec{
 						Domain: v1.DomainSpec{
 							Devices: v1.Devices{
+								DisableHotplug: true,
 								Interfaces: []v1.Interface{
 									{Name: "default",
 										InterfaceBindingMethod: v1.InterfaceBindingMethod{Masquerade: &v1.InterfaceMasquerade{}}},
@@ -636,7 +847,11 @@ var _ = Describe("Template", func() {
 				annotations := map[string]string{
 					hooks.HookSidecarListAnnotationName: `[{"image": "some-image:v1", "imagePullPolicy": "IfNotPresent"}]`,
 				}
-				vmi := v1.VirtualMachineInstance{ObjectMeta: metav1.ObjectMeta{Name: "testvmi", Namespace: "default", UID: "1234", Annotations: annotations}, Spec: v1.VirtualMachineInstanceSpec{NodeSelector: nodeSelector, Domain: v1.DomainSpec{}}}
+				vmi := v1.VirtualMachineInstance{ObjectMeta: metav1.ObjectMeta{Name: "testvmi", Namespace: "default", UID: "1234", Annotations: annotations}, Spec: v1.VirtualMachineInstanceSpec{NodeSelector: nodeSelector, Domain: v1.DomainSpec{
+					Devices: v1.Devices{
+						DisableHotplug: true,
+					},
+				}}}
 
 				pod, err := svc.RenderLaunchManifest(&vmi)
 				Expect(err).ToNot(HaveOccurred())
@@ -689,6 +904,9 @@ var _ = Describe("Template", func() {
 					},
 					Spec: v1.VirtualMachineInstanceSpec{
 						Domain: v1.DomainSpec{
+							Devices: v1.Devices{
+								DisableHotplug: true,
+							},
 							CPU: &v1.CPU{
 								Model: "Conroe",
 								Features: []v1.CPUFeature{
@@ -731,7 +949,11 @@ var _ = Describe("Template", func() {
 					ObjectMeta: metav1.ObjectMeta{
 						Name: "testvmi", Namespace: "default", UID: "1234",
 					},
-					Spec: v1.VirtualMachineInstanceSpec{Volumes: []v1.Volume{}, Domain: v1.DomainSpec{}},
+					Spec: v1.VirtualMachineInstanceSpec{Volumes: []v1.Volume{}, Domain: v1.DomainSpec{
+						Devices: v1.Devices{
+							DisableHotplug: true,
+						},
+					}},
 				}
 				pod, err := svc.RenderLaunchManifest(&vmi)
 				Expect(err).ToNot(HaveOccurred())
@@ -750,6 +972,9 @@ var _ = Describe("Template", func() {
 					},
 					Spec: v1.VirtualMachineInstanceSpec{
 						Domain: v1.DomainSpec{
+							Devices: v1.Devices{
+								DisableHotplug: true,
+							},
 							Features: &v1.Features{
 								Hyperv: &v1.FeatureHyperv{},
 							},
@@ -773,6 +998,9 @@ var _ = Describe("Template", func() {
 					},
 					Spec: v1.VirtualMachineInstanceSpec{
 						Domain: v1.DomainSpec{
+							Devices: v1.Devices{
+								DisableHotplug: true,
+							},
 							Features: &v1.Features{
 								Hyperv: &v1.FeatureHyperv{
 									SyNIC: &v1.FeatureState{
@@ -805,6 +1033,9 @@ var _ = Describe("Template", func() {
 					},
 					Spec: v1.VirtualMachineInstanceSpec{
 						Domain: v1.DomainSpec{
+							Devices: v1.Devices{
+								DisableHotplug: true,
+							},
 							Features: &v1.Features{
 								Hyperv: &v1.FeatureHyperv{
 									SyNIC: &v1.FeatureState{
@@ -847,6 +1078,9 @@ var _ = Describe("Template", func() {
 					},
 					Spec: v1.VirtualMachineInstanceSpec{
 						Domain: v1.DomainSpec{
+							Devices: v1.Devices{
+								DisableHotplug: true,
+							},
 							Features: &v1.Features{
 								Hyperv: &v1.FeatureHyperv{
 									Relaxed: &v1.FeatureState{
@@ -889,6 +1123,9 @@ var _ = Describe("Template", func() {
 					Spec: v1.VirtualMachineInstanceSpec{
 						NodeSelector: nodeSelector,
 						Domain: v1.DomainSpec{
+							Devices: v1.Devices{
+								DisableHotplug: true,
+							},
 							CPU: &v1.CPU{
 								Cores:                 2,
 								DedicatedCPUPlacement: true,
@@ -923,6 +1160,9 @@ var _ = Describe("Template", func() {
 					},
 					Spec: v1.VirtualMachineInstanceSpec{
 						Domain: v1.DomainSpec{
+							Devices: v1.Devices{
+								DisableHotplug: true,
+							},
 							CPU: &v1.CPU{
 								Cores:                 2,
 								DedicatedCPUPlacement: true,
@@ -943,7 +1183,11 @@ var _ = Describe("Template", func() {
 					ObjectMeta: metav1.ObjectMeta{Name: "testvmi", Namespace: "default", UID: "1234"},
 					Spec: v1.VirtualMachineInstanceSpec{
 						Affinity: &kubev1.Affinity{NodeAffinity: &nodeAffinity},
-						Domain:   v1.DomainSpec{},
+						Domain: v1.DomainSpec{
+							Devices: v1.Devices{
+								DisableHotplug: true,
+							},
+						},
 					},
 				}
 				pod, err := svc.RenderLaunchManifest(&vmi)
@@ -958,7 +1202,11 @@ var _ = Describe("Template", func() {
 					ObjectMeta: metav1.ObjectMeta{Name: "testvm", Namespace: "default", UID: "1234"},
 					Spec: v1.VirtualMachineInstanceSpec{
 						Affinity: &kubev1.Affinity{PodAffinity: &podAffinity},
-						Domain:   v1.DomainSpec{},
+						Domain: v1.DomainSpec{
+							Devices: v1.Devices{
+								DisableHotplug: true,
+							},
+						},
 					},
 				}
 				pod, err := svc.RenderLaunchManifest(&vm)
@@ -973,7 +1221,11 @@ var _ = Describe("Template", func() {
 					ObjectMeta: metav1.ObjectMeta{Name: "testvm", Namespace: "default", UID: "1234"},
 					Spec: v1.VirtualMachineInstanceSpec{
 						Affinity: &kubev1.Affinity{PodAntiAffinity: &podAntiAffinity},
-						Domain:   v1.DomainSpec{},
+						Domain: v1.DomainSpec{
+							Devices: v1.Devices{
+								DisableHotplug: true,
+							},
+						},
 					},
 				}
 				pod, err := svc.RenderLaunchManifest(&vm)
@@ -994,7 +1246,11 @@ var _ = Describe("Template", func() {
 								TolerationSeconds: &tolerationSeconds,
 							},
 						},
-						Domain: v1.DomainSpec{},
+						Domain: v1.DomainSpec{
+							Devices: v1.Devices{
+								DisableHotplug: true,
+							},
+						},
 					},
 				}
 				pod, err := svc.RenderLaunchManifest(&vm)
@@ -1007,7 +1263,11 @@ var _ = Describe("Template", func() {
 					ObjectMeta: metav1.ObjectMeta{Name: "testvm", Namespace: "default", UID: "1234"},
 					Spec: v1.VirtualMachineInstanceSpec{
 						SchedulerName: "test-scheduler",
-						Domain:        v1.DomainSpec{},
+						Domain: v1.DomainSpec{
+							Devices: v1.Devices{
+								DisableHotplug: true,
+							},
+						},
 					},
 				}
 				pod, err := svc.RenderLaunchManifest(&vm)
@@ -1022,7 +1282,11 @@ var _ = Describe("Template", func() {
 						UID:       "1234",
 					},
 					Spec: v1.VirtualMachineInstanceSpec{
-						Domain:    v1.DomainSpec{},
+						Domain: v1.DomainSpec{
+							Devices: v1.Devices{
+								DisableHotplug: true,
+							},
+						},
 						Hostname:  "myhost",
 						Subdomain: "mydomain",
 					},
@@ -1044,7 +1308,11 @@ var _ = Describe("Template", func() {
 						},
 					},
 					Spec: v1.VirtualMachineInstanceSpec{
-						Domain: v1.DomainSpec{},
+						Domain: v1.DomainSpec{
+							Devices: v1.Devices{
+								DisableHotplug: true,
+							},
+						},
 					},
 				}
 				pod, err := svc.RenderLaunchManifest(&vmi)
@@ -1064,7 +1332,11 @@ var _ = Describe("Template", func() {
 				vmi := v1.VirtualMachineInstance{
 					ObjectMeta: metav1.ObjectMeta{Name: "testvm", Namespace: "default", UID: "1234"},
 					Spec: v1.VirtualMachineInstanceSpec{
-						Domain: v1.DomainSpec{},
+						Domain: v1.DomainSpec{
+							Devices: v1.Devices{
+								DisableHotplug: true,
+							},
+						},
 					},
 				}
 				pod, err := svc.RenderLaunchManifest(&vmi)
@@ -1084,6 +1356,9 @@ var _ = Describe("Template", func() {
 					},
 					Spec: v1.VirtualMachineInstanceSpec{
 						Domain: v1.DomainSpec{
+							Devices: v1.Devices{
+								DisableHotplug: true,
+							},
 							Resources: v1.ResourceRequirements{
 								Requests: kubev1.ResourceList{
 									kubev1.ResourceCPU:    resource.MustParse("1m"),
@@ -1103,8 +1378,8 @@ var _ = Describe("Template", func() {
 
 				Expect(pod.Spec.Containers[0].Resources.Requests.Cpu().String()).To(Equal("1m"))
 				Expect(pod.Spec.Containers[0].Resources.Limits.Cpu().String()).To(Equal("2m"))
-				Expect(pod.Spec.Containers[0].Resources.Requests.Memory().String()).To(Equal("1163507557"))
-				Expect(pod.Spec.Containers[0].Resources.Limits.Memory().String()).To(Equal("2163507557"))
+				Expect(pod.Spec.Containers[0].Resources.Requests.Memory().String()).To(Equal("1180211045"))
+				Expect(pod.Spec.Containers[0].Resources.Limits.Memory().String()).To(Equal("2180211045"))
 			})
 			It("should overcommit guest overhead if selected, by only adding the overhead to memory limits", func() {
 
@@ -1116,6 +1391,9 @@ var _ = Describe("Template", func() {
 					},
 					Spec: v1.VirtualMachineInstanceSpec{
 						Domain: v1.DomainSpec{
+							Devices: v1.Devices{
+								DisableHotplug: true,
+							},
 							Resources: v1.ResourceRequirements{
 								OvercommitGuestOverhead: true,
 								Requests: kubev1.ResourceList{
@@ -1133,7 +1411,7 @@ var _ = Describe("Template", func() {
 				Expect(err).ToNot(HaveOccurred())
 
 				Expect(pod.Spec.Containers[0].Resources.Requests.Memory().String()).To(Equal("1G"))
-				Expect(pod.Spec.Containers[0].Resources.Limits.Memory().String()).To(Equal("2163507557"))
+				Expect(pod.Spec.Containers[0].Resources.Limits.Memory().String()).To(Equal("2180211045"))
 			})
 			It("should not add unset resources", func() {
 
@@ -1145,6 +1423,9 @@ var _ = Describe("Template", func() {
 					},
 					Spec: v1.VirtualMachineInstanceSpec{
 						Domain: v1.DomainSpec{
+							Devices: v1.Devices{
+								DisableHotplug: true,
+							},
 							CPU: &v1.CPU{Cores: 3},
 							Resources: v1.ResourceRequirements{
 								Requests: kubev1.ResourceList{
@@ -1161,7 +1442,7 @@ var _ = Describe("Template", func() {
 
 				Expect(vmi.Spec.Domain.Resources.Requests.Memory().String()).To(Equal("64M"))
 				Expect(pod.Spec.Containers[0].Resources.Requests.Cpu().String()).To(Equal("1m"))
-				Expect(pod.Spec.Containers[0].Resources.Requests.Memory().ToDec().ScaledValue(resource.Mega)).To(Equal(int64(243)))
+				Expect(pod.Spec.Containers[0].Resources.Requests.Memory().ToDec().ScaledValue(resource.Mega)).To(Equal(int64(260)))
 
 				// Limits for KVM and TUN devices should be requested.
 				Expect(pod.Spec.Containers[0].Resources.Limits).ToNot(BeNil())
@@ -1177,7 +1458,9 @@ var _ = Describe("Template", func() {
 					},
 					Spec: v1.VirtualMachineInstanceSpec{
 						Domain: v1.DomainSpec{
-
+							Devices: v1.Devices{
+								DisableHotplug: true,
+							},
 							CPU: &v1.CPU{Cores: 3},
 							Resources: v1.ResourceRequirements{
 								Requests: kubev1.ResourceList{
@@ -1196,9 +1479,9 @@ var _ = Describe("Template", func() {
 				Expect(err).ToNot(HaveOccurred())
 				Expect(pod.Spec.Containers[0].Resources.Requests.Memory().ToDec().ScaledValue(resource.Mega)).To(Equal(int64(memory)))
 			},
-				table.Entry("and consider graphics overhead if it is not set", nil, 243),
-				table.Entry("and consider graphics overhead if it is set to true", True(), 243),
-				table.Entry("and not consider graphics overhead if it is set to false", False(), 226),
+				table.Entry("and consider graphics overhead if it is not set", nil, 260),
+				table.Entry("and consider graphics overhead if it is set to true", True(), 260),
+				table.Entry("and not consider graphics overhead if it is set to false", False(), 243),
 			)
 			It("should calculate vcpus overhead based on guest toplogy", func() {
 
@@ -1210,7 +1493,9 @@ var _ = Describe("Template", func() {
 					},
 					Spec: v1.VirtualMachineInstanceSpec{
 						Domain: v1.DomainSpec{
-
+							Devices: v1.Devices{
+								DisableHotplug: true,
+							},
 							CPU: &v1.CPU{Cores: 3},
 							Resources: v1.ResourceRequirements{
 								Requests: kubev1.ResourceList{
@@ -1231,6 +1516,82 @@ var _ = Describe("Template", func() {
 				socketsMemVal := pod.Spec.Containers[0].Resources.Requests.Memory()
 				Expect(coresMemVal.Cmp(*socketsMemVal)).To(Equal(0))
 			})
+			It("should calculate vmipod cpu request based on vcpus and cpu_allocation_ratio", func() {
+				vmi := v1.VirtualMachineInstance{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "testvmi",
+						Namespace: "default",
+						UID:       "1234",
+					},
+					Spec: v1.VirtualMachineInstanceSpec{
+						Domain: v1.DomainSpec{
+							Devices: v1.Devices{
+								DisableHotplug: true,
+							},
+							CPU: &v1.CPU{Cores: 3},
+						},
+					},
+				}
+
+				pod, err := svc.RenderLaunchManifest(&vmi)
+				Expect(err).ToNot(HaveOccurred())
+				Expect(pod.Spec.Containers[0].Resources.Requests.Cpu().String()).To(Equal("300m"))
+			})
+			It("should allocate equal amount of cpus to vmipod as vcpus with allocation_ratio set to 1", func() {
+				allocationRatio := "1"
+				testutils.UpdateFakeClusterConfig(configMapInformer, &kubev1.ConfigMap{
+					Data: map[string]string{virtconfig.CPUAllocationRatio: allocationRatio},
+				})
+				vmi := v1.VirtualMachineInstance{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "testvmi",
+						Namespace: "default",
+						UID:       "1234",
+					},
+					Spec: v1.VirtualMachineInstanceSpec{
+						Domain: v1.DomainSpec{
+							Devices: v1.Devices{
+								DisableHotplug: true,
+							},
+							CPU: &v1.CPU{Cores: 3},
+						},
+					},
+				}
+
+				pod, err := svc.RenderLaunchManifest(&vmi)
+				Expect(err).ToNot(HaveOccurred())
+				Expect(pod.Spec.Containers[0].Resources.Requests.Cpu().String()).To(Equal("3"))
+			})
+			It("should override the calculated amount of cpus if the user has explicitly specified cpu request", func() {
+				allocationRatio := "16"
+				testutils.UpdateFakeClusterConfig(configMapInformer, &kubev1.ConfigMap{
+					Data: map[string]string{virtconfig.CPUAllocationRatio: allocationRatio},
+				})
+				vmi := v1.VirtualMachineInstance{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "testvmi",
+						Namespace: "default",
+						UID:       "1234",
+					},
+					Spec: v1.VirtualMachineInstanceSpec{
+						Domain: v1.DomainSpec{
+							Devices: v1.Devices{
+								DisableHotplug: true,
+							},
+							CPU: &v1.CPU{Cores: 5},
+							Resources: v1.ResourceRequirements{
+								Requests: kubev1.ResourceList{
+									kubev1.ResourceCPU: resource.MustParse("150m"),
+								},
+							},
+						},
+					},
+				}
+
+				pod, err := svc.RenderLaunchManifest(&vmi)
+				Expect(err).ToNot(HaveOccurred())
+				Expect(pod.Spec.Containers[0].Resources.Requests.Cpu().String()).To(Equal("150m"))
+			})
 		})
 
 		Context("with hugepages constraints", func() {
@@ -1243,6 +1604,9 @@ var _ = Describe("Template", func() {
 					},
 					Spec: v1.VirtualMachineInstanceSpec{
 						Domain: v1.DomainSpec{
+							Devices: v1.Devices{
+								DisableHotplug: true,
+							},
 							Memory: &v1.Memory{
 								Hugepages: &v1.Hugepages{
 									PageSize: value,
@@ -1263,8 +1627,8 @@ var _ = Describe("Template", func() {
 				pod, err := svc.RenderLaunchManifest(&vmi)
 				Expect(err).ToNot(HaveOccurred())
 
-				Expect(pod.Spec.Containers[0].Resources.Requests.Memory().ToDec().ScaledValue(resource.Mega)).To(Equal(int64(162)))
-				Expect(pod.Spec.Containers[0].Resources.Limits.Memory().ToDec().ScaledValue(resource.Mega)).To(Equal(int64(162)))
+				Expect(pod.Spec.Containers[0].Resources.Requests.Memory().ToDec().ScaledValue(resource.Mega)).To(Equal(int64(179)))
+				Expect(pod.Spec.Containers[0].Resources.Limits.Memory().ToDec().ScaledValue(resource.Mega)).To(Equal(int64(179)))
 
 				hugepageType := kubev1.ResourceName(kubev1.ResourceHugePagesPrefix + value)
 				hugepagesRequest := pod.Spec.Containers[0].Resources.Requests[hugepageType]
@@ -1292,6 +1656,9 @@ var _ = Describe("Template", func() {
 					},
 					Spec: v1.VirtualMachineInstanceSpec{
 						Domain: v1.DomainSpec{
+							Devices: v1.Devices{
+								DisableHotplug: true,
+							},
 							Memory: &v1.Memory{
 								Hugepages: &v1.Hugepages{
 									PageSize: "1Gi",
@@ -1315,8 +1682,8 @@ var _ = Describe("Template", func() {
 				guestRequestMemDiff := vmi.Spec.Domain.Resources.Requests.Memory()
 				guestRequestMemDiff.Sub(guestMem)
 
-				Expect(pod.Spec.Containers[0].Resources.Requests.Memory().ToDec().ScaledValue(resource.Mega)).To(Equal(int64(162) + guestRequestMemDiff.ToDec().ScaledValue(resource.Mega)))
-				Expect(pod.Spec.Containers[0].Resources.Limits.Memory().ToDec().ScaledValue(resource.Mega)).To(Equal(int64(162) + guestRequestMemDiff.ToDec().ScaledValue(resource.Mega)))
+				Expect(pod.Spec.Containers[0].Resources.Requests.Memory().ToDec().ScaledValue(resource.Mega)).To(Equal(int64(179) + guestRequestMemDiff.ToDec().ScaledValue(resource.Mega)))
+				Expect(pod.Spec.Containers[0].Resources.Limits.Memory().ToDec().ScaledValue(resource.Mega)).To(Equal(int64(179) + guestRequestMemDiff.ToDec().ScaledValue(resource.Mega)))
 
 				hugepageType := kubev1.ResourceName(kubev1.ResourceHugePagesPrefix + "1Gi")
 				hugepagesRequest := pod.Spec.Containers[0].Resources.Requests[hugepageType]
@@ -1357,7 +1724,11 @@ var _ = Describe("Template", func() {
 					ObjectMeta: metav1.ObjectMeta{
 						Name: "testvmi", Namespace: namespace, UID: "1234",
 					},
-					Spec: v1.VirtualMachineInstanceSpec{Volumes: volumes, Domain: v1.DomainSpec{}},
+					Spec: v1.VirtualMachineInstanceSpec{Volumes: volumes, Domain: v1.DomainSpec{
+						Devices: v1.Devices{
+							DisableHotplug: true,
+						},
+					}},
 				}
 
 				pod, err := svc.RenderLaunchManifest(&vmi)
@@ -1403,7 +1774,11 @@ var _ = Describe("Template", func() {
 					ObjectMeta: metav1.ObjectMeta{
 						Name: "testvmi", Namespace: namespace, UID: "1234",
 					},
-					Spec: v1.VirtualMachineInstanceSpec{Volumes: volumes, Domain: v1.DomainSpec{}},
+					Spec: v1.VirtualMachineInstanceSpec{Volumes: volumes, Domain: v1.DomainSpec{
+						Devices: v1.Devices{
+							DisableHotplug: true,
+						},
+					}},
 				}
 
 				pod, err := svc.RenderLaunchManifest(&vmi)
@@ -1440,7 +1815,11 @@ var _ = Describe("Template", func() {
 					ObjectMeta: metav1.ObjectMeta{
 						Name: "testvmi", Namespace: namespace, UID: "1234",
 					},
-					Spec: v1.VirtualMachineInstanceSpec{Volumes: volumes, Domain: v1.DomainSpec{}},
+					Spec: v1.VirtualMachineInstanceSpec{Volumes: volumes, Domain: v1.DomainSpec{
+						Devices: v1.Devices{
+							DisableHotplug: true,
+						},
+					}},
 				}
 
 				_, err := svc.RenderLaunchManifest(&vmi)
@@ -1455,7 +1834,11 @@ var _ = Describe("Template", func() {
 					ObjectMeta: metav1.ObjectMeta{
 						Name: "testvmi", Namespace: "default", UID: "1234",
 					},
-					Spec: v1.VirtualMachineInstanceSpec{Domain: v1.DomainSpec{}},
+					Spec: v1.VirtualMachineInstanceSpec{Domain: v1.DomainSpec{
+						Devices: v1.Devices{
+							DisableHotplug: true,
+						},
+					}},
 				}
 
 				pod, err := svc.RenderLaunchManifest(&vmi)
@@ -1492,7 +1875,11 @@ var _ = Describe("Template", func() {
 				ObjectMeta: metav1.ObjectMeta{
 					Name: "testvmi", Namespace: "default", UID: "1234",
 				},
-				Spec: v1.VirtualMachineInstanceSpec{Volumes: volumes, Domain: v1.DomainSpec{}},
+				Spec: v1.VirtualMachineInstanceSpec{Volumes: volumes, Domain: v1.DomainSpec{
+					Devices: v1.Devices{
+						DisableHotplug: true,
+					},
+				}},
 			}
 
 			It("should add secret to pod spec", func() {
@@ -1535,7 +1922,11 @@ var _ = Describe("Template", func() {
 					Skip("ppc64le is currently running is privileged mode, so skipping test")
 				}
 				sriovInterface := v1.InterfaceSRIOV{}
-				domain := v1.DomainSpec{}
+				domain := v1.DomainSpec{
+					Devices: v1.Devices{
+						DisableHotplug: true,
+					},
+				}
 				domain.Devices.Interfaces = []v1.Interface{{Name: "testnet", InterfaceBindingMethod: v1.InterfaceBindingMethod{SRIOV: &sriovInterface}}}
 				vmi := v1.VirtualMachineInstance{
 					ObjectMeta: metav1.ObjectMeta{
@@ -1550,9 +1941,13 @@ var _ = Describe("Template", func() {
 				Expect(len(pod.Spec.Containers)).To(Equal(1))
 				Expect(*pod.Spec.Containers[0].SecurityContext.Privileged).To(BeFalse())
 			})
-			It("should mount pci related host directories", func() {
+			It("should not mount pci related host directories", func() {
 				sriovInterface := v1.InterfaceSRIOV{}
-				domain := v1.DomainSpec{}
+				domain := v1.DomainSpec{
+					Devices: v1.Devices{
+						DisableHotplug: true,
+					},
+				}
 				domain.Devices.Interfaces = []v1.Interface{{Name: "testnet", InterfaceBindingMethod: v1.InterfaceBindingMethod{SRIOV: &sriovInterface}}}
 				vmi := v1.VirtualMachineInstance{
 					ObjectMeta: metav1.ObjectMeta{
@@ -1565,13 +1960,23 @@ var _ = Describe("Template", func() {
 				Expect(err).ToNot(HaveOccurred())
 
 				Expect(len(pod.Spec.Containers)).To(Equal(1))
-				// Skip first four mounts that are generic for all launcher pods
-				Expect(pod.Spec.Containers[0].VolumeMounts[4].MountPath).To(Equal("/sys/devices/"))
-				Expect(pod.Spec.Volumes[1].HostPath.Path).To(Equal("/sys/devices/"))
+
+				for _, volumeMount := range pod.Spec.Containers[0].VolumeMounts {
+					Expect(volumeMount.MountPath).ToNot(Equal("/sys/devices/"))
+				}
+
+				for _, volume := range pod.Spec.Volumes {
+					if volume.HostPath != nil {
+						Expect(volume.HostPath.Path).ToNot(Equal("/sys/devices/"))
+					}
+				}
 			})
 			It("should add 1G of memory overhead", func() {
 				sriovInterface := v1.InterfaceSRIOV{}
 				domain := v1.DomainSpec{
+					Devices: v1.Devices{
+						DisableHotplug: true,
+					},
 					Resources: v1.ResourceRequirements{
 						Requests: kubev1.ResourceList{
 							kubev1.ResourceMemory: resource.MustParse("1G"),
@@ -1593,11 +1998,62 @@ var _ = Describe("Template", func() {
 				expectedMemory.Add(*domain.Resources.Requests.Memory())
 				Expect(pod.Spec.Containers[0].Resources.Requests.Memory().Value()).To(Equal(expectedMemory.Value()))
 			})
+			It("should still add memory overhead for 1 core if cpu topology wasn't provided", func() {
+				domain := v1.DomainSpec{
+					Devices: v1.Devices{
+						DisableHotplug: true,
+					},
+					Resources: v1.ResourceRequirements{
+						Requests: kubev1.ResourceList{
+							kubev1.ResourceMemory: resource.MustParse("512Mi"),
+							kubev1.ResourceCPU:    resource.MustParse("150m"),
+						},
+					},
+				}
+				domain1 := v1.DomainSpec{
+					CPU: &v1.CPU{
+						Model: "Conroe",
+						Cores: 1,
+					},
+					Resources: v1.ResourceRequirements{
+						Requests: kubev1.ResourceList{
+							kubev1.ResourceMemory: resource.MustParse("512Mi"),
+							kubev1.ResourceCPU:    resource.MustParse("150m"),
+						},
+					},
+				}
+				vmi := v1.VirtualMachineInstance{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "testvmi", Namespace: "default", UID: "1234",
+					},
+					Spec: v1.VirtualMachineInstanceSpec{Domain: domain},
+				}
+				vmi1 := v1.VirtualMachineInstance{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "testvmi1", Namespace: "default", UID: "1134",
+					},
+					Spec: v1.VirtualMachineInstanceSpec{Domain: domain1},
+				}
+
+				pod, err := svc.RenderLaunchManifest(&vmi)
+				Expect(err).ToNot(HaveOccurred())
+				pod1, err := svc.RenderLaunchManifest(&vmi1)
+				Expect(err).ToNot(HaveOccurred())
+				expectedMemory := resource.NewScaledQuantity(0, resource.Kilo)
+				expectedMemory.Add(*getMemoryOverhead(&vmi))
+				expectedMemory.Add(*domain.Resources.Requests.Memory())
+				Expect(pod.Spec.Containers[0].Resources.Requests.Memory().Value()).To(Equal(expectedMemory.Value()))
+				Expect(pod1.Spec.Containers[0].Resources.Requests.Memory().Value()).To(Equal(expectedMemory.Value()))
+			})
 		})
 		Context("with slirp interface", func() {
 			It("Should have empty port list in the pod manifest", func() {
 				slirpInterface := v1.InterfaceSlirp{}
-				domain := v1.DomainSpec{}
+				domain := v1.DomainSpec{
+					Devices: v1.Devices{
+						DisableHotplug: true,
+					},
+				}
 				domain.Devices.Interfaces = []v1.Interface{{Name: "testnet", InterfaceBindingMethod: v1.InterfaceBindingMethod{Slirp: &slirpInterface}}}
 				vmi := v1.VirtualMachineInstance{
 					ObjectMeta: metav1.ObjectMeta{
@@ -1615,7 +2071,11 @@ var _ = Describe("Template", func() {
 			It("Should create a port list in the pod manifest", func() {
 				slirpInterface := v1.InterfaceSlirp{}
 				ports := []v1.Port{{Name: "http", Port: 80}, {Protocol: "UDP", Port: 80}, {Port: 90}, {Name: "other-http", Port: 80}}
-				domain := v1.DomainSpec{}
+				domain := v1.DomainSpec{
+					Devices: v1.Devices{
+						DisableHotplug: true,
+					},
+				}
 				domain.Devices.Interfaces = []v1.Interface{{Name: "testnet", Ports: ports, InterfaceBindingMethod: v1.InterfaceBindingMethod{Slirp: &slirpInterface}}}
 				vmi := v1.VirtualMachineInstance{
 					ObjectMeta: metav1.ObjectMeta{
@@ -1647,7 +2107,11 @@ var _ = Describe("Template", func() {
 				slirpInterface2 := v1.InterfaceSlirp{}
 				ports1 := []v1.Port{{Name: "http", Port: 80}}
 				ports2 := []v1.Port{{Name: "other-http", Port: 80}}
-				domain := v1.DomainSpec{}
+				domain := v1.DomainSpec{
+					Devices: v1.Devices{
+						DisableHotplug: true,
+					},
+				}
 				domain.Devices.Interfaces = []v1.Interface{
 					{Name: "testnet",
 						Ports:                  ports1,
@@ -1694,7 +2158,7 @@ var _ = Describe("Template", func() {
 				caps := pod.Spec.Containers[0].SecurityContext.Capabilities
 
 				Expect(caps.Add).To(ContainElement(kubev1.Capability(CAP_NET_ADMIN)), "Expected compute container to be granted NET_ADMIN capability")
-				Expect(caps.Add).To(ContainElement(kubev1.Capability(CAP_NET_RAW)), "Expected compute container to be granted NET_RAW capability")
+				Expect(caps.Drop).To(ContainElement(kubev1.Capability(CAP_NET_RAW)), "Expected compute container to drop NET_RAW capability")
 			})
 
 			It("Should require tun device if explicitly requested", func() {
@@ -1718,7 +2182,7 @@ var _ = Describe("Template", func() {
 				caps := pod.Spec.Containers[0].SecurityContext.Capabilities
 
 				Expect(caps.Add).To(ContainElement(kubev1.Capability(CAP_NET_ADMIN)), "Expected compute container to be granted NET_ADMIN capability")
-				Expect(caps.Add).To(ContainElement(kubev1.Capability(CAP_NET_RAW)), "Expected compute container to be granted NET_RAW capability")
+				Expect(caps.Drop).To(ContainElement(kubev1.Capability(CAP_NET_RAW)), "Expected compute container to drop NET_RAW capability")
 			})
 
 			It("Should not require tun device if explicitly rejected", func() {
@@ -1741,7 +2205,7 @@ var _ = Describe("Template", func() {
 				caps := pod.Spec.Containers[0].SecurityContext.Capabilities
 
 				Expect(caps.Add).To(Not(ContainElement(kubev1.Capability(CAP_NET_ADMIN))), "Expected compute container not to be granted NET_ADMIN capability")
-				Expect(caps.Add).To(Not(ContainElement(kubev1.Capability(CAP_NET_RAW))), "Expected compute container not to be granted NET_RAW capability")
+				Expect(caps.Drop).To(ContainElement(kubev1.Capability(CAP_NET_RAW)), "Expected compute container to drop NET_RAW capability")
 			})
 		})
 
@@ -1763,7 +2227,11 @@ var _ = Describe("Template", func() {
 					ObjectMeta: metav1.ObjectMeta{
 						Name: "testvmi", Namespace: "default", UID: "1234",
 					},
-					Spec: v1.VirtualMachineInstanceSpec{Volumes: volumes, Domain: v1.DomainSpec{}},
+					Spec: v1.VirtualMachineInstanceSpec{Volumes: volumes, Domain: v1.DomainSpec{
+						Devices: v1.Devices{
+							DisableHotplug: true,
+						},
+					}},
 				}
 
 				pod, err := svc.RenderLaunchManifest(&vmi)
@@ -1792,7 +2260,11 @@ var _ = Describe("Template", func() {
 					ObjectMeta: metav1.ObjectMeta{
 						Name: "testvmi", Namespace: "default", UID: "1234",
 					},
-					Spec: v1.VirtualMachineInstanceSpec{Volumes: volumes, Domain: v1.DomainSpec{}},
+					Spec: v1.VirtualMachineInstanceSpec{Volumes: volumes, Domain: v1.DomainSpec{
+						Devices: v1.Devices{
+							DisableHotplug: true,
+						},
+					}},
 				}
 
 				pod, err := svc.RenderLaunchManifest(&vmi)
@@ -1844,7 +2316,11 @@ var _ = Describe("Template", func() {
 								},
 							},
 						},
-						Domain: v1.DomainSpec{}},
+						Domain: v1.DomainSpec{
+							Devices: v1.Devices{
+								DisableHotplug: true,
+							},
+						}},
 				}
 			})
 			It("should copy all specified probes", func() {
@@ -1894,6 +2370,7 @@ var _ = Describe("Template", func() {
 					Spec: v1.VirtualMachineInstanceSpec{
 						Domain: v1.DomainSpec{
 							Devices: v1.Devices{
+								DisableHotplug: true,
 								GPUs: []v1.GPU{
 									v1.GPU{
 										Name:       "gpu1",
@@ -1910,7 +2387,7 @@ var _ = Describe("Template", func() {
 				Expect(len(pod.Spec.Containers)).To(Equal(1))
 				Expect(*pod.Spec.Containers[0].SecurityContext.Privileged).To(BeFalse())
 			})
-			It("should mount pci related host directories", func() {
+			It("should not mount pci related host directories and should have gpu resource", func() {
 				vmi := v1.VirtualMachineInstance{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "testvmi",
@@ -1920,6 +2397,7 @@ var _ = Describe("Template", func() {
 					Spec: v1.VirtualMachineInstanceSpec{
 						Domain: v1.DomainSpec{
 							Devices: v1.Devices{
+								DisableHotplug: true,
 								GPUs: []v1.GPU{
 									v1.GPU{
 										Name:       "gpu1",
@@ -1934,12 +2412,94 @@ var _ = Describe("Template", func() {
 				pod, err := svc.RenderLaunchManifest(&vmi)
 				Expect(err).ToNot(HaveOccurred())
 				Expect(len(pod.Spec.Containers)).To(Equal(1))
-				// Skip first four mounts that are generic for all launcher pods
-				Expect(pod.Spec.Containers[0].VolumeMounts[4].MountPath).To(Equal("/sys/devices/"))
-				Expect(pod.Spec.Volumes[1].HostPath.Path).To(Equal("/sys/devices/"))
+
+				for _, volumeMount := range pod.Spec.Containers[0].VolumeMounts {
+					Expect(volumeMount.MountPath).ToNot(Equal("/sys/devices/"))
+				}
+
+				for _, volume := range pod.Spec.Volumes {
+					if volume.HostPath != nil {
+						Expect(volume.HostPath.Path).ToNot(Equal("/sys/devices/"))
+					}
+				}
 
 				resources := pod.Spec.Containers[0].Resources
 				val, ok := resources.Requests["vendor.com/gpu_name"]
+				Expect(ok).To(Equal(true))
+				Expect(val).To(Equal(*resource.NewQuantity(1, resource.DecimalSI)))
+			})
+		})
+
+		Context("with HostDevice device interface", func() {
+			It("should not run privileged", func() {
+				// For Power we are currently running in privileged mode or libvirt will fail to lock memory
+				if runtime.GOARCH == "ppc64le" {
+					Skip("ppc64le is currently running is privileged mode, so skipping test")
+				}
+				vmi := v1.VirtualMachineInstance{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "testvmi",
+						Namespace: "default",
+						UID:       "1234",
+					},
+					Spec: v1.VirtualMachineInstanceSpec{
+						Domain: v1.DomainSpec{
+							Devices: v1.Devices{
+								DisableHotplug: true,
+								HostDevices: []v1.HostDevice{
+									v1.HostDevice{
+										Name:       "hostdev1",
+										DeviceName: "vendor.com/dev_name",
+									},
+								},
+							},
+						},
+					},
+				}
+				pod, err := svc.RenderLaunchManifest(&vmi)
+				Expect(err).ToNot(HaveOccurred())
+
+				Expect(len(pod.Spec.Containers)).To(Equal(1))
+				Expect(*pod.Spec.Containers[0].SecurityContext.Privileged).To(BeFalse())
+			})
+			It("should not mount pci related host directories", func() {
+				vmi := v1.VirtualMachineInstance{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "testvmi",
+						Namespace: "default",
+						UID:       "1234",
+					},
+					Spec: v1.VirtualMachineInstanceSpec{
+						Domain: v1.DomainSpec{
+							Devices: v1.Devices{
+								DisableHotplug: true,
+								HostDevices: []v1.HostDevice{
+									v1.HostDevice{
+										Name:       "hostdev1",
+										DeviceName: "vendor.com/dev_name",
+									},
+								},
+							},
+						},
+					},
+				}
+
+				pod, err := svc.RenderLaunchManifest(&vmi)
+				Expect(err).ToNot(HaveOccurred())
+				Expect(len(pod.Spec.Containers)).To(Equal(1))
+
+				for _, volumeMount := range pod.Spec.Containers[0].VolumeMounts {
+					Expect(volumeMount.MountPath).ToNot(Equal("/sys/devices/"))
+				}
+
+				for _, volume := range pod.Spec.Volumes {
+					if volume.HostPath != nil {
+						Expect(volume.HostPath.Path).ToNot(Equal("/sys/devices/"))
+					}
+				}
+
+				resources := pod.Spec.Containers[0].Resources
+				val, ok := resources.Requests["vendor.com/dev_name"]
 				Expect(ok).To(Equal(true))
 				Expect(val).To(Equal(*resource.NewQuantity(1, resource.DecimalSI)))
 			})
@@ -1955,7 +2515,11 @@ var _ = Describe("Template", func() {
 				ObjectMeta: metav1.ObjectMeta{
 					Name: "testvmi", Namespace: "default", UID: "1234",
 				},
-				Spec: v1.VirtualMachineInstanceSpec{Volumes: []v1.Volume{}, Domain: v1.DomainSpec{}},
+				Spec: v1.VirtualMachineInstanceSpec{Volumes: []v1.Volume{}, Domain: v1.DomainSpec{
+					Devices: v1.Devices{
+						DisableHotplug: true,
+					},
+				}},
 			}
 			pod, err := svc.RenderLaunchManifest(&vmi)
 			Expect(err).ToNot(HaveOccurred())
@@ -2004,7 +2568,11 @@ var _ = Describe("Template", func() {
 				ObjectMeta: metav1.ObjectMeta{
 					Name: "testvmi", Namespace: "default", UID: "1234",
 				},
-				Spec: v1.VirtualMachineInstanceSpec{Volumes: volumes, Domain: v1.DomainSpec{}},
+				Spec: v1.VirtualMachineInstanceSpec{Volumes: volumes, Domain: v1.DomainSpec{
+					Devices: v1.Devices{
+						DisableHotplug: true,
+					},
+				}},
 			}
 
 			pod, err := svc.RenderLaunchManifest(&vmi)
@@ -2018,7 +2586,11 @@ var _ = Describe("Template", func() {
 				ObjectMeta: metav1.ObjectMeta{
 					Name: "testvmi", Namespace: "default", UID: "1234",
 				},
-				Spec: v1.VirtualMachineInstanceSpec{Domain: v1.DomainSpec{}},
+				Spec: v1.VirtualMachineInstanceSpec{Domain: v1.DomainSpec{
+					Devices: v1.Devices{
+						DisableHotplug: true,
+					},
+				}},
 			}
 
 			pod, err := svc.RenderLaunchManifest(&vmi)

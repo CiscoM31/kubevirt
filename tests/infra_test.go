@@ -22,8 +22,11 @@ package tests_test
 import (
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"net"
 	"net/http"
+	neturl "net/url"
 	"reflect"
 	"sort"
 	"strconv"
@@ -36,6 +39,7 @@ import (
 	. "github.com/onsi/gomega"
 	gomegatypes "github.com/onsi/gomega/types"
 	aggregatorclient "k8s.io/kube-aggregator/pkg/client/clientset_generated/clientset"
+	netutils "k8s.io/utils/net"
 
 	k8sv1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -43,22 +47,30 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/tools/leaderelection/resourcelock"
+	"k8s.io/client-go/util/retry"
+
+	v1ext "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	extclient "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset"
 
 	v1 "kubevirt.io/client-go/api/v1"
 	"kubevirt.io/client-go/kubecli"
 	clusterutil "kubevirt.io/kubevirt/pkg/util/cluster"
 	"kubevirt.io/kubevirt/pkg/virt-controller/leaderelectionconfig"
 	"kubevirt.io/kubevirt/pkg/virt-operator/creation/components"
+	crds "kubevirt.io/kubevirt/pkg/virt-operator/creation/components"
 	"kubevirt.io/kubevirt/tests"
+	"kubevirt.io/kubevirt/tests/console"
 	cd "kubevirt.io/kubevirt/tests/containerdisk"
 	"kubevirt.io/kubevirt/tests/flags"
+	"kubevirt.io/kubevirt/tests/libnet"
 )
 
-var _ = Describe("Infrastructure", func() {
-	var virtClient kubecli.KubevirtClient
-	var aggregatorClient *aggregatorclient.Clientset
-	var err error
-
+var _ = Describe("[Serial]Infrastructure", func() {
+	var (
+		virtClient       kubecli.KubevirtClient
+		aggregatorClient *aggregatorclient.Clientset
+		err              error
+	)
 	BeforeEach(func() {
 		virtClient, err = kubecli.GetKubevirtClient()
 		tests.PanicOnError(err)
@@ -73,14 +85,36 @@ var _ = Describe("Infrastructure", func() {
 		}
 	})
 
+	Describe("CRDs", func() {
+		It("[test_id:5177]Should have structural schema", func() {
+			ourCRDs := []string{crds.VIRTUALMACHINE, crds.VIRTUALMACHINEINSTANCE, crds.VIRTUALMACHINEINSTANCEPRESET,
+				crds.VIRTUALMACHINEINSTANCEREPLICASET, crds.VIRTUALMACHINEINSTANCEMIGRATION, crds.KUBEVIRT,
+				crds.VIRTUALMACHINESNAPSHOT, crds.VIRTUALMACHINESNAPSHOTCONTENT,
+			}
+
+			for _, name := range ourCRDs {
+				ext, err := extclient.NewForConfig(virtClient.Config())
+				Expect(err).ToNot(HaveOccurred())
+
+				crd, err := ext.ApiextensionsV1().CustomResourceDefinitions().Get(name, metav1.GetOptions{})
+				Expect(err).ToNot(HaveOccurred())
+
+				for _, condition := range crd.Status.Conditions {
+					if condition.Type == v1ext.NonStructuralSchema {
+						Expect(condition.Status).NotTo(BeTrue())
+					}
+				}
+			}
+		})
+	})
+
 	Describe("[rfe_id:4102][crit:medium][vendor:cnv-qe@redhat.com][level:component]certificates", func() {
 
 		BeforeEach(func() {
 			tests.BeforeTestCleanup()
 		})
 
-		// Flaky, randomly fails with timeout
-		PIt("[test_id:4099] [flaky] should be rotated when a new CA is created", func() {
+		It("[test_id:4099] should be rotated when a new CA is created", func() {
 			By("checking that the config-map gets the new CA bundle attached")
 			Eventually(func() int {
 				_, crts := tests.GetBundleFromConfigMap(components.KubeVirtCASecretName)
@@ -131,7 +165,7 @@ var _ = Describe("Infrastructure", func() {
 
 			By("checking that the ca bundle gets propagated to the apiservice")
 			Eventually(func() bool {
-				apiService, err := aggregatorClient.ApiregistrationV1beta1().APIServices().Get("v1alpha3.subresources.kubevirt.io", metav1.GetOptions{})
+				apiService, err := aggregatorClient.ApiregistrationV1beta1().APIServices().Get(fmt.Sprintf("%s.subresources.kubevirt.io", v1.ApiLatestVersion), metav1.GetOptions{})
 				Expect(err).ToNot(HaveOccurred())
 				return tests.ContainsCrt(apiService.Spec.CABundle, newCA)
 			}, 10*time.Second, 1*time.Second).Should(BeTrue())
@@ -139,13 +173,10 @@ var _ = Describe("Infrastructure", func() {
 			By("checking that we can still start virtual machines and connect to the VMI")
 			vmi := tests.NewRandomVMIWithEphemeralDisk(cd.ContainerDiskFor(cd.ContainerDiskAlpine))
 			vmi = tests.RunVMI(vmi, 60)
-			expecter, err := tests.LoggedInAlpineExpecter(vmi)
-			Expect(err).ToNot(HaveOccurred())
-			defer expecter.Close()
+			Expect(console.LoginToAlpine(vmi)).To(Succeed())
 		})
 
-		// Flaky, randomly fails with timeout
-		PIt("[test_id:4100] [flaky] should be valid during the whole rotation process", func() {
+		It("[test_id:4100] should be valid during the whole rotation process", func() {
 			oldAPICert := tests.EnsurePodsCertIsSynced(fmt.Sprintf("%s=%s", v1.AppLabel, "virt-api"), flags.KubeVirtInstallNamespace, "8443")
 			oldHandlerCert := tests.EnsurePodsCertIsSynced(fmt.Sprintf("%s=%s", v1.AppLabel, "virt-handler"), flags.KubeVirtInstallNamespace, "8186")
 			Expect(err).ToNot(HaveOccurred())
@@ -158,9 +189,7 @@ var _ = Describe("Infrastructure", func() {
 			Eventually(func() (rotated bool) {
 				vmi := tests.NewRandomVMIWithEphemeralDisk(cd.ContainerDiskFor(cd.ContainerDiskAlpine))
 				vmi = tests.RunVMI(vmi, 60)
-				expecter, err := tests.LoggedInAlpineExpecter(vmi)
-				Expect(err).ToNot(HaveOccurred())
-				expecter.Close()
+				Expect(console.LoginToAlpine(vmi)).To(Succeed())
 				err = virtClient.VirtualMachineInstance(vmi.Namespace).Delete(vmi.Name, &metav1.DeleteOptions{})
 				Expect(err).ToNot(HaveOccurred())
 				newAPICert, _, err := tests.GetPodsCertIfSynced(fmt.Sprintf("%s=%s", v1.AppLabel, "virt-api"), flags.KubeVirtInstallNamespace, "8443")
@@ -173,12 +202,18 @@ var _ = Describe("Infrastructure", func() {
 
 		table.DescribeTable("should be rotated when deleted for ", func(secretName string) {
 			By("destroying the certificate")
-			secret, err := virtClient.CoreV1().Secrets(flags.KubeVirtInstallNamespace).Get(secretName, metav1.GetOptions{})
-			Expect(err).ToNot(HaveOccurred())
-			secret.Data = map[string][]byte{
-				"random": []byte("nonsense"),
-			}
-			_, err = virtClient.CoreV1().Secrets(flags.KubeVirtInstallNamespace).Update(secret)
+			err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+				secret, err := virtClient.CoreV1().Secrets(flags.KubeVirtInstallNamespace).Get(secretName, metav1.GetOptions{})
+				if err != nil {
+					return err
+				}
+				secret.Data = map[string][]byte{
+					"random": []byte("nonsense"),
+				}
+				_, err = virtClient.CoreV1().Secrets(flags.KubeVirtInstallNamespace).Update(secret)
+
+				return err
+			})
 			Expect(err).ToNot(HaveOccurred())
 
 			By("checking that the secret gets restored with a new certificate")
@@ -212,66 +247,79 @@ var _ = Describe("Infrastructure", func() {
 
 	Describe("[rfe_id:4126][crit:medium][vendor:cnv-qe@redhat.com][level:component]Taints and toleration", func() {
 
-		It("[test_id:4134]should tolerate CriticalAddonsOnly toleration", func() {
+		Context("CriticalAddonsOnly taint set on a node", func() {
 
-			var kvPods *k8sv1.PodList
-			By("finding all nodes that are running kubevirt components", func() {
-				kvPods, err = virtClient.CoreV1().
-					Pods(flags.KubeVirtInstallNamespace).List(metav1.ListOptions{})
-				Expect(err).ToNot(HaveOccurred(), "failed listing kubevirt pods")
-				Expect(len(kvPods.Items)).
-					To(BeNumerically(">", 0), "no kubevirt pods found")
+			var selectedNodeName string
+
+			BeforeEach(func() {
+				selectedNodeName = ""
 			})
 
-			// nodes that run kubevirt components.
-			kvTaintedNodes := make(map[string]*k8sv1.Node)
-			By("adding taints to any node that runs kubevirt component", func() {
-				criticalPodTaint := k8sv1.Taint{
-					Key:    "CriticalAddonsOnly",
-					Value:  "",
-					Effect: k8sv1.TaintEffectNoExecute,
-				}
-
-				for _, kvPod := range kvPods.Items {
-					if _, exists := kvTaintedNodes[kvPod.Spec.NodeName]; exists {
-						continue
-					}
-					kvNode, err := virtClient.CoreV1().Nodes().Get(kvPod.Spec.NodeName, metav1.GetOptions{})
-					Expect(err).ToNot(HaveOccurred(), "failed retrieving node")
-					hasTaint := false
-					// check if node already has the taint
-					for _, taint := range kvNode.Spec.Taints {
-						if reflect.DeepEqual(taint, criticalPodTaint) {
-							// node already have the taint set
-							hasTaint = true
-							break
+			AfterEach(func() {
+				if selectedNodeName != "" {
+					By("removing the taint from the tainted node")
+					err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+						selectedNode, err := virtClient.CoreV1().Nodes().Get(selectedNodeName, metav1.GetOptions{})
+						if err != nil {
+							return err
 						}
-					}
-					if hasTaint {
-						continue
-					}
-					kvNode.ResourceVersion = ""
-					kvTaintedNodes[kvPod.Spec.NodeName] = kvNode
-					kvNodeCopy := kvNode.DeepCopy()
-					kvNodeCopy.Spec.Taints = append(kvNodeCopy.Spec.Taints, criticalPodTaint)
-					_, err = virtClient.CoreV1().Nodes().Update(kvNodeCopy)
-					Expect(err).ToNot(HaveOccurred(), "failed setting taint on node")
+
+						var taints []k8sv1.Taint
+						for _, taint := range selectedNode.Spec.Taints {
+							if taint.Key != "CriticalAddonsOnly" {
+								taints = append(taints, taint)
+							}
+						}
+
+						nodeCopy := selectedNode.DeepCopy()
+						nodeCopy.ResourceVersion = ""
+						nodeCopy.Spec.Taints = taints
+
+						_, err = virtClient.CoreV1().Nodes().Update(nodeCopy)
+						return err
+					})
+					Expect(err).ShouldNot(HaveOccurred())
 				}
 			})
 
-			defer func() {
-				var errors []error
-				By("restoring nodes")
-				for _, nodeSpec := range kvTaintedNodes {
-					_, err = virtClient.CoreV1().Nodes().Update(nodeSpec)
-					if err != nil {
-						errors = append(errors, err)
-					}
-				}
-				Expect(errors).Should(BeEmpty(), "failed restoring one or more nodes")
-			}()
+			It("[test_id:4134] kubevirt components on that node should not evict", func() {
 
-			By("watching for terminated kubevirt pods", func() {
+				By("finding all kubevirt pods")
+				pods, err := virtClient.CoreV1().Pods(flags.KubeVirtInstallNamespace).List(metav1.ListOptions{})
+				Expect(err).ShouldNot(HaveOccurred(), "failed listing kubevirt pods")
+				Expect(len(pods.Items)).To(BeNumerically(">", 0), "no kubevirt pods found")
+
+				By("finding all schedulable nodes")
+				schedulableNodesList := tests.GetAllSchedulableNodes(virtClient)
+				schedulableNodes := map[string]*k8sv1.Node{}
+				for _, node := range schedulableNodesList.Items {
+					schedulableNodes[node.Name] = node.DeepCopy()
+				}
+
+				By("selecting one compute only node that runs kubevirt components")
+				// master nodes should never have the CriticalAddonsOnly taint because core components might not
+				// tolerate this taint because it is meant to be used on compute nodes only. If we set this taint
+				// on a master node, we risk in breaking the test cluster.
+				for _, pod := range pods.Items {
+					node, ok := schedulableNodes[pod.Spec.NodeName]
+					if !ok {
+						// Pod is running on a non-schedulable node?
+						continue
+					}
+					if _, isMaster := node.Labels["node-role.kubernetes.io/master"]; isMaster {
+						continue
+					}
+					selectedNodeName = node.Name
+					break
+				}
+
+				// It is possible to run this test on a cluster that simply does not have worker nodes.
+				// Since KubeVirt can't control that, the only correct action is to halt the test.
+				if selectedNodeName == "" {
+					Skip("Could nould determine a node to safely taint")
+				}
+
+				By("setting up a watch for terminated pods")
 				lw, err := virtClient.CoreV1().Pods(flags.KubeVirtInstallNamespace).Watch(metav1.ListOptions{})
 				Expect(err).ToNot(HaveOccurred())
 				// in the test env, we also deploy non core-kubevirt apps
@@ -281,6 +329,7 @@ var _ = Describe("Infrastructure", func() {
 					"virt-api":        "",
 					"virt-operator":   "",
 				}
+
 				signalTerminatedPods := func(stopCn <-chan bool, eventsCn <-chan watch.Event, terminatedPodsCn chan<- bool) {
 					for {
 						select {
@@ -303,12 +352,31 @@ var _ = Describe("Infrastructure", func() {
 				stopCn := make(chan bool, 1)
 				terminatedPodsCn := make(chan bool, 1)
 				go signalTerminatedPods(stopCn, lw.ResultChan(), terminatedPodsCn)
-				Consistently(terminatedPodsCn, 5*time.Second).
-					ShouldNot(Receive(), "pods should not terminate")
+
+				By("tainting the selected node")
+				err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
+					selectedNode, err := virtClient.CoreV1().Nodes().Get(selectedNodeName, metav1.GetOptions{})
+					if err != nil {
+						return err
+					}
+
+					selectedNodeCopy := selectedNode.DeepCopy()
+					selectedNodeCopy.Spec.Taints = append(selectedNodeCopy.Spec.Taints, k8sv1.Taint{
+						Key:    "CriticalAddonsOnly",
+						Value:  "",
+						Effect: k8sv1.TaintEffectNoExecute,
+					})
+
+					_, err = virtClient.CoreV1().Nodes().Update(selectedNodeCopy)
+					return err
+				})
+				Expect(err).ShouldNot(HaveOccurred())
+
+				Consistently(terminatedPodsCn, 5*time.Second).ShouldNot(Receive(), "pods should not terminate")
 				stopCn <- true
 			})
-		})
 
+		})
 	})
 
 	Describe("[rfe_id:3187][crit:medium][vendor:cnv-qe@redhat.com][level:component]Prometheus scraped metrics", func() {
@@ -349,10 +417,19 @@ var _ = Describe("Infrastructure", func() {
 			op := ops.Items[0]
 			Expect(op).ToNot(BeNil(), "virt-operator pod should not be nil")
 
+			var ep *k8sv1.Endpoints
 			By("finding Prometheus endpoint")
-			ep, err := virtClient.CoreV1().Endpoints("openshift-monitoring").
-				Get("prometheus-k8s", metav1.GetOptions{})
-			Expect(err).ToNot(HaveOccurred(), "failed to retrieve Prometheus endpoint")
+			Eventually(func() bool {
+				ep, err = virtClient.CoreV1().Endpoints("openshift-monitoring").
+					Get("prometheus-k8s", metav1.GetOptions{})
+				Expect(err).ToNot(HaveOccurred(), "failed to retrieve Prometheus endpoint")
+
+				if len(ep.Subsets) == 0 || len(ep.Subsets[0].Addresses) == 0 {
+					return false
+				}
+				return true
+			}, 10*time.Second, time.Second).Should(BeTrue())
+
 			promIP := ep.Subsets[0].Addresses[0].IP
 			Expect(promIP).ToNot(Equal(0), "could not get Prometheus IP from endpoint")
 			var promPort int32
@@ -413,7 +490,7 @@ var _ = Describe("Infrastructure", func() {
 	Describe("[rfe_id:3187][crit:medium][vendor:cnv-qe@redhat.com][level:component]Prometheus Endpoints", func() {
 		var preparedVMIs []*v1.VirtualMachineInstance
 		var pod *k8sv1.Pod
-		var metricsURL string
+		var metricsIPs []string
 
 		pinVMIOnNode := func(vmi *v1.VirtualMachineInstance, nodeName string) *v1.VirtualMachineInstance {
 			if vmi == nil {
@@ -427,7 +504,8 @@ var _ = Describe("Infrastructure", func() {
 		}
 
 		// returns metrics from the node the VMI(s) runs on
-		getKubevirtVMMetrics := func() string {
+		getKubevirtVMMetrics := func(ip string) string {
+			metricsURL := prepareMetricsURL(ip, 8443)
 			stdout, _, err := tests.ExecuteCommandOnPodV2(virtClient,
 				pod,
 				"virt-handler",
@@ -442,13 +520,13 @@ var _ = Describe("Infrastructure", func() {
 		}
 
 		// collect metrics whose key contains the given string, expects non-empty result
-		collectMetrics := func(metricSubstring string) map[string]float64 {
+		collectMetrics := func(ip, metricSubstring string) map[string]float64 {
 			By("Scraping the Prometheus endpoint")
 			var metrics map[string]float64
 			var lines []string
 
 			Eventually(func() map[string]float64 {
-				out := getKubevirtVMMetrics()
+				out := getKubevirtVMMetrics(ip)
 				lines = takeMetricsWithPrefix(out, metricSubstring)
 				metrics, err = parseMetricsToMap(lines)
 				Expect(err).ToNot(HaveOccurred())
@@ -485,18 +563,15 @@ var _ = Describe("Infrastructure", func() {
 			By("Expecting the VirtualMachineInstance console")
 			// This also serves as a sync point to make sure the VM completed the boot
 			// (and reduce the risk of false negatives)
-			expecter, err := tests.LoggedInAlpineExpecter(vmi)
-			Expect(err).ToNot(HaveOccurred())
-			defer expecter.Close()
+			Expect(console.LoginToAlpine(vmi)).To(Succeed())
 
 			By("Writing some data to the disk")
-			_, err = expecter.ExpectBatch([]expect.Batcher{
+			Expect(console.SafeExpectBatch(vmi, []expect.Batcher{
 				&expect.BSnd{S: "dd if=/dev/zero of=/dev/vdb bs=1M count=1\n"},
-				&expect.BExp{R: `localhost:~#`},
+				&expect.BExp{R: console.PromptExpression},
 				&expect.BSnd{S: "sync\n"},
-				&expect.BExp{R: `localhost:~#`},
-			}, 10*time.Second)
-			Expect(err).ToNot(HaveOccurred())
+				&expect.BExp{R: console.PromptExpression},
+			}, 10)).To(Succeed())
 
 			preparedVMIs = append(preparedVMIs, vmi)
 			return nodeName
@@ -518,7 +593,9 @@ var _ = Describe("Infrastructure", func() {
 			By("Finding the prometheus endpoint")
 			pod, err = kubecli.NewVirtHandlerClient(virtClient).Namespace(flags.KubeVirtInstallNamespace).ForNode(nodeName).Pod()
 			Expect(err).ToNot(HaveOccurred(), "Should find the virt-handler pod")
-			metricsURL = fmt.Sprintf("https://%s:%d/metrics", tests.FormatIPForURL(pod.Status.PodIP), 8443)
+			for _, ip := range pod.Status.PodIPs {
+				metricsIPs = append(metricsIPs, ip.IP)
+			}
 		})
 
 		PIt("[test_id:4136][flaky] should find one leading virt-controller and two ready", func() {
@@ -647,8 +724,17 @@ var _ = Describe("Infrastructure", func() {
 			}
 		})
 
-		It("[test_id:4140]should throttle the Prometheus metrics access", func() {
-			By("Scraping the Prometheus endpoint")
+		table.DescribeTable("should throttle the Prometheus metrics access", func(family k8sv1.IPFamily) {
+			if family == k8sv1.IPv6Protocol {
+				libnet.SkipWhenNotDualStackCluster(virtClient)
+			}
+
+			ip := getSupportedIP(metricsIPs, family)
+
+			if netutils.IsIPv6String(ip) {
+				Skip("Skip testing with IPv6 until https://github.com/kubevirt/kubevirt/issues/4145 is fixed")
+			}
+
 			concurrency := 100 // random value "much higher" than maxRequestsInFlight
 
 			tr := &http.Transport{
@@ -663,9 +749,11 @@ var _ = Describe("Infrastructure", func() {
 				Transport: tr,
 			}
 
-			errors := make(chan error)
+			errorsChan := make(chan error)
+			By("Scraping the Prometheus endpoint")
+			metricsURL := prepareMetricsURL(ip, 8443)
 			for ix := 0; ix < concurrency; ix++ {
-				go func() {
+				go func(ix int) {
 					req, _ := http.NewRequest("GET", metricsURL, nil)
 					resp, err := client.Do(req)
 					if err != nil {
@@ -673,33 +761,43 @@ var _ = Describe("Infrastructure", func() {
 					} else {
 						resp.Body.Close()
 					}
-					errors <- err
-				}()
+					errorsChan <- err
+				}(ix)
 			}
 
-			errorCount := 0
-			for ix := 0; ix < concurrency; ix++ {
-				err := <-errors
-				if err != nil {
-					errorCount += 1
-				}
+			err := validatedHTTPResponses(errorsChan, concurrency)
+			Expect(err).ToNot(HaveOccurred(), "Should throttle HTTP access without unexpected errors")
+		},
+			table.Entry("[test_id:4140] by using IPv4", k8sv1.IPv4Protocol),
+			table.Entry("by using IPv6", k8sv1.IPv6Protocol),
+		)
+
+		table.DescribeTable("should include the metrics for a running VM", func(family k8sv1.IPFamily) {
+			if family == k8sv1.IPv6Protocol {
+				libnet.SkipWhenNotDualStackCluster(virtClient)
 			}
 
-			fmt.Fprintf(GinkgoWriter, "client: total errors #%d\n", errorCount) // troubleshooting helper
-			Expect(errorCount).To(BeNumerically(">", 0))
-		})
+			ip := getSupportedIP(metricsIPs, family)
 
-		It("[test_id:4141]should include the metrics for a running VM", func() {
 			By("Scraping the Prometheus endpoint")
 			Eventually(func() string {
-				out := getKubevirtVMMetrics()
+				out := getKubevirtVMMetrics(ip)
 				lines := takeMetricsWithPrefix(out, "kubevirt")
 				return strings.Join(lines, "\n")
 			}, 30*time.Second, 2*time.Second).Should(ContainSubstring("kubevirt"))
-		})
+		},
+			table.Entry("[test_id:4141] by using IPv4", k8sv1.IPv4Protocol),
+			table.Entry("by using IPv6", k8sv1.IPv6Protocol),
+		)
 
-		It("[test_id:4142]should include the storage metrics for a running VM", func() {
-			metrics := collectMetrics("kubevirt_vmi_storage_")
+		table.DescribeTable("should include the storage metrics for a running VM", func(family k8sv1.IPFamily) {
+			if family == k8sv1.IPv6Protocol {
+				libnet.SkipWhenNotDualStackCluster(virtClient)
+			}
+
+			ip := getSupportedIP(metricsIPs, family)
+
+			metrics := collectMetrics(ip, "kubevirt_vmi_storage_")
 			By("Checking the collected metrics")
 			keys := getKeysFromMetrics(metrics)
 			for _, key := range keys {
@@ -708,47 +806,47 @@ var _ = Describe("Infrastructure", func() {
 					Expect(value).To(BeNumerically(">", float64(0.0)))
 				}
 			}
-		})
+		},
+			table.Entry("[test_id:4142] by using IPv4", k8sv1.IPv4Protocol),
+			table.Entry("by using IPv6", k8sv1.IPv6Protocol),
+		)
 
-		It("[test_id:4143]should include the network metrics for a running VM", func() {
-			metrics := collectMetrics("kubevirt_vmi_network_")
+		table.DescribeTable("should include metrics for a running VM", func(family k8sv1.IPFamily, metricSubstring, operator string) {
+			if family == k8sv1.IPv6Protocol {
+				libnet.SkipWhenNotDualStackCluster(virtClient)
+			}
+
+			ip := getSupportedIP(metricsIPs, family)
+
+			metrics := collectMetrics(ip, metricSubstring)
 			By("Checking the collected metrics")
 			keys := getKeysFromMetrics(metrics)
 			for _, key := range keys {
 				value := metrics[key]
-				Expect(value).To(BeNumerically(">=", float64(0.0)))
+				fmt.Fprintf(GinkgoWriter, "metric value was %f\n", value)
+				Expect(value).To(BeNumerically(operator, float64(0.0)))
 			}
-		})
+		},
+			table.Entry("[test_id:4143] network metrics by IPv4", k8sv1.IPv4Protocol, "kubevirt_vmi_network_", ">="),
+			table.Entry("network metrics by IPv6", k8sv1.IPv6Protocol, "kubevirt_vmi_network_", ">="),
+			table.Entry("[test_id:4144] memory metrics by IPv4", k8sv1.IPv4Protocol, "kubevirt_vmi_memory", ">="),
+			table.Entry("memory metrics by IPv6", k8sv1.IPv6Protocol, "kubevirt_vmi_memory", ">="),
+			table.Entry("[test_id:4553] vcpu wait by IPv4", k8sv1.IPv4Protocol, "kubevirt_vmi_vcpu_wait", "=="),
+			table.Entry("vcpu wait by IPv6", k8sv1.IPv6Protocol, "kubevirt_vmi_vcpu_wait", "=="),
+			table.Entry("[test_id:4554] vcpu seconds by IPv4", k8sv1.IPv4Protocol, "kubevirt_vmi_vcpu_seconds", ">="),
+			table.Entry("vcpu seconds by IPv6", k8sv1.IPv6Protocol, "kubevirt_vmi_vcpu_seconds", ">="),
+			table.Entry("[test_id:4556] vmi unused memory by IPv4", k8sv1.IPv4Protocol, "kubevirt_vmi_memory_unused_bytes", ">="),
+			table.Entry("vmi unused memory by IPv6", k8sv1.IPv6Protocol, "kubevirt_vmi_memory_unused_bytes", ">="),
+		)
 
-		It("[test_id:4144]should include the memory metrics for a running VM", func() {
-			metrics := collectMetrics("kubevirt_vmi_memory")
-			By("Checking the collected metrics")
-			keys := getKeysFromMetrics(metrics)
-			for _, key := range keys {
-				value := metrics[key]
-				// swap metrics may (and should) be actually zero
-				Expect(value).To(BeNumerically(">=", float64(0.0)))
+		table.DescribeTable("should include VMI infos for a running VM", func(family k8sv1.IPFamily) {
+			if family == k8sv1.IPv6Protocol {
+				libnet.SkipWhenNotDualStackCluster(virtClient)
 			}
-		})
 
-		It("[test_id:4553]should include the vcpu wait metrics for running VM", func() {
-			metrics := collectMetrics("kubevirt_vmi_vcpu_wait")
-			for _, v := range metrics {
-				fmt.Fprintf(GinkgoWriter, "vcpu wait was %f", v)
-				Expect(v).To(BeNumerically("==", float64(0.0)))
-			}
-		})
+			ip := getSupportedIP(metricsIPs, family)
 
-		It("[test_id:4554]should include the vcpu seconds metrics for running VM", func() {
-			metrics := collectMetrics("kubevirt_vmi_vcpu_seconds")
-			for _, v := range metrics {
-				fmt.Fprintf(GinkgoWriter, "vcpu seconds was %f", v)
-				Expect(v).To(BeNumerically(">=", float64(0.0)))
-			}
-		})
-
-		It("[test_id:4145]should include VMI infos for a running VM", func() {
-			metrics := collectMetrics("kubevirt_vmi_")
+			metrics := collectMetrics(ip, "kubevirt_vmi_")
 			By("Checking the collected metrics")
 			keys := getKeysFromMetrics(metrics)
 			nodeName := pod.Spec.NodeName
@@ -775,50 +873,65 @@ var _ = Describe("Infrastructure", func() {
 					SatisfyAny(nameMatchers...),
 				))
 			}
-		})
+		},
+			table.Entry("[test_id:4145] by IPv4", k8sv1.IPv4Protocol),
+			table.Entry("by IPv6", k8sv1.IPv6Protocol),
+		)
 
-		It("[test_id:4146]should include VMI phase metrics for few running VMs", func() {
-			// this tests requires at least two running VMis. To ensure this condition,
-			// the simplest way is just always run an additional VMI.
-			By("Creating another VirtualMachineInstance")
+		table.DescribeTable("should include VMI phase metrics for all running VMs", func(family k8sv1.IPFamily) {
+			if family == k8sv1.IPv6Protocol {
+				libnet.SkipWhenNotDualStackCluster(virtClient)
+			}
 
-			// `pod` is the pod of the virt-handler of the node on which we run all the VMIs
-			// when setting up the tests. So we implicitely run all the VMIs on the same node,
-			// so the test works. TODO: make this explicit.
-			preferredNodeName := pod.Spec.NodeName
-			vmi := pinVMIOnNode(tests.NewRandomVMI(), preferredNodeName)
-			nodeName := startVMI(vmi)
-			Expect(nodeName).To(Equal(preferredNodeName), "Should run VMIs on the same node")
+			ip := getSupportedIP(metricsIPs, family)
 
-			metrics := collectMetrics("kubevirt_vmi_")
+			metrics := collectMetrics(ip, "kubevirt_vmi_")
 			By("Checking the collected metrics")
 			keys := getKeysFromMetrics(metrics)
 			for _, key := range keys {
 				if strings.Contains(key, `phase="running"`) {
 					value := metrics[key]
-					Expect(value).To(Equal(float64(len(preparedVMIs) + 1)))
+					Expect(value).To(Equal(float64(len(preparedVMIs))))
 				}
 			}
-		})
+		},
+			table.Entry("[test_id:4146] by IPv4", k8sv1.IPv4Protocol),
+			table.Entry("by IPv6", k8sv1.IPv6Protocol),
+		)
 
-		It("[test_id:4147]should include kubernetes labels to VMI metrics", func() {
+		table.DescribeTable("should include kubernetes labels to VMI metrics", func(family k8sv1.IPFamily) {
+			if family == k8sv1.IPv6Protocol {
+				libnet.SkipWhenNotDualStackCluster(virtClient)
+			}
+
+			ip := getSupportedIP(metricsIPs, family)
+
 			// Every VMI is labeled with kubevirt.io/nodeName, so just creating a VMI should
 			// be enough to its metrics to contain a kubernetes label
-			containK8sLabel := false
-			metrics := collectMetrics("kubevirt_vmi_vcpu_seconds")
+			metrics := collectMetrics(ip, "kubevirt_vmi_vcpu_seconds")
 			By("Checking collected metrics")
 			keys := getKeysFromMetrics(metrics)
+			containK8sLabel := false
 			for _, key := range keys {
 				if strings.Contains(key, "kubernetes_vmi_label_") {
 					containK8sLabel = true
 				}
 			}
 			Expect(containK8sLabel).To(Equal(true))
-		})
+		},
+			table.Entry("[test_id:4147] by IPv4", k8sv1.IPv4Protocol),
+			table.Entry("by IPv6", k8sv1.IPv6Protocol),
+		)
 
 		// explicit test fo swap metrics as test_id:4144 doesn't catch if they are missing
-		It("[test_id:4555]should include swap metrics", func() {
-			metrics := collectMetrics("kubevirt_vmi_memory_swap_")
+		table.DescribeTable("should include swap metrics", func(family k8sv1.IPFamily) {
+			if family == k8sv1.IPv6Protocol {
+				libnet.SkipWhenNotDualStackCluster(virtClient)
+			}
+
+			ip := getSupportedIP(metricsIPs, family)
+
+			metrics := collectMetrics(ip, "kubevirt_vmi_memory_swap_")
 			var in, out bool
 			for k, _ := range metrics {
 				if in && out {
@@ -834,7 +947,10 @@ var _ = Describe("Infrastructure", func() {
 
 			Expect(in).To(BeTrue())
 			Expect(out).To(BeTrue())
-		})
+		},
+			table.Entry("[test_id:4555] by IPv4", k8sv1.IPv4Protocol),
+			table.Entry("by IPv6", k8sv1.IPv6Protocol),
+		)
 	})
 
 	Describe("Start a VirtualMachineInstance", func() {
@@ -952,4 +1068,42 @@ func getKeysFromMetrics(metrics map[string]float64) []string {
 	// we sort keys only to make debug of test failures easier
 	sort.Strings(keys)
 	return keys
+}
+
+// validatedHTTPResponses checks the HTTP responses.
+// It expects timeout errors, due to the throttling on the producer side.
+// In case of unexpected errors or no errors at all it would fail,
+// returning the first unexpected error if any, or a custom error in case
+// there were no errors at all.
+func validatedHTTPResponses(errorsChan chan error, concurrency int) error {
+	var expectedErrorsCount int = 0
+	var unexpectedError error
+	for ix := 0; ix < concurrency; ix++ {
+		err := <-errorsChan
+		if unexpectedError == nil && err != nil {
+			var e *neturl.Error
+			if errors.As(err, &e) && e.Timeout() {
+				expectedErrorsCount++
+			} else {
+				unexpectedError = err
+			}
+		}
+	}
+
+	if unexpectedError == nil && expectedErrorsCount == 0 {
+		return fmt.Errorf("timeout errors were expected due to throttling")
+	}
+
+	return unexpectedError
+}
+
+func getSupportedIP(ips []string, family k8sv1.IPFamily) string {
+	ip := libnet.GetIp(ips, family)
+	ExpectWithOffset(1, ip).NotTo(BeEmpty())
+
+	return ip
+}
+
+func prepareMetricsURL(ip string, port int) string {
+	return fmt.Sprintf("https://%s/metrics", net.JoinHostPort(ip, strconv.Itoa(port)))
 }

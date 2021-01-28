@@ -73,10 +73,17 @@ var MigrationGroupVersionResource = metav1.GroupVersionResource{
 	Resource: "virtualmachineinstancemigrations",
 }
 
+var KubeVirtGroupVersionResource = metav1.GroupVersionResource{
+	Group:    v1.KubeVirtGroupVersionKind.Group,
+	Version:  v1.KubeVirtGroupVersionKind.Version,
+	Resource: "kubevirts",
+}
+
 type Informers struct {
 	VMIPresetInformer       cache.SharedIndexInformer
 	NamespaceLimitsInformer cache.SharedIndexInformer
 	VMIInformer             cache.SharedIndexInformer
+	VMRestoreInformer       cache.SharedIndexInformer
 }
 
 // XXX fix this, this is a huge mess. Move informers to Admitter and Mutator structs.
@@ -112,10 +119,11 @@ func newInformers() *Informers {
 		VMIInformer:             kubeInformerFactory.VMI(),
 		VMIPresetInformer:       kubeInformerFactory.VirtualMachinePreset(),
 		NamespaceLimitsInformer: kubeInformerFactory.LimitRanges(),
+		VMRestoreInformer:       kubeInformerFactory.VirtualMachineRestore(),
 	}
 }
 
-func GetAllowedServiceAccounts() map[string]struct{} {
+func IsKubeVirtServiceAccount(serviceAccount string) bool {
 	ns, err := clientutil.GetNamespace()
 	logger := log.DefaultLogger()
 
@@ -124,11 +132,8 @@ func GetAllowedServiceAccounts() map[string]struct{} {
 		ns = "kubevirt"
 	}
 
-	// system:serviceaccount:{namespace}:{kubevirt-component}
-	prefix := fmt.Sprintf("%s:%s:%s", "system", "serviceaccount", ns)
-	return map[string]struct{}{
-		fmt.Sprintf("%s:%s", prefix, rbac.ApiServiceAccountName):        {},
-		fmt.Sprintf("%s:%s", prefix, rbac.HandlerServiceAccountName):    {},
-		fmt.Sprintf("%s:%s", prefix, rbac.ControllerServiceAccountName): {},
-	}
+	prefix := fmt.Sprintf("system:serviceaccount:%s", ns)
+	return serviceAccount == fmt.Sprintf("%s:%s", prefix, rbac.ApiServiceAccountName) ||
+		serviceAccount == fmt.Sprintf("%s:%s", prefix, rbac.HandlerServiceAccountName) ||
+		serviceAccount == fmt.Sprintf("%s:%s", prefix, rbac.ControllerServiceAccountName)
 }

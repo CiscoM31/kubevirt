@@ -47,7 +47,8 @@ import (
 )
 
 const (
-	virtOperatorJobAppLabel = "virt-operator-strategy-dumper"
+	virtOperatorJobAppLabel    = "virt-operator-strategy-dumper"
+	installStrategyKeyTemplate = "%s-%d"
 )
 
 type KubeVirtController struct {
@@ -637,7 +638,7 @@ func (c *KubeVirtController) execute(key string) error {
 	if kv.DeletionTimestamp != nil {
 		syncError = c.syncDeletion(kvCopy)
 	} else {
-		syncError = c.syncDeployment(kvCopy)
+		syncError = c.syncInstallation(kvCopy)
 	}
 
 	// set timestamps on conditions if they changed
@@ -771,20 +772,19 @@ func (c *KubeVirtController) garbageCollectInstallStrategyJobs() error {
 	return nil
 }
 
-func (c *KubeVirtController) getInstallStrategyFromMap(config *operatorutil.KubeVirtDeploymentConfig) (*installstrategy.InstallStrategy, bool) {
+func (c *KubeVirtController) getInstallStrategyFromMap(config *operatorutil.KubeVirtDeploymentConfig, generation int64) (*installstrategy.InstallStrategy, bool) {
 	c.installStrategyMutex.Lock()
 	defer c.installStrategyMutex.Unlock()
 
-	strategy, ok := c.installStrategyMap[config.GetDeploymentID()]
+	strategy, ok := c.installStrategyMap[fmt.Sprintf(installStrategyKeyTemplate, config.GetDeploymentID(), generation)]
 	return strategy, ok
 }
 
-func (c *KubeVirtController) cacheInstallStrategyInMap(strategy *installstrategy.InstallStrategy, config *operatorutil.KubeVirtDeploymentConfig) {
+func (c *KubeVirtController) cacheInstallStrategyInMap(strategy *installstrategy.InstallStrategy, config *operatorutil.KubeVirtDeploymentConfig, generation int64) {
 
 	c.installStrategyMutex.Lock()
 	defer c.installStrategyMutex.Unlock()
-	c.installStrategyMap[config.GetDeploymentID()] = strategy
-
+	c.installStrategyMap[fmt.Sprintf(installStrategyKeyTemplate, config.GetDeploymentID(), generation)] = strategy
 }
 
 func (c *KubeVirtController) deleteAllInstallStrategy() error {
@@ -827,7 +827,7 @@ func (c *KubeVirtController) getInstallStrategyJob(config *operatorutil.KubeVirt
 
 // Loads install strategies into memory, and generates jobs to
 // create install strategies that don't exist yet.
-func (c *KubeVirtController) loadInstallStrategy(kv *v1.KubeVirt, loadObservedVersion bool) (*installstrategy.InstallStrategy, bool, error) {
+func (c *KubeVirtController) loadInstallStrategy(kv *v1.KubeVirt) (*installstrategy.InstallStrategy, bool, error) {
 
 	kvkey, err := controller.KeyFunc(kv)
 	if err != nil {
@@ -835,15 +835,8 @@ func (c *KubeVirtController) loadInstallStrategy(kv *v1.KubeVirt, loadObservedVe
 	}
 
 	config := operatorutil.GetTargetConfigFromKV(kv)
-	if loadObservedVersion {
-		config, err = operatorutil.GetObservedConfigFromKV(kv)
-		if err != nil {
-			return nil, true, err
-		}
-	}
-
 	// 1. see if we already loaded the install strategy
-	strategy, ok := c.getInstallStrategyFromMap(config)
+	strategy, ok := c.getInstallStrategyFromMap(config, kv.Generation)
 	if ok {
 		// we already loaded this strategy into memory
 		return strategy, false, nil
@@ -852,7 +845,7 @@ func (c *KubeVirtController) loadInstallStrategy(kv *v1.KubeVirt, loadObservedVe
 	// 2. look for install strategy config map in cache.
 	strategy, err = installstrategy.LoadInstallStrategyFromCache(c.stores, config)
 	if err == nil {
-		c.cacheInstallStrategyInMap(strategy, config)
+		c.cacheInstallStrategyInMap(strategy, config, kv.Generation)
 		log.Log.Infof("Loaded install strategy for kubevirt version %s into cache", config.GetKubeVirtVersion())
 		return strategy, false, nil
 	}
@@ -961,10 +954,8 @@ func isUpdating(kv *v1.KubeVirt) bool {
 	return false
 }
 
-func (c *KubeVirtController) syncDeployment(kv *v1.KubeVirt) error {
-	var prevStrategy *installstrategy.InstallStrategy
+func (c *KubeVirtController) syncInstallation(kv *v1.KubeVirt) error {
 	var targetStrategy *installstrategy.InstallStrategy
-	var prevPending bool
 	var targetPending bool
 	var err error
 
@@ -991,25 +982,17 @@ func (c *KubeVirtController) syncDeployment(kv *v1.KubeVirt) error {
 
 	if isUpdating(kv) {
 		util.UpdateConditionsUpdating(kv)
-		// If this is an update, we need to retrieve the install strategy of the
-		// previous version. This is only necessary because there are settings
-		// related to SCC privileges that we can't infere without the previous
-		// strategy.
-		prevStrategy, prevPending, err = c.loadInstallStrategy(kv, true)
-		if err != nil {
-			return err
-		}
 	} else {
 		util.UpdateConditionsDeploying(kv)
 	}
 
-	targetStrategy, targetPending, err = c.loadInstallStrategy(kv, false)
+	targetStrategy, targetPending, err = c.loadInstallStrategy(kv)
 	if err != nil {
 		return err
 	}
 
 	// we're waiting on a job to finish and the config map to be created
-	if prevPending || targetPending {
+	if targetPending {
 		return nil
 	}
 
@@ -1023,8 +1006,15 @@ func (c *KubeVirtController) syncDeployment(kv *v1.KubeVirt) error {
 		return err
 	}
 
-	// deploy
-	synced, err := installstrategy.SyncAll(c.queue, kv, prevStrategy, targetStrategy, c.stores, c.clientset, c.aggregatorClient, &c.kubeVirtExpectations)
+	reconciler, err := installstrategy.NewReconciler(kv, targetStrategy, c.stores, c.clientset, c.aggregatorClient, &c.kubeVirtExpectations)
+	if err != nil {
+		// deployment failed
+		util.UpdateConditionsFailedError(kv, err)
+		logger.Errorf("Failed to create reconciler: %v", err)
+		return err
+	}
+
+	synced, err := reconciler.Sync(c.queue)
 
 	if err != nil {
 		// deployment failed
@@ -1095,7 +1085,7 @@ func (c *KubeVirtController) syncDeletion(kv *v1.KubeVirt) error {
 
 	// If we still have cached objects around, more deletions need to take place.
 	if !c.stores.AllEmpty() {
-		strategy, pending, err := c.loadInstallStrategy(kv, false)
+		strategy, pending, err := c.loadInstallStrategy(kv)
 		if err != nil {
 			return err
 		}

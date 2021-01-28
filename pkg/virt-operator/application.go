@@ -36,6 +36,7 @@ import (
 
 	"kubevirt.io/kubevirt/pkg/util/webhooks"
 	validating_webhooks "kubevirt.io/kubevirt/pkg/util/webhooks/validating-webhooks"
+	"kubevirt.io/kubevirt/pkg/virt-operator/creation/components"
 	operator_webhooks "kubevirt.io/kubevirt/pkg/virt-operator/webhooks"
 
 	k8sv1 "k8s.io/api/core/v1"
@@ -337,6 +338,9 @@ func (app *VirtOperatorApp) Run() {
 	mux.HandleFunc("/kubevirt-validate-delete", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		validating_webhooks.Serve(w, r, operator_webhooks.NewKubeVirtDeletionAdmitter(app.clientSet))
 	}))
+	mux.HandleFunc(components.KubeVirtUpdateValidatePath, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		validating_webhooks.Serve(w, r, operator_webhooks.NewKubeVirtUpdateAdmitter(app.clientSet))
+	}))
 	webhookServer.Handler = &mux
 	go func() {
 		err := webhookServer.ListenAndServeTLS("", "")
@@ -369,7 +373,7 @@ func (app *VirtOperatorApp) Run() {
 	}
 
 	readyGauge.Set(1)
-	log.Log.Infof("Attempting to aquire leader status")
+	log.Log.Infof("Attempting to acquire leader status")
 	leaderElector.Run(ctx)
 	panic("unreachable")
 
@@ -391,5 +395,11 @@ func (app *VirtOperatorApp) AddFlags() {
 }
 
 func (app *VirtOperatorApp) prepareCertManagers() {
-	app.operatorCertManager = bootstrap.NewFallbackCertificateManager(bootstrap.NewFileCertificateManager("/etc/virt-operator/certificates"))
+	app.operatorCertManager = bootstrap.NewFallbackCertificateManager(
+		bootstrap.NewSecretCertificateManager(
+			components.VirtOperatorCertSecretName,
+			app.operatorNamespace,
+			app.informers.Secrets.GetStore(),
+		),
+	)
 }

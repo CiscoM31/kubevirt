@@ -94,6 +94,15 @@ const (
 
 	// Default period for resyncing virt-launcher domain cache
 	defaultDomainResyncPeriodSeconds = 300
+
+	// Default ConfigMap name of CA
+	defaultCAConfigMapName = "kubevirt-ca"
+
+	// Default certificate and key paths
+	defaultClientCertFilePath = "/etc/virt-handler/clientcertificates/tls.crt"
+	defaultClientKeyFilePath  = "/etc/virt-handler/clientcertificates/tls.key"
+	defaultTlsCertFilePath    = "/etc/virt-handler/servercertificates/tls.crt"
+	defaultTlsKeyFilePath     = "/etc/virt-handler/servercertificates/tls.key"
 )
 
 type virtHandlerApp struct {
@@ -108,6 +117,13 @@ type virtHandlerApp struct {
 	MaxDevices                int
 	MaxRequestsInFlight       int
 	domainResyncPeriodSeconds int
+
+	caConfigMapName    string
+	clientCertFilePath string
+	clientKeyFilePath  string
+	serverCertFilePath string
+	serverKeyFilePath  string
+	externallyManaged  bool
 
 	virtCli   kubecli.KubevirtClient
 	namespace string
@@ -124,8 +140,8 @@ type virtHandlerApp struct {
 var _ service.Service = &virtHandlerApp{}
 
 func (app *virtHandlerApp) prepareCertManager() (err error) {
-	app.clientcertmanager = bootstrap.NewFileCertificateManager("/etc/virt-handler/clientcertificates")
-	app.servercertmanager = bootstrap.NewFileCertificateManager("/etc/virt-handler/servercertificates")
+	app.clientcertmanager = bootstrap.NewFileCertificateManager(app.clientCertFilePath, app.clientKeyFilePath)
+	app.servercertmanager = bootstrap.NewFileCertificateManager(app.serverCertFilePath, app.serverKeyFilePath)
 	return
 }
 
@@ -281,6 +297,8 @@ func (app *virtHandlerApp) Run() {
 	podIsolationDetector := isolation.NewSocketBasedIsolationDetector(app.VirtShareDir)
 	vmiInformer := factory.VMI()
 	app.clusterConfig = virtconfig.NewClusterConfig(factory.ConfigMap(), factory.CRD(), factory.KubeVirt(), app.namespace)
+	// set log verbosity
+	app.clusterConfig.SetConfigModifiedCallback(app.shouldChangeLogVerbosity)
 
 	vmController := virthandler.NewController(
 		recorder,
@@ -300,6 +318,9 @@ func (app *virtHandlerApp) Run() {
 		app.clientTLSConfig,
 		podIsolationDetector,
 	)
+
+	promErrCh := make(chan error)
+	go app.runPrometheusServer(promErrCh)
 
 	consoleHandler := rest.NewConsoleHandler(
 		podIsolationDetector,
@@ -337,7 +358,7 @@ func (app *virtHandlerApp) Run() {
 			panic(fmt.Errorf("error relabeling required files: %v", err))
 		}
 	} else if err != nil {
-		//an error occured
+		//an error occurred
 		panic(fmt.Errorf("failed to detect the presence of selinux: %v", err))
 	}
 
@@ -346,12 +367,17 @@ func (app *virtHandlerApp) Run() {
 	go vmController.Run(10, stop)
 
 	errCh := make(chan error)
-	promErrCh := make(chan error)
-	go app.runPrometheusServer(promErrCh)
 	go app.runServer(errCh, consoleHandler, lifecycleHandler)
 
 	// wait for one of the servers to exit
 	fmt.Println(<-errCh)
+}
+
+// Update virt-handler log verbosity on relevant config changes
+func (app *virtHandlerApp) shouldChangeLogVerbosity() {
+	verbosity := app.clusterConfig.GetVirtHandlerVerbosity(app.HostOverride)
+	log.Log.SetVerbosityLevel(int(verbosity))
+	log.Log.V(2).Infof("set verbosity to %d", verbosity)
 }
 
 func (app *virtHandlerApp) runPrometheusServer(errCh chan error) {
@@ -415,6 +441,24 @@ func (app *virtHandlerApp) AddFlags() {
 	flag.StringVar(&app.KubeletPodsDir, "kubelet-pods-dir", util.KubeletPodsDir,
 		"Path for pod directory (matching host's path for kubelet root)")
 
+	flag.StringVar(&app.caConfigMapName, "ca-configmap-name", defaultCAConfigMapName,
+		"The name of configmap containing CA certificates to authenticate requests presenting client certificates with matching CommonName")
+
+	flag.StringVar(&app.clientCertFilePath, "client-cert-file", defaultClientCertFilePath,
+		"Client certificate used to prove the identity of the virt-handler when it must call out during a request")
+
+	flag.StringVar(&app.clientKeyFilePath, "client-key-file", defaultClientKeyFilePath,
+		"Private key for the client certificate used to prove the identity of the virt-handler when it must call out during a request")
+
+	flag.StringVar(&app.serverCertFilePath, "tls-cert-file", defaultTlsCertFilePath,
+		"File containing the default x509 Certificate for HTTPS")
+
+	flag.StringVar(&app.serverKeyFilePath, "tls-key-file", defaultTlsKeyFilePath,
+		"File containing the default x509 private key matching --tls-cert-file")
+
+	flag.BoolVar(&app.externallyManaged, "externally-managed", false,
+		"Allow intermediate certificates to be used in building up the chain of trust when certificates are externally managed")
+
 	flag.DurationVar(&app.WatchdogTimeoutDuration, "watchdog-timeout", defaultWatchdogTimeout,
 		"Watchdog file timeout")
 
@@ -437,11 +481,11 @@ func (app *virtHandlerApp) AddFlags() {
 
 func (app *virtHandlerApp) setupTLS(factory controller.KubeInformerFactory) error {
 	kubevirtCAConfigInformer := factory.KubeVirtCAConfigMap()
-	caManager := webhooks.NewCAManager(kubevirtCAConfigInformer.GetStore(), app.namespace)
+	caManager := webhooks.NewCAManager(kubevirtCAConfigInformer.GetStore(), app.namespace, app.caConfigMapName)
 
 	app.promTLSConfig = webhooks.SetupPromTLS(app.servercertmanager)
-	app.serverTLSConfig = webhooks.SetupTLSForVirtHandlerServer(caManager, app.servercertmanager)
-	app.clientTLSConfig = webhooks.SetupTLSForVirtHandlerClients(caManager, app.clientcertmanager)
+	app.serverTLSConfig = webhooks.SetupTLSForVirtHandlerServer(caManager, app.servercertmanager, app.externallyManaged)
+	app.clientTLSConfig = webhooks.SetupTLSForVirtHandlerClients(caManager, app.clientcertmanager, app.externallyManaged)
 
 	return nil
 }

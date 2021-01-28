@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/onsi/ginkgo"
 	"github.com/onsi/ginkgo/config"
 	"github.com/onsi/ginkgo/types"
 	v1 "k8s.io/api/core/v1"
@@ -60,6 +61,7 @@ func (r *KubernetesReporter) BeforeSuiteDidRun(setupSummary *types.SetupSummary)
 }
 
 func (r *KubernetesReporter) SpecWillRun(specSummary *types.SpecSummary) {
+	fmt.Fprintf(ginkgo.GinkgoWriter, "On failure, artifacts will be collected in %s/%d_*\n", r.artifactsDir, r.failureCount+1)
 }
 
 func (r *KubernetesReporter) SpecDidComplete(specSummary *types.SpecSummary) {
@@ -98,6 +100,7 @@ func (r *KubernetesReporter) Dump(duration time.Duration) {
 	duration += 5 * time.Second
 	since := time.Now().Add(-duration)
 
+	r.logClusterOverview()
 	r.logEvents(virtCli, since)
 	r.logNamespaces(virtCli)
 	r.logNodes(virtCli)
@@ -119,6 +122,7 @@ func (r *KubernetesReporter) Dump(duration time.Duration) {
 	r.logLogs(virtCli, since)
 	r.logSRIOVInfo(virtCli)
 	r.logNetworkAttachmentDefinitionInfo(virtCli)
+	r.logKubeVirtCR(virtCli)
 }
 
 // Cleanup cleans up the current content of the artifactsDir
@@ -233,6 +237,15 @@ func (r *KubernetesReporter) logDMESG(virtCli kubecli.KubevirtClient, since time
 			}
 			// TODO may need to be improved, in case that the auditlog is really huge, since stdout is in memory
 			stdout, _, err := tests.ExecuteCommandOnPodV2(virtCli, pod, "virt-handler", []string{"/proc/1/root/bin/dmesg", "--kernel", "--ctime", "--userspace", "--decode"})
+			if err != nil {
+				fmt.Fprintf(
+					os.Stderr,
+					"failed to execute command %s on node %s, stdout: %s, error: %v",
+					[]string{"/proc/1/root/bin/dmesg", "--kernel", "--ctime", "--userspace", "-    -decode"},
+					node, stdout, err,
+				)
+				return
+			}
 			scanner := bufio.NewScanner(bytes.NewBufferString(stdout))
 			add := false
 			for scanner.Scan() {
@@ -288,6 +301,15 @@ func (r *KubernetesReporter) logAuditLogs(virtCli kubecli.KubevirtClient, since 
 			}
 			// TODO may need to be improved, in case that the auditlog is really huge, since stdout is in memory
 			stdout, _, err := tests.ExecuteCommandOnPodV2(virtCli, pod, "virt-handler", []string{"cat", "/proc/1/root/var/log/audit.log", "/proc/1/root/var/log/audit/audit.log"})
+			if err != nil {
+				fmt.Fprintf(
+					os.Stderr,
+					"failed to execute command %s on node %s, stdout: %s, error: %v",
+					[]string{"cat", "/proc/1/root/var/log/audit.log", "/proc/1/root/var/log/aud    it/audit.log"},
+					node, stdout, err,
+				)
+				return
+			}
 			scanner := bufio.NewScanner(bytes.NewBufferString(stdout))
 			add := false
 			for scanner.Scan() {
@@ -488,6 +510,29 @@ func (r *KubernetesReporter) logConfigMaps(virtCli kubecli.KubevirtClient) {
 	j, err := json.MarshalIndent(configmaps, "", "    ")
 	if err != nil {
 		log.DefaultLogger().Reason(err).Errorf("Failed to marshal configmaps")
+		return
+	}
+	fmt.Fprintln(f, string(j))
+}
+
+func (r *KubernetesReporter) logKubeVirtCR(virtCli kubecli.KubevirtClient) {
+	f, err := os.OpenFile(filepath.Join(r.artifactsDir, fmt.Sprintf("%d_kubevirtCR.log", r.failureCount)),
+		os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "failed to open the file: %v", err)
+		return
+	}
+	defer f.Close()
+
+	kvs, err := virtCli.KubeVirt(flags.KubeVirtInstallNamespace).List(&metav1.ListOptions{})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "failed to fetch kubevirts: %v\n", err)
+		return
+	}
+
+	j, err := json.MarshalIndent(kvs, "", "    ")
+	if err != nil {
+		log.DefaultLogger().Reason(err).Errorf("Failed to marshal kubevirt custom resource")
 		return
 	}
 	fmt.Fprintln(f, string(j))
@@ -767,6 +812,29 @@ func (r *KubernetesReporter) AfterSuiteDidRun(setupSummary *types.SetupSummary) 
 
 func (r *KubernetesReporter) SpecSuiteDidEnd(summary *types.SuiteSummary) {
 
+}
+
+func (r *KubernetesReporter) logClusterOverview() {
+	binary := ""
+	if flags.KubeVirtKubectlPath != "" {
+		binary = "kubectl"
+	} else if flags.KubeVirtOcPath != "" {
+		binary = "oc"
+	} else {
+		return
+	}
+
+	stdout, stderr, err := tests.RunCommandWithNS("", binary, "get", "all", "--all-namespaces", "-o", "wide")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "failed to fetch cluster overview: %v, %s", err, stderr)
+		return
+	}
+	filePath := filepath.Join(r.artifactsDir, fmt.Sprintf("%d_overview.log", r.failureCount))
+	err = writeStringToFile(filePath, stdout)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "failed to write cluster overview: %v", err)
+		return
+	}
 }
 
 //getNodesWithVirtLauncher returns all node where a virt-launcher pod ran (finished) or still runs

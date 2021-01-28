@@ -53,11 +53,14 @@ client-python:
 go-build:
 	hack/dockerized "KUBEVIRT_VERSION=${KUBEVIRT_VERSION} ./hack/build-go.sh install ${WHAT}" && ./hack/build-copy-artifacts.sh ${WHAT}
 
+gosec:
+	hack/dockerized "GOSEC=${GOSEC} ./hack/gosec.sh"
+	
 coverage:
 	hack/dockerized "./hack/coverage.sh ${WHAT}"
 
-goveralls: go-build
-	SYNC_OUT=false hack/dockerized "COVERALLS_TOKEN_FILE=${COVERALLS_TOKEN_FILE} COVERALLS_TOKEN=${COVERALLS_TOKEN} CI_NAME=prow CI_BRANCH=${PULL_REFS} CI_PR_NUMBER=${PULL_NUMBER} ./hack/goveralls.sh"
+goveralls:
+	SYNC_OUT=false hack/dockerized "COVERALLS_TOKEN_FILE=${COVERALLS_TOKEN_FILE} COVERALLS_TOKEN=${COVERALLS_TOKEN} CI_NAME=prow CI_BRANCH=${PULL_REFS} CI_PR_NUMBER=${PULL_NUMBER} ./hack/bazel-goveralls.sh"
 
 go-test: go-build
 	SYNC_OUT=false hack/dockerized "./hack/build-go.sh test ${WHAT}"
@@ -65,7 +68,7 @@ go-test: go-build
 test: bazel-test
 
 build-functests:
-	hack/dockerized "hack/build-func-tests.sh"
+	hack/dockerized "hack/bazel-fmt.sh && hack/build-func-tests.sh"
 
 functest: build-functests
 	hack/functests.sh
@@ -78,6 +81,9 @@ functest-image-build: manifests build-functests
 
 functest-image-push: functest-image-build
 	hack/func-tests-image.sh push
+
+conformance:
+	hack/dockerized "hack/conformance.sh"
 
 clean:
 	hack/dockerized "./hack/build-go.sh clean ${WHAT} && rm _out/* -rf"
@@ -94,6 +100,15 @@ deps-update-patch:
 deps-update:
 	SYNC_VENDOR=true hack/dockerized " ./hack/dep-update.sh && ./hack/dep-prune.sh && ./hack/bazel-generate.sh"
 
+rpm-deps:
+	SYNC_VENDOR=true hack/dockerized " ./hack/rpm-deps.sh"
+
+verify-rpm-deps:
+	SYNC_VENDOR=true hack/dockerized " ./hack/verify-rpm-deps.sh"
+
+verify-deps:
+	SYNC_VENDOR=true hack/dockerized " ./hack/verify-deps.sh"
+
 build-verify:
 	hack/build-verify.sh
 
@@ -102,12 +117,6 @@ manifests:
 	  DOCKER_PREFIX=${DOCKER_PREFIX} DOCKER_TAG=${DOCKER_TAG} \
 	  IMAGE_PULL_POLICY=${IMAGE_PULL_POLICY} VERBOSITY=${VERBOSITY} PACKAGE_NAME=${PACKAGE_NAME} \
 	  KUBEVIRT_INSTALLED_NAMESPACE=${KUBEVIRT_INSTALLED_NAMESPACE} ./hack/build-manifests.sh"
-
-.release-functest:
-	make functest > .release-functest 2>&1
-
-release-announce: .release-functest
-	./hack/release-announce.sh $(RELREF) $(PREREF)
 
 cluster-up:
 	./cluster-up/up.sh
@@ -124,7 +133,9 @@ cluster-clean:
 cluster-deploy: cluster-clean
 	./hack/cluster-deploy.sh
 
-cluster-sync: cluster-build cluster-deploy
+cluster-sync:
+	$(MAKE) cluster-build
+	$(MAKE) cluster-deploy
 
 builder-build:
 	./hack/builder/build.sh
@@ -154,6 +165,7 @@ bump-kubevirtci:
 
 .PHONY: \
 	build-verify \
+	conformance \
 	go-build \
 	go-test \
 	go-all \
@@ -170,7 +182,6 @@ bump-kubevirtci:
 	sync \
 	manifests \
 	functest \
-	release-announce \
 	cluster-up \
 	cluster-down \
 	cluster-clean \
@@ -178,4 +189,6 @@ bump-kubevirtci:
 	cluster-sync \
 	olm-verify \
 	olm-push \
+	coverage \
+	goveralls \
 	build-functests

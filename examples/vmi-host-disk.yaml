@@ -1,5 +1,5 @@
 ---
-apiVersion: kubevirt.io/v1alpha3
+apiVersion: kubevirt.io/v1
 kind: VirtualMachineInstance
 metadata:
   labels:
@@ -21,6 +21,6 @@ spec:
   volumes:
   - hostDisk:
       capacity: 1Gi
-      path: /data/disk.img
+      path: /var/data/disk.img
       type: DiskOrCreate
     name: host-disk

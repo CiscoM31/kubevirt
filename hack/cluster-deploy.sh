@@ -17,7 +17,7 @@
 # Copyright 2018 Red Hat, Inc.
 #
 
-set -ex
+set -ex pipefail
 
 DOCKER_TAG=${DOCKER_TAG:-devel}
 
@@ -26,9 +26,50 @@ source cluster-up/cluster/$KUBEVIRT_PROVIDER/provider.sh
 source hack/config.sh
 
 function dump_kubevirt() {
-    echo "Dump kubevirt state:"
-    hack/dump.sh
+    if [ "$?" -ne "0" ]; then
+        echo "Dump kubevirt state:"
+        hack/dump.sh
+    fi
 }
+
+function _deploy_infra_for_tests() {
+    # Remove cdi manifests for sriov-lane until kubevirt/kubevirt#4120 is fixed
+    if [[ "$KUBEVIRT_PROVIDER" =~ sriov.* ]]; then
+        rm -f ${MANIFESTS_OUT_DIR}/testing/cdi-*
+    fi
+
+    # Deploy infra for testing first
+    _kubectl create -f ${MANIFESTS_OUT_DIR}/testing
+}
+
+function _ensure_cdi_deployment() {
+    # Do not deploy any cdi-operator related objects on
+    # sriov-lane until kubevirt/kubevirt#4120 is fixed
+    if [[ ! "$KUBEVIRT_PROVIDER" =~ sriov.* ]]; then
+        _kubectl apply -f - <<EOF
+---
+apiVersion: cdi.kubevirt.io/v1beta1
+kind: CDI
+metadata:
+  name: ${cdi_namespace}
+spec:
+  config:
+    featureGates:
+    - HonorWaitForFirstConsumer
+EOF
+
+        # Ensure that cdi insecure registries are set
+        count=0
+        until _kubectl get configmap -n ${cdi_namespace} cdi-insecure-registries; do
+            ((count++)) && ((count == 120)) && echo "cdi-insecure-registries config-map not found" && exit 1
+            echo "waiting for cdi-insecure-registries configmap to be created"
+            sleep 1
+        done
+        _kubectl patch configmap cdi-insecure-registries -n $cdi_namespace --type merge -p '{"data":{"dev-registry": "registry:5000"}}'
+    fi
+}
+
+trap dump_kubevirt EXIT
 
 echo "Deploying ..."
 
@@ -56,24 +97,9 @@ if [[ "$KUBEVIRT_STORAGE" == "rook-ceph" ]]; then
     done
 fi
 
-# Remove cdi manifests for sriov-lane until kubevirt/kubevirt#3850 is fixed
-if [[ "$KUBEVIRT_PROVIDER" =~ sriov.* ]]; then
-    rm -f ${MANIFESTS_OUT_DIR}/testing/cdi-*
-fi
+_deploy_infra_for_tests
 
-# Deploy infra for testing first
-_kubectl create -f ${MANIFESTS_OUT_DIR}/testing
-
-# Do not deploy cdi-operator for sriov-lane until kubevirt/kubevirt#3850 is fixed
-if [[ ! "$KUBEVIRT_PROVIDER" =~ sriov.* ]]; then
-    _kubectl apply -f - <<EOF
----
-apiVersion: cdi.kubevirt.io/v1alpha1
-kind: CDI
-metadata:
-  name: cdi
-EOF
-fi
+_ensure_cdi_deployment
 
 # Deploy kubevirt operator
 _kubectl apply -f ${MANIFESTS_OUT_DIR}/release/kubevirt-operator.yaml
@@ -118,9 +144,9 @@ done
 # Wait until KubeVirt is ready
 count=0
 until _kubectl wait -n kubevirt kv kubevirt --for condition=Available --timeout 5m; do
-    ((count++)) && ((count == 5)) && echo "KubeVirt not ready in time" && dump_kubevirt && exit 1
+    ((count++)) && ((count == 5)) && echo "KubeVirt not ready in time" && exit 1
     echo "Error waiting for KubeVirt to be Available, sleeping 1m and retrying"
     sleep 1m
 done
 
-echo "Done"
+echo "Done $0"

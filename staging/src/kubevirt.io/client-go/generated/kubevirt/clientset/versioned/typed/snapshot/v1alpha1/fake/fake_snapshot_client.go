@@ -1,5 +1,5 @@
 /*
-Copyright 2020 The KubeVirt Authors.
+Copyright 2021 The KubeVirt Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -27,6 +27,10 @@ import (
 
 type FakeSnapshotV1alpha1 struct {
 	*testing.Fake
+}
+
+func (c *FakeSnapshotV1alpha1) VirtualMachineRestores(namespace string) v1alpha1.VirtualMachineRestoreInterface {
+	return &FakeVirtualMachineRestores{c, namespace}
 }
 
 func (c *FakeSnapshotV1alpha1) VirtualMachineSnapshots(namespace string) v1alpha1.VirtualMachineSnapshotInterface {

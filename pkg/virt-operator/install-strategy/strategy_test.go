@@ -23,6 +23,7 @@ import (
 	"reflect"
 	"strings"
 
+	"github.com/ghodss/yaml"
 	. "github.com/onsi/ginkgo"
 	"github.com/onsi/ginkgo/extensions/table"
 	. "github.com/onsi/gomega"
@@ -60,6 +61,25 @@ var _ = Describe("Install Strategy", func() {
 	config := getConfig("fake-registry", "v9.9.9")
 
 	Context("should generate", func() {
+		It("install strategy convertable back to objects", func() {
+			strategy, err := GenerateCurrentInstallStrategy(config, true, namespace)
+			Expect(err).NotTo(HaveOccurred())
+
+			data := string(dumpInstallStrategyToBytes(strategy))
+
+			entries := strings.Split(data, "---")
+
+			for _, entry := range entries {
+				entry := strings.TrimSpace(entry)
+				if entry == "" {
+					continue
+				}
+				var obj metav1.TypeMeta
+				err := yaml.Unmarshal([]byte(entry), &obj)
+				Expect(err).NotTo(HaveOccurred())
+			}
+
+		})
 		It("latest install strategy with lossless byte conversion.", func() {
 			strategy, err := GenerateCurrentInstallStrategy(config, true, namespace)
 			Expect(err).ToNot(HaveOccurred())
@@ -204,8 +224,9 @@ var _ = Describe("Install Strategy", func() {
 
 				kv := &v1.KubeVirt{
 					ObjectMeta: metav1.ObjectMeta{
-						Name:      "test-install",
-						Namespace: "default",
+						Name:       "test-install",
+						Namespace:  "default",
+						Generation: int64(1),
 					},
 					Spec: v1.KubeVirtSpec{
 						ImageTag:      config.GetKubeVirtVersion(),
@@ -214,7 +235,11 @@ var _ = Describe("Install Strategy", func() {
 				}
 				config.SetTargetDeploymentConfig(kv)
 
-				ops, shouldDeleteAndReplace, err := generateServicePatch(kv, cachedService, targetService)
+				r := &Reconciler{
+					kv: kv,
+				}
+
+				ops, shouldDeleteAndReplace, err := r.generateServicePatch(cachedService, targetService)
 				Expect(err).To(BeNil())
 				Expect(shouldDeleteAndReplace).To(Equal(expectDelete))
 
@@ -242,11 +267,21 @@ var _ = Describe("Install Strategy", func() {
 			},
 			table.Entry("should delete and recreate service if of mixed 'type'.",
 				&corev1.Service{
+					ObjectMeta: metav1.ObjectMeta{
+						Annotations: map[string]string{
+							v1.KubeVirtGenerationAnnotation: "1",
+						},
+					},
 					Spec: corev1.ServiceSpec{
 						Type: corev1.ServiceTypeClusterIP,
 					},
 				},
 				&corev1.Service{
+					ObjectMeta: metav1.ObjectMeta{
+						Annotations: map[string]string{
+							v1.KubeVirtGenerationAnnotation: "1",
+						},
+					},
 					Spec: corev1.ServiceSpec{
 						Type: corev1.ServiceTypeNodePort,
 					},
@@ -254,11 +289,21 @@ var _ = Describe("Install Strategy", func() {
 				false, false, true),
 			table.Entry("should delete and recreate service if not of type ClusterIP.",
 				&corev1.Service{
+					ObjectMeta: metav1.ObjectMeta{
+						Annotations: map[string]string{
+							v1.KubeVirtGenerationAnnotation: "1",
+						},
+					},
 					Spec: corev1.ServiceSpec{
 						Type: corev1.ServiceTypeNodePort,
 					},
 				},
 				&corev1.Service{
+					ObjectMeta: metav1.ObjectMeta{
+						Annotations: map[string]string{
+							v1.KubeVirtGenerationAnnotation: "1",
+						},
+					},
 					Spec: corev1.ServiceSpec{
 						Type: corev1.ServiceTypeNodePort,
 					},
@@ -266,12 +311,22 @@ var _ = Describe("Install Strategy", func() {
 				false, false, true),
 			table.Entry("should delete and recreate service if ClusterIP changes (clusterIP is not mutable)",
 				&corev1.Service{
+					ObjectMeta: metav1.ObjectMeta{
+						Annotations: map[string]string{
+							v1.KubeVirtGenerationAnnotation: "1",
+						},
+					},
 					Spec: corev1.ServiceSpec{
 						ClusterIP: "2.2.2.2",
 						Type:      corev1.ServiceTypeClusterIP,
 					},
 				},
 				&corev1.Service{
+					ObjectMeta: metav1.ObjectMeta{
+						Annotations: map[string]string{
+							v1.KubeVirtGenerationAnnotation: "1",
+						},
+					},
 					Spec: corev1.ServiceSpec{
 						ClusterIP: "1.1.1.1",
 						Type:      corev1.ServiceTypeClusterIP,
@@ -285,6 +340,7 @@ var _ = Describe("Install Strategy", func() {
 							v1.InstallStrategyVersionAnnotation:    config.GetKubeVirtVersion(),
 							v1.InstallStrategyRegistryAnnotation:   config.GetImageRegistry(),
 							v1.InstallStrategyIdentifierAnnotation: config.GetDeploymentID(),
+							v1.KubeVirtGenerationAnnotation:        "1",
 						},
 						Labels: map[string]string{
 							v1.ManagedByLabel: v1.ManagedByLabelOperatorValue,
@@ -301,6 +357,7 @@ var _ = Describe("Install Strategy", func() {
 							v1.InstallStrategyVersionAnnotation:    config.GetKubeVirtVersion(),
 							v1.InstallStrategyRegistryAnnotation:   config.GetImageRegistry(),
 							v1.InstallStrategyIdentifierAnnotation: config.GetDeploymentID(),
+							v1.KubeVirtGenerationAnnotation:        "1",
 						},
 						Labels: map[string]string{
 							v1.ManagedByLabel: v1.ManagedByLabelOperatorValue,
@@ -378,6 +435,7 @@ var _ = Describe("Install Strategy", func() {
 							v1.InstallStrategyVersionAnnotation:    config.GetKubeVirtVersion(),
 							v1.InstallStrategyRegistryAnnotation:   config.GetImageRegistry(),
 							v1.InstallStrategyIdentifierAnnotation: config.GetDeploymentID(),
+							v1.KubeVirtGenerationAnnotation:        "1",
 						},
 						Labels: map[string]string{
 							v1.ManagedByLabel: v1.ManagedByLabelOperatorValue,
@@ -415,6 +473,7 @@ var _ = Describe("Install Strategy", func() {
 							v1.InstallStrategyVersionAnnotation:    config.GetKubeVirtVersion(),
 							v1.InstallStrategyRegistryAnnotation:   config.GetImageRegistry(),
 							v1.InstallStrategyIdentifierAnnotation: config.GetDeploymentID(),
+							v1.KubeVirtGenerationAnnotation:        "1",
 						},
 						Labels: map[string]string{
 							v1.ManagedByLabel: v1.ManagedByLabelOperatorValue,

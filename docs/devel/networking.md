@@ -55,9 +55,8 @@ the following operations, in this order:
 ### Unprivileged VMI networking configuration
 The virt-launcher is an untrusted component of KubeVirt (since it wraps the
 libvirt process that will run third party workloads). As a result, it must be
-run with as little privileges as required. As of now, the only capabilities
-required by virt-launcher to configure networking is the `CAP_NET_ADMIN` and
-the `CAP_NET_RAW` capabilites.
+run with as little privileges as required. As of now, the only capability
+required by virt-launcher to configure networking is the `CAP_NET_ADMIN`.
 
 In this second phase, virt-launcher also has to select the correct
 `BindMechanism`, and afterwards will uses it to retrieve the configuration
@@ -380,4 +379,4 @@ which implicitly highly encourages IPv6 communication towards the VM instance.
 
 On a final note, there is a difference that impacts the user experience when
 using masquerade binding for IPv6 addresses; the VMI IP must be [manually
-configured by the user](https://kubevirt.io/user-guide/#/creation/interfaces-and-networks?id=masquerade-ipv6-support).
+configured by the user](https://kubevirt.io/user-guide/#/creation/interfaces-and-networks?id=masquerade-ipv4-and-ipv6-dual-stack-support).

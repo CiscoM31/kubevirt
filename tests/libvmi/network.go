@@ -40,11 +40,50 @@ func WithNetwork(network *kvirtv1.Network) Option {
 }
 
 // InterfaceDeviceWithMasqueradeBinding returns an Interface named "default" with masquerade binding.
-func InterfaceDeviceWithMasqueradeBinding() kvirtv1.Interface {
+func InterfaceDeviceWithMasqueradeBinding(ports ...kvirtv1.Port) kvirtv1.Interface {
 	return kvirtv1.Interface{
 		Name: "default",
 		InterfaceBindingMethod: kvirtv1.InterfaceBindingMethod{
 			Masquerade: &kvirtv1.InterfaceMasquerade{},
+		},
+		Ports: ports,
+	}
+}
+
+// InterfaceDeviceWithBridgeBinding returns an Interface named "default" with bridge binding.
+func InterfaceDeviceWithBridgeBinding() kvirtv1.Interface {
+	return kvirtv1.Interface{
+		Name: "default",
+		InterfaceBindingMethod: kvirtv1.InterfaceBindingMethod{
+			Bridge: &kvirtv1.InterfaceBridge{},
+		},
+	}
+}
+
+// InterfaceDeviceWithSRIOVBinding returns an Interface with SRIOV binding.
+func InterfaceDeviceWithSRIOVBinding(name string) kvirtv1.Interface {
+	return kvirtv1.Interface{
+		Name: name,
+		InterfaceBindingMethod: kvirtv1.InterfaceBindingMethod{
+			SRIOV: &kvirtv1.InterfaceSRIOV{},
+		},
+	}
+}
+
+// InterfaceWithMac decorates an existing Interface with a MAC address.
+func InterfaceWithMac(iface *kvirtv1.Interface, macAddress string) *kvirtv1.Interface {
+	iface.MacAddress = macAddress
+	return iface
+}
+
+// MultusNetwork returns a Network with the given name
+func MultusNetwork(networkName string) *kvirtv1.Network {
+	return &kvirtv1.Network{
+		Name: networkName,
+		NetworkSource: kvirtv1.NetworkSource{
+			Multus: &kvirtv1.MultusNetwork{
+				NetworkName: networkName,
+			},
 		},
 	}
 }

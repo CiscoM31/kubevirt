@@ -20,7 +20,6 @@
 package tests_test
 
 import (
-	"encoding/json"
 	"fmt"
 	"path/filepath"
 	"regexp"
@@ -38,20 +37,25 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
-
-	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/api"
+	"k8s.io/utils/pointer"
 
 	v1 "kubevirt.io/client-go/api/v1"
 	"kubevirt.io/client-go/kubecli"
 	"kubevirt.io/client-go/log"
-	cmdv1 "kubevirt.io/kubevirt/pkg/handler-launcher-com/cmd/v1"
 	kubevirt_hooks_v1alpha2 "kubevirt.io/kubevirt/pkg/hooks/v1alpha2"
+	"kubevirt.io/kubevirt/pkg/testutils"
+	"kubevirt.io/kubevirt/pkg/util/cluster"
 	hw_utils "kubevirt.io/kubevirt/pkg/util/hardware"
 	virtconfig "kubevirt.io/kubevirt/pkg/virt-config"
+	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/api"
 	"kubevirt.io/kubevirt/tests"
+	"kubevirt.io/kubevirt/tests/console"
 	cd "kubevirt.io/kubevirt/tests/containerdisk"
-	"kubevirt.io/kubevirt/tests/flags"
+	"kubevirt.io/kubevirt/tests/libnet"
+	"kubevirt.io/kubevirt/tests/libvmi"
 )
+
+type VMICreationFuncWithEFI func() *v1.VirtualMachineInstance
 
 var _ = Describe("Configurations", func() {
 
@@ -75,10 +79,9 @@ var _ = Describe("Configurations", func() {
 			vmi.Spec.Domain.Devices.Inputs = []v1.Input{{Name: "tablet", Bus: "virtio", Type: "tablet"}, {Name: "tablet1", Bus: "usb", Type: "tablet"}}
 			vmi.Spec.Domain.Devices.Watchdog = &v1.Watchdog{Name: "watchdog", WatchdogDevice: v1.WatchdogDevice{I6300ESB: &v1.I6300ESBWatchdog{Action: v1.WatchdogActionPoweroff}}}
 			vmi = tests.RunVMIAndExpectLaunch(vmi, 60)
-			expecter, err := tests.LoggedInCirrosExpecter(vmi)
-			Expect(err).ToNot(HaveOccurred())
-			defer expecter.Close()
+			Expect(libnet.WithIPv6(console.LoginToCirros)(vmi)).To(Succeed())
 			domSpec, err := tests.GetRunningVMIDomainSpec(vmi)
+			Expect(err).ToNot(HaveOccurred())
 			rootPortController := []api.Controller{}
 			for _, c := range domSpec.Devices.Controllers {
 				if c.Model == "pcie-root-port" {
@@ -87,7 +90,21 @@ var _ = Describe("Configurations", func() {
 			}
 			Expect(rootPortController).To(HaveLen(0), "libvirt should not add additional buses to the root one")
 		})
+	})
 
+	Context("when requesting virtio-transitional models", func() {
+		It("should start and run the guest", func() {
+			vmi := tests.NewRandomVMIWithEphemeralDiskAndUserdata(cd.ContainerDiskFor(cd.ContainerDiskCirros), "#!/bin/bash\necho 'hello'\n")
+			vmi.Spec.Domain.Devices.Rng = &v1.Rng{}
+			vmi.Spec.Domain.Devices.Inputs = []v1.Input{{Name: "tablet", Bus: "virtio", Type: "tablet"}, {Name: "tablet1", Bus: "usb", Type: "tablet"}}
+			vmi.Spec.Domain.Devices.Watchdog = &v1.Watchdog{Name: "watchdog", WatchdogDevice: v1.WatchdogDevice{I6300ESB: &v1.I6300ESBWatchdog{Action: v1.WatchdogActionPoweroff}}}
+			vmi.Spec.Domain.Devices.UseVirtioTransitional = pointer.BoolPtr(true)
+			vmi = tests.RunVMIAndExpectLaunch(vmi, 60)
+			Expect(libnet.WithIPv6(console.LoginToCirros)(vmi)).To(Succeed())
+			domSpec, err := tests.GetRunningVMIDomainSpec(vmi)
+			Expect(err).ToNot(HaveOccurred())
+			testutils.ExpectVirtioTransitionalOnly(domSpec)
+		})
 	})
 
 	Context("[rfe_id:897][crit:medium][vendor:cnv-qe@redhat.com][level:component]for CPU and memory limits should", func() {
@@ -170,7 +187,7 @@ var _ = Describe("Configurations", func() {
 	})
 
 	Describe("VirtualMachineInstance definition", func() {
-		Context("[rfe_id:2065][crit:medium][vendor:cnv-qe@redhat.com][level:component]with 3 CPU cores", func() {
+		Context("[Serial][rfe_id:2065][crit:medium][vendor:cnv-qe@redhat.com][level:component]with 3 CPU cores", func() {
 			var availableNumberOfCPUs int
 			var vmi *v1.VirtualMachineInstance
 
@@ -201,16 +218,13 @@ var _ = Describe("Configurations", func() {
 				tests.WaitForSuccessfulVMIStart(vmi)
 
 				By("Expecting the VirtualMachineInstance console")
-				expecter, err := tests.LoggedInAlpineExpecter(vmi)
-				Expect(err).ToNot(HaveOccurred(), "should start console")
-				defer expecter.Close()
+				Expect(console.LoginToAlpine(vmi)).To(Succeed())
 
 				By("Checking the number of CPU cores under guest OS")
-				_, err = expecter.ExpectBatch([]expect.Batcher{
+				Expect(console.SafeExpectBatch(vmi, []expect.Batcher{
 					&expect.BSnd{S: "grep -c ^processor /proc/cpuinfo\n"},
-					&expect.BExp{R: "3"},
-				}, 15*time.Second)
-				Expect(err).ToNot(HaveOccurred(), "should report number of cores")
+					&expect.BExp{R: console.RetValue("3")},
+				}, 15)).To(Succeed(), "should report number of cores")
 
 				By("Checking the requested amount of memory allocated for a guest")
 				Expect(vmi.Spec.Domain.Resources.Requests.Memory().String()).To(Equal("64M"))
@@ -226,17 +240,17 @@ var _ = Describe("Configurations", func() {
 				if computeContainer == nil {
 					tests.PanicOnError(fmt.Errorf("could not find the compute container"))
 				}
-				Expect(computeContainer.Resources.Requests.Memory().ToDec().ScaledValue(resource.Mega)).To(Equal(int64(243)))
+				Expect(computeContainer.Resources.Requests.Memory().ToDec().ScaledValue(resource.Mega)).To(Equal(int64(260)))
 
 				Expect(err).ToNot(HaveOccurred())
 			})
 			It("[test_id:4624]should set a correct memory units", func() {
 				vmi.Spec.Domain.Resources = v1.ResourceRequirements{
 					Requests: kubev1.ResourceList{
-						kubev1.ResourceMemory: resource.MustParse("512Mi"),
+						kubev1.ResourceMemory: resource.MustParse("64Mi"),
 					},
 				}
-				expectedMemoryInKiB := 512 * 1024
+				expectedMemoryInKiB := 64 * 1024
 				expectedMemoryXMLStr := fmt.Sprintf("unit='KiB'>%d", expectedMemoryInKiB)
 
 				By("Starting a VirtualMachineInstance")
@@ -266,16 +280,13 @@ var _ = Describe("Configurations", func() {
 				tests.WaitForSuccessfulVMIStart(vmi)
 
 				By("Expecting the VirtualMachineInstance console")
-				expecter, err := tests.LoggedInAlpineExpecter(vmi)
-				Expect(err).ToNot(HaveOccurred(), "should start console")
-				defer expecter.Close()
+				Expect(console.LoginToAlpine(vmi)).To(Succeed())
 
 				By("Checking the number of sockets under guest OS")
-				_, err = expecter.ExpectBatch([]expect.Batcher{
+				Expect(console.SafeExpectBatch(vmi, []expect.Batcher{
 					&expect.BSnd{S: "grep '^physical id' /proc/cpuinfo | uniq | wc -l\n"},
-					&expect.BExp{R: "3"},
-				}, 60*time.Second)
-				Expect(err).ToNot(HaveOccurred(), "should report number of sockets")
+					&expect.BExp{R: console.RetValue("3")},
+				}, 60)).To(Succeed(), "should report number of sockets")
 			})
 
 			It("[test_id:1661]should report 2 sockets from spec.domain.resources.requests under guest OS ", func() {
@@ -293,16 +304,13 @@ var _ = Describe("Configurations", func() {
 				tests.WaitForSuccessfulVMIStart(vmi)
 
 				By("Expecting the VirtualMachineInstance console")
-				expecter, err := tests.LoggedInAlpineExpecter(vmi)
-				Expect(err).ToNot(HaveOccurred(), "should start console")
-				defer expecter.Close()
+				Expect(console.LoginToAlpine(vmi)).To(Succeed())
 
 				By("Checking the number of sockets under guest OS")
-				_, err = expecter.ExpectBatch([]expect.Batcher{
+				Expect(console.SafeExpectBatch(vmi, []expect.Batcher{
 					&expect.BSnd{S: "grep '^physical id' /proc/cpuinfo | uniq | wc -l\n"},
-					&expect.BExp{R: "2"},
-				}, 60*time.Second)
-				Expect(err).ToNot(HaveOccurred(), "should report number of sockets")
+					&expect.BExp{R: console.RetValue("2")},
+				}, 60)).To(Succeed(), "should report number of sockets")
 			})
 
 			It("[test_id:1662]should report 2 sockets from spec.domain.resources.limits under guest OS ", func() {
@@ -322,16 +330,13 @@ var _ = Describe("Configurations", func() {
 				tests.WaitForSuccessfulVMIStart(vmi)
 
 				By("Expecting the VirtualMachineInstance console")
-				expecter, err := tests.LoggedInAlpineExpecter(vmi)
-				Expect(err).ToNot(HaveOccurred(), "should start console")
-				defer expecter.Close()
+				Expect(console.LoginToAlpine(vmi)).To(Succeed())
 
 				By("Checking the number of sockets under guest OS")
-				_, err = expecter.ExpectBatch([]expect.Batcher{
+				Expect(console.SafeExpectBatch(vmi, []expect.Batcher{
 					&expect.BSnd{S: "grep '^physical id' /proc/cpuinfo | uniq | wc -l\n"},
-					&expect.BExp{R: "2"},
-				}, 60*time.Second)
-				Expect(err).ToNot(HaveOccurred(), "should report number of sockets")
+					&expect.BExp{R: console.RetValue("2")},
+				}, 60)).To(Succeed(), "should report number of sockets")
 			})
 
 			It("[test_id:1663]should report 4 vCPUs under guest OS", func() {
@@ -352,19 +357,16 @@ var _ = Describe("Configurations", func() {
 				tests.WaitForSuccessfulVMIStart(vmi)
 
 				By("Expecting the VirtualMachineInstance console")
-				expecter, err := tests.LoggedInAlpineExpecter(vmi)
-				Expect(err).ToNot(HaveOccurred(), "should start console")
-				defer expecter.Close()
+				Expect(console.LoginToAlpine(vmi)).To(Succeed())
 
 				By("Checking the number of vCPUs under guest OS")
-				_, err = expecter.ExpectBatch([]expect.Batcher{
+				Expect(console.SafeExpectBatch(vmi, []expect.Batcher{
 					&expect.BSnd{S: "grep -c ^processor /proc/cpuinfo\n"},
-					&expect.BExp{R: "4"},
-				}, 60*time.Second)
-				Expect(err).ToNot(HaveOccurred(), "should report number of threads")
+					&expect.BExp{R: console.RetValue("4")},
+				}, 60)).To(Succeed(), "should report number of threads")
 			})
 
-			It("[test_id:1664]should map cores to virtio block queues", func() {
+			It("[Serial][test_id:1664]should map cores to virtio block queues", func() {
 				_true := true
 				vmi.Spec.Domain.Resources = v1.ResourceRequirements{
 					Requests: kubev1.ResourceList{
@@ -385,7 +387,7 @@ var _ = Describe("Configurations", func() {
 			})
 
 			It("[test_id:1665]should map cores to virtio net queues", func() {
-				if shouldUseEmulation(virtClient) {
+				if tests.ShouldUseEmulation(virtClient) {
 					Skip("Software emulation should not be enabled for this test to run")
 				}
 
@@ -443,9 +445,13 @@ var _ = Describe("Configurations", func() {
 			})
 		})
 
-		Context("[rfe_id:609][crit:medium][vendor:cnv-qe@redhat.com][level:component]with cluster memory overcommit being applied", func() {
+		Context("[Serial][rfe_id:609][crit:medium][vendor:cnv-qe@redhat.com][level:component]with cluster memory overcommit being applied", func() {
 			BeforeEach(func() {
-				tests.UpdateClusterConfigValueAndWait("memory-overcommit", "200")
+				kv := tests.GetCurrentKv(virtClient)
+
+				config := kv.Spec.Configuration
+				config.DeveloperConfiguration.MemoryOvercommit = 200
+				tests.UpdateKubeVirtConfigValueAndWait(config)
 			})
 
 			It("[test_id:3114]should set requested amount of memory according to the specified virtual memory", func() {
@@ -458,38 +464,90 @@ var _ = Describe("Configurations", func() {
 			})
 		})
 
-		Context("[rfe_id:2262][crit:medium][vendor:cnv-qe@redhat.com][level:component]with EFI bootloader method", func() {
+		Context("with BIOS bootloader method and no disk", func() {
+			It("[test_id:5265]should find no bootable device by default", func() {
+				By("Creating a VMI with no disk and an explicit network interface")
+				vmi := tests.NewRandomVMI()
+				tests.AddExplicitPodNetworkInterface(vmi)
 
-			It("[test_id:1668]should use EFI", func() {
-				vmi := tests.NewRandomVMIWithEFIBootloader()
+				By("Enabling BIOS serial output")
+				vmi.Spec.Domain.Firmware = &v1.Firmware{
+					Bootloader: &v1.Bootloader{
+						BIOS: &v1.BIOS{
+							UseSerial: tests.NewBool(true),
+						},
+					},
+				}
+
+				By("Ensuring network boot is disabled on the network interface")
+				Expect(vmi.Spec.Domain.Devices.Interfaces[0].BootOrder).To(BeNil())
 
 				By("Starting a VirtualMachineInstance")
 				vmi, err = virtClient.VirtualMachineInstance(tests.NamespaceTestDefault).Create(vmi)
 				Expect(err).ToNot(HaveOccurred())
-				tests.WaitUntilVMIReady(vmi, tests.LoggedInAlpineExpecter)
 
-				By("Checking if UEFI is enabled")
-				domXml, err := tests.GetRunningVirtualMachineInstanceDomainXML(virtClient, vmi)
-				Expect(err).ToNot(HaveOccurred())
-				Expect(domXml).To(ContainSubstring("OVMF_CODE.fd"))
+				By("Expecting no bootable NIC")
+				Expect(console.NetBootExpecter(vmi)).NotTo(Succeed())
+				// The expecter *should* have error-ed since the network interface is not marked bootable
 			})
 
-			It("[test_id:4437]should enable EFI secure boot", func() {
-				vmi := tests.NewRandomVMIWithSecureBoot()
+			It("[test_id:5266]should boot to NIC rom if a boot order was set on a network interface", func() {
+				By("Creating a VMI with no disk and an explicit network interface")
+				vmi := tests.NewRandomVMI()
+				tests.AddExplicitPodNetworkInterface(vmi)
+
+				By("Enabling BIOS serial output")
+				vmi.Spec.Domain.Firmware = &v1.Firmware{
+					Bootloader: &v1.Bootloader{
+						BIOS: &v1.BIOS{
+							UseSerial: tests.NewBool(true),
+						},
+					},
+				}
+
+				By("Enabling network boot")
+				var bootOrder uint = 1
+				vmi.Spec.Domain.Devices.Interfaces[0].BootOrder = &bootOrder
 
 				By("Starting a VirtualMachineInstance")
 				vmi, err = virtClient.VirtualMachineInstance(tests.NamespaceTestDefault).Create(vmi)
 				Expect(err).ToNot(HaveOccurred())
 
-				By("Checking if SecureBoot is enabled in Linux")
-				tests.WaitUntilVMIReady(vmi, tests.SecureBootExpecter)
-
-				By("Checking if SecureBoot is enabled in the libvirt XML")
-				domXml, err := tests.GetRunningVirtualMachineInstanceDomainXML(virtClient, vmi)
-				Expect(err).ToNot(HaveOccurred())
-				Expect(domXml).To(ContainSubstring("OVMF_CODE.secboot.fd"))
+				By("Expecting a bootable NIC")
+				Expect(console.NetBootExpecter(vmi)).To(Succeed())
 			})
 		})
+
+		table.DescribeTable("[rfe_id:2262][crit:medium][vendor:cnv-qe@redhat.com][level:component]with EFI bootloader method", func(vmiNew VMICreationFuncWithEFI, loginTo console.LoginToFactory, msg string, fileName string) {
+			vmi := vmiNew()
+			By("Starting a VirtualMachineInstance")
+			vmi, err = virtClient.VirtualMachineInstance(tests.NamespaceTestDefault).Create(vmi)
+			Expect(err).ToNot(HaveOccurred())
+
+			tests.WaitForVMIStartOrFailed(vmi, 180, true)
+			vmiMeta, err := virtClient.VirtualMachineInstance(vmi.Namespace).Get(vmi.Name, &metav1.GetOptions{})
+			ExpectWithOffset(1, err).ToNot(HaveOccurred())
+
+			switch vmiMeta.Status.Phase {
+			case v1.Failed:
+				// This Error is expected to be handled
+				By("Getting virt-launcher logs")
+				logs := func() string { return getVirtLauncherLogs(virtClient, vmi) }
+				Eventually(logs,
+					30*time.Second,
+					500*time.Millisecond).
+					Should(ContainSubstring("EFI OVMF roms missing"))
+			default:
+				tests.WaitUntilVMIReady(vmi, loginTo)
+				By(msg)
+				domXml, err := tests.GetRunningVirtualMachineInstanceDomainXML(virtClient, vmi)
+				Expect(err).ToNot(HaveOccurred())
+				Expect(domXml).To(ContainSubstring(fileName))
+			}
+		},
+			table.Entry("[Serial][test_id:1668]should use EFI", tests.NewRandomVMIWithEFIBootloader, console.LoginToAlpine, "Checking if UEFI is enabled", "OVMF_CODE.fd"),
+			table.Entry("[Serial][test_id:4437]should enable EFI secure boot", tests.NewRandomVMIWithSecureBoot, console.SecureBootExpecter, "Checking if SecureBoot is enabled in the libvirt XML", "OVMF_CODE.secboot.fd"),
+		)
 
 		Context("[rfe_id:140][crit:medium][vendor:cnv-qe@redhat.com][level:component]with diverging guest memory from requested memory", func() {
 			It("[test_id:1669]should show the requested guest memory inside the VMI", func() {
@@ -504,16 +562,12 @@ var _ = Describe("Configurations", func() {
 				Expect(err).ToNot(HaveOccurred())
 				tests.WaitForSuccessfulVMIStart(vmi)
 
-				expecter, err := tests.LoggedInCirrosExpecter(vmi)
-				Expect(err).ToNot(HaveOccurred())
-				defer expecter.Close()
+				Expect(libnet.WithIPv6(console.LoginToCirros)(vmi)).To(Succeed())
 
-				res, err := expecter.ExpectBatch([]expect.Batcher{
+				Expect(console.SafeExpectBatch(vmi, []expect.Batcher{
 					&expect.BSnd{S: "free -m | grep Mem: | tr -s ' ' | cut -d' ' -f2\n"},
-					&expect.BExp{R: "104"},
-				}, 10*time.Second)
-				log.DefaultLogger().Object(vmi).Infof("%v", res)
-				Expect(err).ToNot(HaveOccurred())
+					&expect.BExp{R: console.RetValue("104")},
+				}, 10)).To(Succeed())
 
 			})
 		})
@@ -529,16 +583,12 @@ var _ = Describe("Configurations", func() {
 				Expect(err).ToNot(HaveOccurred())
 				tests.WaitForSuccessfulVMIStart(vmi)
 
-				expecter, err := tests.LoggedInCirrosExpecter(vmi)
-				Expect(err).ToNot(HaveOccurred())
-				defer expecter.Close()
+				Expect(libnet.WithIPv6(console.LoginToCirros)(vmi)).To(Succeed())
 
-				res, err := expecter.ExpectBatch([]expect.Batcher{
+				Expect(console.SafeExpectBatch(vmi, []expect.Batcher{
 					&expect.BSnd{S: "free -m | grep Mem: | tr -s ' ' | cut -d' ' -f2\n"},
-					&expect.BExp{R: "104"},
-				}, 10*time.Second)
-				log.DefaultLogger().Object(vmi).Infof("%v", res)
-				Expect(err).ToNot(HaveOccurred())
+					&expect.BExp{R: console.RetValue("104")},
+				}, 10)).To(Succeed())
 
 			})
 		})
@@ -557,20 +607,16 @@ var _ = Describe("Configurations", func() {
 				Expect(err).ToNot(HaveOccurred())
 				tests.WaitForSuccessfulVMIStart(vmi)
 
-				expecter, err := tests.LoggedInCirrosExpecter(vmi)
-				Expect(err).ToNot(HaveOccurred())
-				defer expecter.Close()
+				Expect(libnet.WithIPv6(console.LoginToCirros)(vmi)).To(Succeed())
 
-				res, err := tests.ExpectBatchWithValidatedSend(expecter, []expect.Batcher{
+				Expect(console.SafeExpectBatch(vmi, []expect.Batcher{
 					&expect.BSnd{S: "[ $(free -m | grep Mem: | tr -s ' ' | cut -d' ' -f2) -gt 200 ] && echo 'pass'\n"},
-					&expect.BExp{R: tests.RetValue("pass")},
+					&expect.BExp{R: console.RetValue("pass")},
 					&expect.BSnd{S: "swapoff -a && dd if=/dev/zero of=/dev/shm/test bs=1k count=118k\n"},
-					&expect.BExp{R: "\\$ "},
+					&expect.BExp{R: console.PromptExpression},
 					&expect.BSnd{S: "echo $?\n"},
-					&expect.BExp{R: tests.RetValue("0")},
-				}, 15*time.Second)
-				log.DefaultLogger().Object(vmi).Infof("%v", res)
-				Expect(err).ToNot(HaveOccurred())
+					&expect.BExp{R: console.RetValue("0")},
+				}, 15)).To(Succeed())
 
 				pod := tests.GetRunningPodByVirtualMachineInstance(vmi, tests.NamespaceTestDefault)
 				podMemoryUsage, err := tests.ExecuteCommandOnPod(
@@ -614,17 +660,13 @@ var _ = Describe("Configurations", func() {
 			})
 			It("[test_id:732]Check Free memory on the VMI", func() {
 				By("Expecting console")
-				expecter, err := tests.LoggedInCirrosExpecter(vmi)
-				Expect(err).ToNot(HaveOccurred())
-				defer expecter.Close()
+				Expect(libnet.WithIPv6(console.LoginToCirros)(vmi)).To(Succeed())
 
 				// Check on the VM, if the Free memory is roughly what we expected
-				res, err := tests.ExpectBatchWithValidatedSend(expecter, []expect.Batcher{
+				Expect(console.SafeExpectBatch(vmi, []expect.Batcher{
 					&expect.BSnd{S: "[ $(free -m | grep Mem: | tr -s ' ' | cut -d' ' -f2) -gt 95 ] && echo 'pass'\n"},
-					&expect.BExp{R: tests.RetValue("pass")},
-				}, 15*time.Second)
-				log.DefaultLogger().Object(vmi).Infof("%v", res)
-				Expect(err).ToNot(HaveOccurred())
+					&expect.BExp{R: console.RetValue("pass")},
+				}, 15)).To(Succeed())
 			})
 		})
 
@@ -644,16 +686,13 @@ var _ = Describe("Configurations", func() {
 				tests.WaitForSuccessfulVMIStart(vmi)
 
 				By("Expecting the VirtualMachineInstance console")
-				expecter, err := tests.LoggedInAlpineExpecter(vmi)
-				Expect(err).ToNot(HaveOccurred(), "should get console")
-				defer expecter.Close()
+				Expect(console.LoginToAlpine(vmi)).To(Succeed())
 
 				By("Checking the number of usb under guest OS")
-				_, err = expecter.ExpectBatch([]expect.Batcher{
+				Expect(console.SafeExpectBatch(vmi, []expect.Batcher{
 					&expect.BSnd{S: "ls -l /sys/bus/usb/devices/usb* | wc -l\n"},
-					&expect.BExp{R: "2"},
-				}, 60*time.Second)
-				Expect(err).ToNot(HaveOccurred(), "should report number of usb")
+					&expect.BExp{R: console.RetValue("2")},
+				}, 60)).To(Succeed(), "should report number of usb")
 			})
 
 			It("[test_id:3117]should start the VMI with usb controller when input device doesn't have bus", func() {
@@ -670,16 +709,13 @@ var _ = Describe("Configurations", func() {
 				tests.WaitForSuccessfulVMIStart(vmi)
 
 				By("Expecting the VirtualMachineInstance console")
-				expecter, err := tests.LoggedInAlpineExpecter(vmi)
-				Expect(err).ToNot(HaveOccurred(), "should get console")
-				defer expecter.Close()
+				Expect(console.LoginToAlpine(vmi)).To(Succeed())
 
 				By("Checking the number of usb under guest OS")
-				_, err = expecter.ExpectBatch([]expect.Batcher{
+				Expect(console.SafeExpectBatch(vmi, []expect.Batcher{
 					&expect.BSnd{S: "ls -l /sys/bus/usb/devices/usb* | wc -l\n"},
-					&expect.BExp{R: "2"},
-				}, 60*time.Second)
-				Expect(err).ToNot(HaveOccurred(), "should report number of usb")
+					&expect.BExp{R: console.RetValue("2")},
+				}, 60)).To(Succeed(), "should report number of usb")
 			})
 
 			It("[test_id:3118]should start the VMI without usb controller", func() {
@@ -691,21 +727,19 @@ var _ = Describe("Configurations", func() {
 				tests.WaitForSuccessfulVMIStart(vmi)
 
 				By("Expecting the VirtualMachineInstance console")
-				expecter, err := tests.LoggedInAlpineExpecter(vmi)
-				Expect(err).ToNot(HaveOccurred(), "should start console")
-				defer expecter.Close()
+				Expect(console.LoginToAlpine(vmi)).To(Succeed())
+
 				By("Checking the number of usb under guest OS")
-				_, err = expecter.ExpectBatch([]expect.Batcher{
+				Expect(console.SafeExpectBatch(vmi, []expect.Batcher{
 					&expect.BSnd{S: "ls -l /sys/bus/usb/devices/usb* 2>/dev/null | wc -l\n"},
-					&expect.BExp{R: "0"},
-				}, 60*time.Second)
-				Expect(err).ToNot(HaveOccurred(), "should report number of usb")
+					&expect.BExp{R: console.RetValue("0")},
+				}, 60)).To(Succeed(), "should report number of usb")
 			})
 		})
 
 		Context("[rfe_id:3077][crit:medium][vendor:cnv-qe@redhat.com][level:component]with input devices", func() {
 			It("[test_id:2642]should failed to start the VMI with wrong type of input device", func() {
-				vmi := tests.NewRandomVMIWithEphemeralDisk(cd.ContainerDiskFor(cd.ContainerDiskFedora))
+				vmi := tests.NewRandomVMIWithEphemeralDisk(cd.ContainerDiskFor(cd.ContainerDiskCirros))
 				vmi.Spec.Domain.Devices.Inputs = []v1.Input{
 					{
 						Name: "tablet0",
@@ -719,7 +753,7 @@ var _ = Describe("Configurations", func() {
 			})
 
 			It("[test_id:3074]should failed to start the VMI with wrong bus of input device", func() {
-				vmi := tests.NewRandomVMIWithEphemeralDisk(cd.ContainerDiskFor(cd.ContainerDiskFedora))
+				vmi := tests.NewRandomVMIWithEphemeralDisk(cd.ContainerDiskFor(cd.ContainerDiskCirros))
 				vmi.Spec.Domain.Devices.Inputs = []v1.Input{
 					{
 						Name: "tablet0",
@@ -747,16 +781,13 @@ var _ = Describe("Configurations", func() {
 				tests.WaitForSuccessfulVMIStart(vmi)
 
 				By("Expecting the VirtualMachineInstance console")
-				expecter, err := tests.LoggedInAlpineExpecter(vmi)
-				Expect(err).ToNot(HaveOccurred(), "should start console")
-				defer expecter.Close()
+				Expect(console.LoginToAlpine(vmi)).To(Succeed())
 
 				By("Checking the tablet input under guest OS")
-				_, err = expecter.ExpectBatch([]expect.Batcher{
+				Expect(console.SafeExpectBatch(vmi, []expect.Batcher{
 					&expect.BSnd{S: "grep -rs '^QEMU Virtio Tablet' /sys/devices | wc -l\n"},
-					&expect.BExp{R: "1"},
-				}, 60*time.Second)
-				Expect(err).ToNot(HaveOccurred(), "should report input device")
+					&expect.BExp{R: console.RetValue("1")},
+				}, 60)).To(Succeed(), "should report input device")
 			})
 
 			It("[test_id:3073]should start the VMI with tablet input device with usb bus", func() {
@@ -774,16 +805,13 @@ var _ = Describe("Configurations", func() {
 				tests.WaitForSuccessfulVMIStart(vmi)
 
 				By("Expecting the VirtualMachineInstance console")
-				expecter, err := tests.LoggedInAlpineExpecter(vmi)
-				Expect(err).ToNot(HaveOccurred(), "should start console")
-				defer expecter.Close()
+				Expect(console.LoginToAlpine(vmi)).To(Succeed())
 
 				By("Checking the tablet input under guest OS")
-				_, err = expecter.ExpectBatch([]expect.Batcher{
+				Expect(console.SafeExpectBatch(vmi, []expect.Batcher{
 					&expect.BSnd{S: "grep -rs '^QEMU USB Tablet' /sys/devices | wc -l\n"},
-					&expect.BExp{R: "1"},
-				}, 60*time.Second)
-				Expect(err).ToNot(HaveOccurred(), "should report input device")
+					&expect.BExp{R: console.RetValue("1")},
+				}, 60)).To(Succeed(), "should report input device")
 			})
 		})
 
@@ -914,7 +942,7 @@ var _ = Describe("Configurations", func() {
 		Context("[rfe_id:140][crit:medium][vendor:cnv-qe@redhat.com][level:component]with hugepages", func() {
 			var hugepagesVmi *v1.VirtualMachineInstance
 
-			verifyHugepagesConsumption := func() {
+			verifyHugepagesConsumption := func() bool {
 				// TODO: we need to check hugepages state via node allocated resources, but currently it has the issue
 				// https://github.com/kubernetes/kubernetes/issues/64691
 				pods, err := virtClient.CoreV1().Pods(tests.NamespaceTestDefault).List(tests.UnfinishedVMIPodSelector(hugepagesVmi))
@@ -947,21 +975,43 @@ var _ = Describe("Configurations", func() {
 				freeHugepages, err := strconv.Atoi(strings.Trim(output, "\n"))
 				Expect(err).ToNot(HaveOccurred())
 
+				output, err = tests.ExecuteCommandOnPod(
+					virtClient,
+					&pods.Items[0],
+					pods.Items[0].Spec.Containers[0].Name,
+					[]string{"cat", fmt.Sprintf("%s/resv_hugepages", hugepagesDir)},
+				)
+				Expect(err).ToNot(HaveOccurred())
+
+				resvHugepages, err := strconv.Atoi(strings.Trim(output, "\n"))
+				Expect(err).ToNot(HaveOccurred())
+
 				// Verify that the VM memory equals to a number of consumed hugepages
-				vmHugepagesConsumption := int64(totalHugepages-freeHugepages) * hugepagesSize.Value()
+				vmHugepagesConsumption := int64(totalHugepages-freeHugepages+resvHugepages) * hugepagesSize.Value()
 				vmMemory := hugepagesVmi.Spec.Domain.Resources.Requests[kubev1.ResourceMemory]
 				if hugepagesVmi.Spec.Domain.Memory != nil && hugepagesVmi.Spec.Domain.Memory.Guest != nil {
 					vmMemory = *hugepagesVmi.Spec.Domain.Memory.Guest
 				}
-				Expect(vmHugepagesConsumption).To(Equal(vmMemory.Value()))
-			}
 
+				if vmHugepagesConsumption == vmMemory.Value() {
+					return true
+				}
+				return false
+			}
 			BeforeEach(func() {
 				hugepagesVmi = tests.NewRandomVMIWithEphemeralDiskAndUserdata(cd.ContainerDiskFor(cd.ContainerDiskCirros), "#!/bin/bash\necho 'hello'\n")
 			})
 
 			table.DescribeTable("should consume hugepages ", func(hugepageSize string, memory string, guestMemory string) {
 				hugepageType := kubev1.ResourceName(kubev1.ResourceHugePagesPrefix + hugepageSize)
+				v, err := cluster.GetKubernetesVersion(virtClient)
+				Expect(err).ShouldNot(HaveOccurred())
+				if strings.Contains(v, "1.16") {
+					hugepagesVmi.Annotations = map[string]string{
+						v1.MemfdMemoryBackend: "false",
+					}
+					log.DefaultLogger().Object(hugepagesVmi).Infof("Fall back to use hugepages source file. Libvirt in the 1.16 provider version doesn't support memfd as memory backend")
+				}
 
 				nodeWithHugepages := tests.GetNodeWithHugepages(virtClient, hugepageType)
 				if nodeWithHugepages == nil {
@@ -997,11 +1047,11 @@ var _ = Describe("Configurations", func() {
 				tests.WaitForSuccessfulVMIStart(hugepagesVmi)
 
 				By("Checking that the VM memory equals to a number of consumed hugepages")
-				verifyHugepagesConsumption()
+				Eventually(func() bool { return verifyHugepagesConsumption() }, 30*time.Second, 5*time.Second).Should(BeTrue())
 			},
-				table.Entry("[test_id:1671]hugepages-2Mi", "2Mi", "64Mi", "None"),
-				table.Entry("[test_id:1672]hugepages-1Gi", "1Gi", "1Gi", "None"),
-				table.Entry("[test_id:1672]hugepages-1Gi", "2Mi", "70Mi", "64Mi"),
+				table.Entry("[Serial][test_id:1671]hugepages-2Mi", "2Mi", "64Mi", "None"),
+				table.Entry("[Serial][test_id:1672]hugepages-1Gi", "1Gi", "1Gi", "None"),
+				table.Entry("[Serial][test_id:1672]hugepages-1Gi", "2Mi", "70Mi", "64Mi"),
 			)
 
 			Context("with unsupported page size", func() {
@@ -1063,16 +1113,13 @@ var _ = Describe("Configurations", func() {
 				tests.WaitForSuccessfulVMIStart(rngVmi)
 
 				By("Expecting the VirtualMachineInstance console")
-				expecter, err := tests.LoggedInAlpineExpecter(rngVmi)
-				Expect(err).ToNot(HaveOccurred())
-				defer expecter.Close()
+				Expect(console.LoginToAlpine(rngVmi)).To(Succeed())
 
 				By("Checking the virtio rng presence")
-				_, err = expecter.ExpectBatch([]expect.Batcher{
+				Expect(console.SafeExpectBatch(rngVmi, []expect.Batcher{
 					&expect.BSnd{S: "grep -c ^virtio /sys/devices/virtual/misc/hw_random/rng_available\n"},
-					&expect.BExp{R: "1"},
-				}, 400*time.Second)
-				Expect(err).ToNot(HaveOccurred())
+					&expect.BExp{R: console.RetValue("1")},
+				}, 400)).To(Succeed())
 			})
 
 			It("[test_id:1675]should not have the virtio rng device when not present", func() {
@@ -1082,20 +1129,17 @@ var _ = Describe("Configurations", func() {
 				tests.WaitForSuccessfulVMIStart(rngVmi)
 
 				By("Expecting the VirtualMachineInstance console")
-				expecter, err := tests.LoggedInAlpineExpecter(rngVmi)
-				Expect(err).ToNot(HaveOccurred())
-				defer expecter.Close()
+				Expect(console.LoginToAlpine(rngVmi)).To(Succeed())
 
 				By("Checking the virtio rng presence")
-				_, err = expecter.ExpectBatch([]expect.Batcher{
+				Expect(console.SafeExpectBatch(rngVmi, []expect.Batcher{
 					&expect.BSnd{S: "[[ ! -e /sys/devices/virtual/misc/hw_random/rng_available ]] && echo non\n"},
-					&expect.BExp{R: "non"},
-				}, 400*time.Second)
-				Expect(err).ToNot(HaveOccurred())
+					&expect.BExp{R: console.RetValue("non")},
+				}, 400)).To(Succeed())
 			})
 		})
 
-		Context("[rfe_id:140][crit:medium][vendor:cnv-qe@redhat.com][level:component]with guestAgent", func() {
+		Context("[Serial][rfe_id:140][crit:medium][vendor:cnv-qe@redhat.com][level:component]with guestAgent", func() {
 			var agentVMI *v1.VirtualMachineInstance
 
 			prepareAgentVM := func() *v1.VirtualMachineInstance {
@@ -1167,16 +1211,13 @@ var _ = Describe("Configurations", func() {
 				getOptions := metav1.GetOptions{}
 
 				By("Expecting the VirtualMachineInstance console")
-				expecter, err := tests.LoggedInFedoraExpecter(agentVMI)
-				Expect(err).ToNot(HaveOccurred())
-				defer expecter.Close()
+				Expect(console.LoginToFedora(agentVMI)).To(Succeed())
 
-				By("Terminating guest agent and waiting for it to dissappear.")
-				res, err := expecter.ExpectBatch([]expect.Batcher{
+				By("Terminating guest agent and waiting for it to disappear.")
+				Expect(console.SafeExpectBatch(agentVMI, []expect.Batcher{
 					&expect.BSnd{S: "systemctl stop guestagent\n"},
-				}, 400*time.Second)
-				log.DefaultLogger().Object(agentVMI).Infof("Login: %v", res)
-				Expect(err).ToNot(HaveOccurred())
+					&expect.BExp{R: console.PromptExpression},
+				}, 400)).To(Succeed())
 
 				By("VMI has the guest agent connected condition")
 				Eventually(func() []v1.VirtualMachineInstanceCondition {
@@ -1191,14 +1232,16 @@ var _ = Describe("Configurations", func() {
 					"Agent condition should be gone")
 			})
 
-			Context("with cluster config changes", func() {
-				supportedGuestAgentKey := "supported-guest-agent"
-
+			Context("[Serial]with cluster config changes", func() {
 				BeforeEach(func() {
-					tests.UpdateClusterConfigValueAndWait(supportedGuestAgentKey, "X.*")
+					kv := tests.GetCurrentKv(virtClient)
+
+					config := kv.Spec.Configuration
+					config.SupportedGuestAgentVersions = []string{"X.*"}
+					tests.UpdateKubeVirtConfigValueAndWait(config)
 				})
 
-				It("VMI condition should signal unsupported agent presence", func() {
+				It("[test_id:5267]VMI condition should signal unsupported agent presence", func() {
 					agentVMI := prepareAgentVM()
 					getOptions := metav1.GetOptions{}
 
@@ -1263,16 +1306,13 @@ var _ = Describe("Configurations", func() {
 				agentVMI := prepareAgentVM()
 
 				By("Expecting the VirtualMachineInstance console")
-				expecter, err := tests.LoggedInFedoraExpecter(agentVMI)
-				Expect(err).ToNot(HaveOccurred())
-				defer expecter.Close()
+				Expect(console.LoginToFedora(agentVMI)).To(Succeed())
 
-				By("Terminating guest agent and waiting for it to dissappear.")
-				res, err := expecter.ExpectBatch([]expect.Batcher{
+				By("Terminating guest agent and waiting for it to disappear.")
+				Expect(console.SafeExpectBatch(agentVMI, []expect.Batcher{
 					&expect.BSnd{S: "systemctl stop guestagent\n"},
-				}, 400*time.Second)
-				log.DefaultLogger().Object(agentVMI).Infof("Login: %v", res)
-				Expect(err).ToNot(HaveOccurred())
+					&expect.BExp{R: console.PromptExpression},
+				}, 400)).To(Succeed())
 
 				By("Expecting the Guest VM information")
 				Eventually(func() string {
@@ -1287,12 +1327,7 @@ var _ = Describe("Configurations", func() {
 			It("[test_id:4629]should return user list", func() {
 				agentVMI := prepareAgentVM()
 
-				expecter, err := tests.LoggedInFedoraExpecter(agentVMI)
-				Expect(err).ToNot(HaveOccurred())
-				defer expecter.Close()
-
-				// do some action on VM just to make sure user is active
-				expecter.Send("ls")
+				Expect(console.LoginToFedora(agentVMI)).To(Succeed())
 
 				By("Expecting the Guest VM information")
 				Eventually(func() bool {
@@ -1375,7 +1410,7 @@ var _ = Describe("Configurations", func() {
 
 		Context("with Clock and timezone", func() {
 
-			It("guest should see timezone", func() {
+			It("[test_id:5268]guest should see timezone", func() {
 				vmi := tests.NewRandomVMIWithEphemeralDiskAndUserdata(cd.ContainerDiskFor(cd.ContainerDiskCirros), "#!/bin/bash\necho 'hello'\n")
 				timezone := "America/New_York"
 				tz := v1.ClockOffsetTimezone(timezone)
@@ -1390,25 +1425,22 @@ var _ = Describe("Configurations", func() {
 				vmi, err := virtClient.VirtualMachineInstance(tests.NamespaceTestDefault).Create(vmi)
 				Expect(err).ToNot(HaveOccurred())
 
-				By("Waiting for succesful start of VMI")
+				By("Waiting for successful start of VMI")
 				tests.WaitForSuccessfulVMIStart(vmi)
 
 				By("Logging to VMI")
-				expecter, err := tests.LoggedInCirrosExpecter(vmi)
-				Expect(err).ToNot(HaveOccurred())
-				defer expecter.Close()
+				Expect(libnet.WithIPv6(console.LoginToCirros)(vmi)).To(Succeed())
 
 				loc, err := time.LoadLocation(timezone)
 				Expect(err).ToNot(HaveOccurred())
 				now := time.Now().In(loc)
-
+				plusone := now.Add(time.Minute)
 				By("Checking hardware clock time")
-				expected := fmt.Sprintf("%02d:%02d:", now.Hour(), now.Minute())
-				_, err = expecter.ExpectBatch([]expect.Batcher{
+				expected := fmt.Sprintf("(%02d:%02d:|%02d:%02d:)", now.Hour(), now.Minute(), plusone.Hour(), plusone.Minute())
+				Expect(console.SafeExpectBatch(vmi, []expect.Batcher{
 					&expect.BSnd{S: "sudo hwclock --localtime \n"},
 					&expect.BExp{R: expected},
-				}, 15*time.Second)
-				Expect(err).ToNot(HaveOccurred())
+				}, 20)).To(Succeed())
 
 			})
 		})
@@ -1419,7 +1451,7 @@ var _ = Describe("Configurations", func() {
 		libvirtCPUModelRegexp := regexp.MustCompile(`<model>(\w+)\-*\w*</model>`)
 		libvirtCPUVendorRegexp := regexp.MustCompile(`<vendor>(\w+)</vendor>`)
 		libvirtCPUFeatureRegexp := regexp.MustCompile(`<feature name='(\w+)'/>`)
-		cpuModelNameRegexp := regexp.MustCompile(`Model name:\s*([\s\w\-@\.\(\)]+)`)
+		cpuModelNameRegexp := regexp.MustCompile(`Model name:[\t ]*([\t \w\-@\.\(\)]+)`)
 
 		var libvirtCpuModel string
 		var libvirtCpuVendor string
@@ -1501,15 +1533,13 @@ var _ = Describe("Configurations", func() {
 				tests.WaitForSuccessfulVMIStart(cpuVmi)
 
 				By("Expecting the VirtualMachineInstance console")
-				expecter, err := tests.LoggedInCirrosExpecter(cpuVmi)
-				Expect(err).ToNot(HaveOccurred())
-				defer expecter.Close()
+				Expect(libnet.WithIPv6(console.LoginToCirros)(cpuVmi)).To(Succeed())
 
 				By("Checking the CPU model under the guest OS")
-				_, err = expecter.ExpectBatch([]expect.Batcher{
+				Expect(console.SafeExpectBatch(cpuVmi, []expect.Batcher{
 					&expect.BSnd{S: fmt.Sprintf("grep %s /proc/cpuinfo\n", vmiModel)},
 					&expect.BExp{R: "model name"},
-				}, 10*time.Second)
+				}, 10)).To(Succeed())
 			})
 		})
 
@@ -1525,15 +1555,13 @@ var _ = Describe("Configurations", func() {
 				tests.WaitForSuccessfulVMIStart(cpuVmi)
 
 				By("Expecting the VirtualMachineInstance console")
-				expecter, err := tests.LoggedInCirrosExpecter(cpuVmi)
-				Expect(err).ToNot(HaveOccurred())
-				defer expecter.Close()
+				Expect(libnet.WithIPv6(console.LoginToCirros)(cpuVmi)).To(Succeed())
 
 				By("Checking the CPU model under the guest OS")
-				_, err = expecter.ExpectBatch([]expect.Batcher{
-					&expect.BSnd{S: fmt.Sprintf("grep %s /proc/cpuinfo\n", cpuModelName)},
+				Expect(console.SafeExpectBatch(cpuVmi, []expect.Batcher{
+					&expect.BSnd{S: fmt.Sprintf("grep '%s' /proc/cpuinfo\n", cpuModelName)},
 					&expect.BExp{R: "model name"},
-				}, 10*time.Second)
+				}, 10)).To(Succeed())
 			})
 		})
 
@@ -1545,15 +1573,13 @@ var _ = Describe("Configurations", func() {
 				tests.WaitForSuccessfulVMIStart(cpuVmi)
 
 				By("Expecting the VirtualMachineInstance console")
-				expecter, err := tests.LoggedInCirrosExpecter(cpuVmi)
-				Expect(err).ToNot(HaveOccurred())
-				defer expecter.Close()
+				Expect(libnet.WithIPv6(console.LoginToCirros)(cpuVmi)).To(Succeed())
 
 				By("Checking the CPU model under the guest OS")
-				_, err = expecter.ExpectBatch([]expect.Batcher{
-					&expect.BSnd{S: fmt.Sprintf("grep %s /proc/cpuinfo\n", libvirtCpuModel)},
+				console.SafeExpectBatch(cpuVmi, []expect.Batcher{
+					&expect.BSnd{S: fmt.Sprintf("grep '%s' /proc/cpuinfo\n", libvirtCpuModel)},
 					&expect.BExp{R: "model name"},
-				}, 10*time.Second)
+				}, 10)
 			})
 		})
 
@@ -1573,27 +1599,25 @@ var _ = Describe("Configurations", func() {
 				tests.WaitForSuccessfulVMIStart(cpuVmi)
 
 				By("Expecting the VirtualMachineInstance console")
-				expecter, err := tests.LoggedInCirrosExpecter(cpuVmi)
-				Expect(err).ToNot(HaveOccurred())
-				defer expecter.Close()
+				Expect(libnet.WithIPv6(console.LoginToCirros)(cpuVmi)).To(Succeed())
 
 				By("Checking the CPU features under the guest OS")
-				_, err = expecter.ExpectBatch([]expect.Batcher{
+				Expect(console.SafeExpectBatch(cpuVmi, []expect.Batcher{
 					&expect.BSnd{S: fmt.Sprintf("grep %s /proc/cpuinfo\n", cpuFeatures[0])},
 					&expect.BExp{R: "flags"},
-				}, 10*time.Second)
-				Expect(err).ToNot(HaveOccurred())
+				}, 10)).To(Succeed())
 
 			})
 		})
 	})
 
-	Context("[rfe_id:2869][crit:medium][vendor:cnv-qe@redhat.com][level:component]with machine type settings", func() {
-		defaultMachineTypeKey := "machine-type"
-		defaultEmulatedMachineType := "emulated-machines"
-
+	Context("[Serial][rfe_id:2869][crit:medium][vendor:cnv-qe@redhat.com][level:component]with machine type settings", func() {
 		BeforeEach(func() {
-			tests.UpdateClusterConfigValueAndWait(defaultEmulatedMachineType, "q35*,pc-q35*,pc*")
+			kv := tests.GetCurrentKv(virtClient)
+
+			config := kv.Spec.Configuration
+			config.EmulatedMachines = []string{"q35*", "pc-q35*", "pc*"}
+			tests.UpdateKubeVirtConfigValueAndWait(config)
 		})
 
 		It("[test_id:3124]should set machine type from VMI spec", func() {
@@ -1616,8 +1640,12 @@ var _ = Describe("Configurations", func() {
 			Expect(runningVMISpec.OS.Type.Machine).To(ContainSubstring("q35"))
 		})
 
-		It("[test_id:3126]should set machine type from kubevirt-config", func() {
-			tests.UpdateClusterConfigValueAndWait(defaultMachineTypeKey, "pc")
+		It("[Serial][test_id:3126]should set machine type from kubevirt-config", func() {
+			kv := tests.GetCurrentKv(virtClient)
+
+			config := kv.Spec.Configuration
+			config.MachineType = "pc"
+			tests.UpdateKubeVirtConfigValueAndWait(config)
 
 			vmi := tests.NewRandomVMI()
 			vmi.Spec.Domain.Machine.Type = ""
@@ -1634,20 +1662,19 @@ var _ = Describe("Configurations", func() {
 			vmi := tests.NewRandomVMI()
 			vmi.Spec.SchedulerName = "my-custom-scheduler"
 			runningVMI := tests.RunVMIAndExpectScheduling(vmi, 30)
-			launcherPod := tests.GetPodByVirtualMachineInstance(runningVMI, tests.NamespaceTestDefault)
+			launcherPod := libvmi.GetPodByVirtualMachineInstance(runningVMI, tests.NamespaceTestDefault)
 			Expect(launcherPod.Spec.SchedulerName).To(Equal("my-custom-scheduler"))
 		})
 	})
 
 	Context("[rfe_id:140][crit:medium][vendor:cnv-qe@redhat.com][level:component]with CPU request settings", func() {
-		defaultCPURequestKey := "cpu-request"
 
 		It("[test_id:3127]should set CPU request from VMI spec", func() {
 			vmi := tests.NewRandomVMI()
 			vmi.Spec.Domain.Resources.Requests[kubev1.ResourceCPU] = resource.MustParse("500m")
 			runningVMI := tests.RunVMIAndExpectScheduling(vmi, 30)
 
-			readyPod := tests.GetPodByVirtualMachineInstance(runningVMI, tests.NamespaceTestDefault)
+			readyPod := libvmi.GetPodByVirtualMachineInstance(runningVMI, tests.NamespaceTestDefault)
 			computeContainer := tests.GetComputeContainerOfPod(readyPod)
 			cpuRequest := computeContainer.Resources.Requests[kubev1.ResourceCPU]
 			Expect(cpuRequest.String()).To(Equal("500m"))
@@ -1662,14 +1689,19 @@ var _ = Describe("Configurations", func() {
 			}
 			runningVMI := tests.RunVMIAndExpectScheduling(vmi, 30)
 
-			readyPod := tests.GetPodByVirtualMachineInstance(runningVMI, tests.NamespaceTestDefault)
+			readyPod := libvmi.GetPodByVirtualMachineInstance(runningVMI, tests.NamespaceTestDefault)
 			computeContainer := tests.GetComputeContainerOfPod(readyPod)
 			cpuRequest := computeContainer.Resources.Requests[kubev1.ResourceCPU]
 			Expect(cpuRequest.String()).To(Equal("100m"))
 		})
 
-		It("[test_id:3129]should set CPU request from kubevirt-config", func() {
-			tests.UpdateClusterConfigValueAndWait(defaultCPURequestKey, "800m")
+		It("[Serial][test_id:3129]should set CPU request from kubevirt-config", func() {
+			kv := tests.GetCurrentKv(virtClient)
+
+			config := kv.Spec.Configuration
+			configureCPURequest := resource.MustParse("800m")
+			config.CPURequest = &configureCPURequest
+			tests.UpdateKubeVirtConfigValueAndWait(config)
 
 			vmi := tests.NewRandomVMI()
 			vmi.Spec.Domain.Resources = v1.ResourceRequirements{
@@ -1679,28 +1711,27 @@ var _ = Describe("Configurations", func() {
 			}
 			runningVMI := tests.RunVMIAndExpectScheduling(vmi, 30)
 
-			readyPod := tests.GetPodByVirtualMachineInstance(runningVMI, tests.NamespaceTestDefault)
+			readyPod := libvmi.GetPodByVirtualMachineInstance(runningVMI, tests.NamespaceTestDefault)
 			computeContainer := tests.GetComputeContainerOfPod(readyPod)
 			cpuRequest := computeContainer.Resources.Requests[kubev1.ResourceCPU]
 			Expect(cpuRequest.String()).To(Equal("800m"))
 		})
 	})
 
-	Context("[rfe_id:904][crit:medium][vendor:cnv-qe@redhat.com][level:component]with driver cache settings and PVC", func() {
-		var cfgMap *kubev1.ConfigMap
-		var originalFeatureGates string
+	Context("[Serial][rfe_id:904][crit:medium][vendor:cnv-qe@redhat.com][level:component]with driver cache and io settings and PVC", func() {
+		var originalConfig v1.KubeVirtConfiguration
 
 		BeforeEach(func() {
-			cfgMap, err = virtClient.CoreV1().ConfigMaps(flags.KubeVirtInstallNamespace).Get(kubevirtConfig, metav1.GetOptions{})
-			Expect(err).ToNot(HaveOccurred())
-			originalFeatureGates = cfgMap.Data[virtconfig.FeatureGatesKey]
+			kv := tests.GetCurrentKv(virtClient)
+			originalConfig = kv.Spec.Configuration
+
 			tests.EnableFeatureGate(virtconfig.HostDiskGate)
 			// create a new PV and PVC (PVs can't be reused)
 			tests.CreateBlockVolumePvAndPvc("1Gi")
 		}, 60)
 
 		AfterEach(func() {
-			tests.UpdateClusterConfigValueAndWait(virtconfig.FeatureGatesKey, originalFeatureGates)
+			tests.UpdateKubeVirtConfigValueAndWait(originalConfig)
 		})
 
 		It("[test_id:1681]should set appropriate cache modes", func() {
@@ -1718,12 +1749,9 @@ var _ = Describe("Configurations", func() {
 
 			tests.AddEphemeralDisk(vmi, "ephemeral-disk3", "virtio", cd.ContainerDiskFor(cd.ContainerDiskCirros))
 			tests.AddUserData(vmi, "cloud-init", "#!/bin/bash\necho 'hello'\n")
-			tests.AddPVCDisk(vmi, "hostpath-pvc", "virtio", tests.DiskAlpineHostPath)
-			tests.AddPVCDisk(vmi, "block-pvc", "virtio", tests.BlockDiskForTest)
 			tmpHostDiskDir := tests.RandTmpDir()
 			tests.AddHostDisk(vmi, filepath.Join(tmpHostDiskDir, "test-disk.img"), v1.HostDiskExistsOrCreate, "hostdisk")
 			tests.RunVMIAndExpectLaunch(vmi, 60)
-
 			runningVMISpec, err := tests.GetRunningVMIDomainSpec(vmi)
 			Expect(err).ToNot(HaveOccurred())
 			vmiPod := tests.GetRunningPodByVirtualMachineInstance(vmi, tests.NamespaceTestDefault)
@@ -1752,23 +1780,69 @@ var _ = Describe("Configurations", func() {
 			Expect(disks[3].Alias.Name).To(Equal("cloud-init"))
 			Expect(disks[3].Driver.Cache).To(Equal(cacheNone))
 
+			By("checking if default cache 'writethrough' has been set to fs which does not support direct I/O")
+			Expect(disks[4].Alias.Name).To(Equal("hostdisk"))
+			Expect(disks[4].Driver.Cache).To(Equal(cacheWritethrough))
+		})
+
+		It("[test_id:5360]should set appropriate IO modes", func() {
+			tests.SkipPVCTestIfRunnigOnKindInfra()
+
+			vmi := tests.NewRandomVMI()
+			vmi.Spec.Domain.Resources.Requests[kubev1.ResourceMemory] = resource.MustParse("64M")
+
+			By("adding disks to a VMI")
+			// disk[0]:  File, sparsed, no user-input, cache=none
+			tests.AddEphemeralDisk(vmi, "ephemeral-disk1", "virtio", cd.ContainerDiskFor(cd.ContainerDiskCirros))
+			vmi.Spec.Domain.Devices.Disks[0].Cache = v1.CacheNone
+
+			// disk[1]:  Block, no user-input, cache=none
+			tests.AddPVCDisk(vmi, "block-pvc", "virtio", tests.BlockDiskForTest)
+
+			// disk[2]: File, not-sparsed, no user-input, cache=none
+			tests.AddPVCDisk(vmi, "hostpath-pvc", "virtio", tests.DiskAlpineHostPath)
+
+			// disk[3]:  File, sparsed, user-input=threads, cache=none
+			tests.AddEphemeralDisk(vmi, "ephemeral-disk2", "virtio", cd.ContainerDiskFor(cd.ContainerDiskCirros))
+			vmi.Spec.Domain.Devices.Disks[3].Cache = v1.CacheNone
+			vmi.Spec.Domain.Devices.Disks[3].IO = v1.IOThreads
+
+			tests.RunVMIAndExpectLaunch(vmi, 60)
+			runningVMISpec, err := tests.GetRunningVMIDomainSpec(vmi)
+			Expect(err).ToNot(HaveOccurred())
+
+			disks := runningVMISpec.Devices.Disks
+			By("checking if number of attached disks is equal to real disks number")
+			Expect(len(vmi.Spec.Domain.Devices.Disks)).To(Equal(len(disks)))
+
+			ioNative := string(v1.IONative)
+			ioThreads := string(v1.IOThreads)
+			ioNone := ""
+
+			By("checking if default io has not been seti for sparsed file")
+			Expect(disks[0].Alias.Name).To(Equal("ephemeral-disk1"))
+			Expect(disks[0].Driver.IO).To(Equal(ioNone))
+
+			By("checking if default io mode has been set to 'native' for block device")
+			Expect(disks[1].Alias.Name).To(Equal("block-pvc"))
+			Expect(disks[1].Driver.IO).To(Equal(ioNative))
+
 			By("checking if default cache 'none' has been set to pvc disk")
-			Expect(disks[4].Alias.Name).To(Equal("hostpath-pvc"))
+			Expect(disks[2].Alias.Name).To(Equal("hostpath-pvc"))
 			// PVC is mounted as tmpfs on kind, which does not support direct I/O.
 			// As such, it behaves as plugging in a hostDisk - check disks[6].
 			if tests.IsRunningOnKindInfra() {
-				Expect(disks[4].Driver.Cache).To(Equal(cacheWritethrough))
+				// The chache mode is set to cacheWritethrough
+				Expect(disks[2].Driver.IO).To(Equal(ioNone))
 			} else {
-				Expect(disks[4].Driver.Cache).To(Equal(cacheNone))
+				// The chache mode is set to cacheNone
+				Expect(disks[2].Driver.IO).To(Equal(ioNative))
 			}
 
-			By("checking if default cache 'none' has been set to block pvc")
-			Expect(disks[5].Alias.Name).To(Equal("block-pvc"))
-			Expect(disks[5].Driver.Cache).To(Equal(cacheNone))
+			By("checking if requested io mode 'threads' has been set")
+			Expect(disks[3].Alias.Name).To(Equal("ephemeral-disk2"))
+			Expect(disks[3].Driver.IO).To(Equal(ioThreads))
 
-			By("checking if default cache 'writethrough' has been set to fs which does not support direct I/O")
-			Expect(disks[6].Alias.Name).To(Equal("hostdisk"))
-			Expect(disks[6].Driver.Cache).To(Equal(cacheWritethrough))
 		})
 	})
 
@@ -1786,10 +1860,10 @@ var _ = Describe("Configurations", func() {
 			tests.AddEphemeralDisk(vmi, "disk2", "sata", containerImage)
 			// NOTE: we have one disk per bus, so we expect vda, sda
 		})
-		checkPciAddress := func(vmi *v1.VirtualMachineInstance, expectedPciAddress string, prompt string) {
-			err := tests.CheckForTextExpecter(vmi, []expect.Batcher{
+		checkPciAddress := func(vmi *v1.VirtualMachineInstance, expectedPciAddress string) {
+			err := console.SafeExpectBatch(vmi, []expect.Batcher{
 				&expect.BSnd{S: "\n"},
-				&expect.BExp{R: prompt},
+				&expect.BExp{R: console.PromptExpression},
 				&expect.BSnd{S: "grep DEVNAME /sys/bus/pci/devices/" + expectedPciAddress + "/*/block/vda/uevent|awk -F= '{ print $2 }'\n"},
 				&expect.BExp{R: "vda"},
 			}, 15)
@@ -1801,18 +1875,15 @@ var _ = Describe("Configurations", func() {
 			Expect(err).ToNot(HaveOccurred())
 			tests.WaitForSuccessfulVMIStart(vmi)
 
-			expecter, err := tests.LoggedInCirrosExpecter(vmi)
-			Expect(err).ToNot(HaveOccurred())
-			defer expecter.Close()
+			Expect(libnet.WithIPv6(console.LoginToCirros)(vmi)).To(Succeed())
 
-			res, err := expecter.ExpectBatch([]expect.Batcher{
+			Expect(console.SafeExpectBatch(vmi, []expect.Batcher{
 				// keep the ordering!
-				&expect.BSnd{S: "ls /dev/sda  /dev/vda  /dev/vdb\n"},
-				&expect.BExp{R: "/dev/sda  /dev/vda  /dev/vdb"},
-			}, 10*time.Second)
-			log.DefaultLogger().Object(vmi).Infof("%v", res)
-
-			Expect(err).ToNot(HaveOccurred())
+				&expect.BSnd{S: "ls /dev/vda  /dev/vdb\n"},
+				&expect.BExp{R: console.PromptExpression},
+				&expect.BSnd{S: "echo $?\n"},
+				&expect.BExp{R: console.RetValue("0")},
+			}, 10)).To(Succeed())
 		})
 
 		It("[test_id:3906]should configure custom Pci address", func() {
@@ -1821,12 +1892,12 @@ var _ = Describe("Configurations", func() {
 			vmi.Spec.Domain.Devices.Disks[0].Disk.Bus = "virtio"
 			vmi, err = virtClient.VirtualMachineInstance(tests.NamespaceTestDefault).Create(vmi)
 			Expect(err).ToNot(HaveOccurred())
-			tests.WaitUntilVMIReady(vmi, tests.LoggedInCirrosExpecter)
+			tests.WaitUntilVMIReady(vmi, libnet.WithIPv6(console.LoginToCirros))
 
-			checkPciAddress(vmi, vmi.Spec.Domain.Devices.Disks[0].Disk.PciAddress, "\\$")
+			checkPciAddress(vmi, vmi.Spec.Domain.Devices.Disks[0].Disk.PciAddress)
 		})
 
-		It("[test_id:1020]should not create the VM with wrong PCI adress", func() {
+		It("[test_id:1020]should not create the VM with wrong PCI address", func() {
 			By("setting disk1 Pci address")
 
 			wrongPciAddress := "0000:04:10.0"
@@ -1886,7 +1957,7 @@ var _ = Describe("Configurations", func() {
 			}
 		})
 
-		Context("with cpu pinning enabled", func() {
+		Context("[Serial]with cpu pinning enabled", func() {
 			It("[test_id:1684]should set the cpumanager label to false when it's not running", func() {
 
 				By("adding a cpumanger=true label to a node")
@@ -1974,17 +2045,13 @@ var _ = Describe("Configurations", func() {
 				Expect(len(pinnedCPUsList)).To(Equal(int(cpuVmi.Spec.Domain.CPU.Cores)))
 
 				By("Expecting the VirtualMachineInstance console")
-				expecter, err := tests.LoggedInCirrosExpecter(cpuVmi)
-				Expect(err).ToNot(HaveOccurred())
-				defer expecter.Close()
+				Expect(libnet.WithIPv6(console.LoginToCirros)(cpuVmi)).To(Succeed())
 
 				By("Checking the number of CPU cores under guest OS")
-				res, err := expecter.ExpectBatch([]expect.Batcher{
+				Expect(console.SafeExpectBatch(cpuVmi, []expect.Batcher{
 					&expect.BSnd{S: "grep -c ^processor /proc/cpuinfo\n"},
 					&expect.BExp{R: "2"},
-				}, 15*time.Second)
-				log.DefaultLogger().Object(cpuVmi).Infof("%v", res)
-				Expect(err).ToNot(HaveOccurred())
+				}, 15)).To(Succeed())
 			})
 			It("[test_id:4632]should be able to start a vm with guest memory different from requested and keep guaranteed qos", func() {
 				Skip("Skip test till issue https://github.com/kubevirt/kubevirt/issues/3910 is fixed")
@@ -2021,20 +2088,16 @@ var _ = Describe("Configurations", func() {
 				Expect(podQos).To(Equal(kubev1.PodQOSGuaranteed))
 
 				//-------------------------------------------------------------------
-				expecter, err := tests.LoggedInCirrosExpecter(vmi)
-				Expect(err).ToNot(HaveOccurred())
-				defer expecter.Close()
+				Expect(libnet.WithIPv6(console.LoginToCirros)(vmi)).To(Succeed())
 
-				res, err := tests.ExpectBatchWithValidatedSend(expecter, []expect.Batcher{
+				Expect(console.SafeExpectBatch(vmi, []expect.Batcher{
 					&expect.BSnd{S: "[ $(free -m | grep Mem: | tr -s ' ' | cut -d' ' -f2) -lt 80 ] && echo 'pass'\n"},
-					&expect.BExp{R: tests.RetValue("pass")},
+					&expect.BExp{R: console.RetValue("pass")},
 					&expect.BSnd{S: "swapoff -a && dd if=/dev/zero of=/dev/shm/test bs=1k count=118k\n"},
-					&expect.BExp{R: "\\$ "},
+					&expect.BExp{R: console.PromptExpression},
 					&expect.BSnd{S: "echo $?\n"},
-					&expect.BExp{R: tests.RetValue("0")},
-				}, 15*time.Second)
-				log.DefaultLogger().Object(vmi).Infof("%v", res)
-				Expect(err).ToNot(HaveOccurred())
+					&expect.BExp{R: console.RetValue("0")},
+				}, 15)).To(Succeed())
 
 				pod := tests.GetRunningPodByVirtualMachineInstance(vmi, tests.NamespaceTestDefault)
 				podMemoryUsage, err := tests.ExecuteCommandOnPod(
@@ -2108,17 +2171,13 @@ var _ = Describe("Configurations", func() {
 				Expect(len(pinnedCPUsList)).To(Equal(int(cpuVmi.Spec.Domain.CPU.Cores) + 1))
 
 				By("Expecting the VirtualMachineInstance console")
-				expecter, err := tests.LoggedInCirrosExpecter(cpuVmi)
-				Expect(err).ToNot(HaveOccurred())
-				defer expecter.Close()
+				Expect(libnet.WithIPv6(console.LoginToCirros)(cpuVmi)).To(Succeed())
 
 				By("Checking the number of CPU cores under guest OS")
-				res, err := expecter.ExpectBatch([]expect.Batcher{
+				Expect(console.SafeExpectBatch(cpuVmi, []expect.Batcher{
 					&expect.BSnd{S: "grep -c ^processor /proc/cpuinfo\n"},
 					&expect.BExp{R: "2"},
-				}, 15*time.Second)
-				log.DefaultLogger().Object(cpuVmi).Infof("%v", res)
-				Expect(err).ToNot(HaveOccurred())
+				}, 15)).To(Succeed())
 			})
 
 			It("[test_id:4024]should fail the vmi creation if IsolateEmulatorThread requested without dedicated cpus", func() {
@@ -2156,17 +2215,13 @@ var _ = Describe("Configurations", func() {
 				Expect(isNodeHasCPUManagerLabel(node)).To(BeTrue())
 
 				By("Expecting the VirtualMachineInstance console")
-				expecter, err := tests.LoggedInCirrosExpecter(cpuVmi)
-				Expect(err).ToNot(HaveOccurred())
-				defer expecter.Close()
+				Expect(libnet.WithIPv6(console.LoginToCirros)(cpuVmi)).To(Succeed())
 
 				By("Checking the number of CPU cores under guest OS")
-				res, err := expecter.ExpectBatch([]expect.Batcher{
+				Expect(console.SafeExpectBatch(cpuVmi, []expect.Batcher{
 					&expect.BSnd{S: "grep -c ^processor /proc/cpuinfo\n"},
 					&expect.BExp{R: "2"},
-				}, 15*time.Second)
-				log.DefaultLogger().Object(cpuVmi).Infof("%v", res)
-				Expect(err).ToNot(HaveOccurred())
+				}, 15)).To(Succeed())
 			})
 
 			It("[test_id:1688]should fail the vmi creation if the requested resources are inconsistent", func() {
@@ -2252,7 +2307,7 @@ var _ = Describe("Configurations", func() {
 			})
 		})
 
-		Context("cpu pinning with fedora images, dedicated and non dedicated cpu should be possible on same node via spec.domain.cpu.cores", func() {
+		Context("[Serial]cpu pinning with fedora images, dedicated and non dedicated cpu should be possible on same node via spec.domain.cpu.cores", func() {
 
 			var cpuvmi, vmi *v1.VirtualMachineInstance
 			var node string
@@ -2302,9 +2357,7 @@ var _ = Describe("Configurations", func() {
 				Expect(node1).To(Equal(node))
 
 				By("Expecting the VirtualMachineInstance console")
-				expecter1, err := tests.LoggedInFedoraExpecter(cpuvmi)
-				Expect(err).ToNot(HaveOccurred())
-				defer expecter1.Close()
+				Expect(libnet.WithIPv6(console.LoginToFedora)(cpuvmi)).To(Succeed())
 
 				By("Starting a VirtualMachineInstance without dedicated cpus")
 				vmi, err = virtClient.VirtualMachineInstance(tests.NamespaceTestDefault).Create(vmi)
@@ -2314,9 +2367,7 @@ var _ = Describe("Configurations", func() {
 				Expect(node2).To(Equal(node))
 
 				By("Expecting the VirtualMachineInstance console")
-				expecter2, err := tests.LoggedInFedoraExpecter(vmi)
-				Expect(err).ToNot(HaveOccurred())
-				defer expecter2.Close()
+				Expect(libnet.WithIPv6(console.LoginToFedora)(vmi)).To(Succeed())
 			})
 
 			It("[test_id:832]should start a vm with cpu pinning after a vm with no cpu pinning on same node", func() {
@@ -2329,9 +2380,7 @@ var _ = Describe("Configurations", func() {
 				Expect(node2).To(Equal(node))
 
 				By("Expecting the VirtualMachineInstance console")
-				expecter1, err := tests.LoggedInFedoraExpecter(vmi)
-				Expect(err).ToNot(HaveOccurred())
-				defer expecter1.Close()
+				Expect(libnet.WithIPv6(console.LoginToFedora)(vmi)).To(Succeed())
 
 				By("Starting a VirtualMachineInstance with dedicated cpus")
 				cpuvmi, err = virtClient.VirtualMachineInstance(tests.NamespaceTestDefault).Create(cpuvmi)
@@ -2341,17 +2390,14 @@ var _ = Describe("Configurations", func() {
 				Expect(node1).To(Equal(node))
 
 				By("Expecting the VirtualMachineInstance console")
-				expecter2, err := tests.LoggedInFedoraExpecter(cpuvmi)
-				Expect(err).ToNot(HaveOccurred())
-				defer expecter2.Close()
+				Expect(libnet.WithIPv6(console.LoginToFedora)(cpuvmi)).To(Succeed())
 			})
 		})
 	})
 
 	Context("[rfe_id:2926][crit:medium][vendor:cnv-qe@redhat.com][level:component]Check Chassis value", func() {
 
-		It("[test_id:2927]Test Chassis value in a newly created VM", func() {
-			tests.SkipDmidecodeTestIfRunningOnKindInfraIPv6()
+		It("[Serial][test_id:2927]Test Chassis value in a newly created VM", func() {
 			vmi := tests.NewRandomFedoraVMIWithDmidecode()
 			vmi.Spec.Domain.Chassis = &v1.Chassis{
 				Asset: "Test-123",
@@ -2368,36 +2414,33 @@ var _ = Describe("Configurations", func() {
 			Expect(domXml).To(ContainSubstring("<entry name='asset'>Test-123</entry>"))
 
 			By("Expecting console")
-			expecter, err := tests.LoggedInFedoraExpecter(vmi)
-			Expect(err).ToNot(HaveOccurred())
-			defer expecter.Close()
+			Expect(libnet.WithIPv6(console.LoginToFedora)(vmi)).To(Succeed())
 
 			By("Check value in VM with dmidecode")
 			// Check on the VM, if expected values are there with dmidecode
-			res, err := tests.ExpectBatchWithValidatedSend(expecter, []expect.Batcher{
+			Expect(console.SafeExpectBatch(vmi, []expect.Batcher{
 				&expect.BSnd{S: "[ $(sudo dmidecode -s chassis-asset-tag | tr -s ' ') = Test-123 ] && echo 'pass'\n"},
-				&expect.BExp{R: tests.RetValue("pass")},
-			}, 1*time.Second)
-			log.DefaultLogger().Object(vmi).Infof("%v", res)
-			Expect(err).ToNot(HaveOccurred())
+				&expect.BExp{R: console.RetValue("pass")},
+			}, 1)).To(Succeed())
 		})
 	})
 
-	Context("[rfe_id:2926][crit:medium][vendor:cnv-qe@redhat.com][level:component]Check SMBios with default and custom values", func() {
+	Context("[Serial][rfe_id:2926][crit:medium][vendor:cnv-qe@redhat.com][level:component]Check SMBios with default and custom values", func() {
 
 		var vmi *v1.VirtualMachineInstance
 
 		BeforeEach(func() {
-			tests.SkipDmidecodeTestIfRunningOnKindInfraIPv6()
 			vmi = tests.NewRandomFedoraVMIWithDmidecode()
 		})
 
 		It("[test_id:2751]test default SMBios", func() {
-			// Clear up SMBios values if already set in kubevirt-config, for testing default values.
-			test_smbios := &cmdv1.SMBios{Family: "", Product: "", Manufacturer: ""}
-			smbiosJson, err := json.Marshal(test_smbios)
-			Expect(err).ToNot(HaveOccurred())
-			tests.UpdateClusterConfigValueAndWait(virtconfig.SmbiosConfigKey, string(smbiosJson))
+			kv := tests.GetCurrentKv(virtClient)
+
+			config := kv.Spec.Configuration
+			// Clear SMBios values if already set in kubevirt-config, for testing default values.
+			test_smbios := &v1.SMBiosConfiguration{Family: "", Product: "", Manufacturer: ""}
+			config.SMBIOSConfig = test_smbios
+			tests.UpdateKubeVirtConfigValueAndWait(config)
 
 			By("Starting a VirtualMachineInstance")
 			vmi, err = virtClient.VirtualMachineInstance(tests.NamespaceTestDefault).Create(vmi)
@@ -2412,30 +2455,27 @@ var _ = Describe("Configurations", func() {
 			Expect(domXml).To(ContainSubstring("<entry name='manufacturer'>KubeVirt</entry>"))
 
 			By("Expecting console")
-			expecter, err := tests.LoggedInFedoraExpecter(vmi)
-			Expect(err).ToNot(HaveOccurred())
-			defer expecter.Close()
+			Expect(libnet.WithIPv6(console.LoginToFedora)(vmi)).To(Succeed())
 
 			By("Check values in dmidecode")
 			// Check on the VM, if expected values are there with dmidecode
-			res, err := tests.ExpectBatchWithValidatedSend(expecter, []expect.Batcher{
+			Expect(console.SafeExpectBatch(vmi, []expect.Batcher{
 				&expect.BSnd{S: "[ $(sudo dmidecode -s system-family | tr -s ' ') = KubeVirt ] && echo 'pass'\n"},
-				&expect.BExp{R: tests.RetValue("pass")},
+				&expect.BExp{R: console.RetValue("pass")},
 				&expect.BSnd{S: "[ $(sudo dmidecode -s system-product-name | tr -s ' ') = None ] && echo 'pass'\n"},
-				&expect.BExp{R: tests.RetValue("pass")},
+				&expect.BExp{R: console.RetValue("pass")},
 				&expect.BSnd{S: "[ $(sudo dmidecode -s system-manufacturer | tr -s ' ') = KubeVirt ] && echo 'pass'\n"},
-				&expect.BExp{R: tests.RetValue("pass")},
-			}, 1*time.Second)
-			log.DefaultLogger().Object(vmi).Infof("%v", res)
-			Expect(err).ToNot(HaveOccurred())
+				&expect.BExp{R: console.RetValue("pass")},
+			}, 1)).To(Succeed())
 		})
 
 		It("[test_id:2752]test custom SMBios values", func() {
+			kv := tests.GetCurrentKv(virtClient)
+			config := kv.Spec.Configuration
 			// Set a custom test SMBios
-			test_smbios := &cmdv1.SMBios{Family: "test", Product: "test", Manufacturer: "None", Sku: "1.0", Version: "1.0"}
-			smbiosJson, err := json.Marshal(test_smbios)
-			Expect(err).ToNot(HaveOccurred())
-			tests.UpdateClusterConfigValueAndWait(virtconfig.SmbiosConfigKey, string(smbiosJson))
+			test_smbios := &v1.SMBiosConfiguration{Family: "test", Product: "test", Manufacturer: "None", Sku: "1.0", Version: "1.0"}
+			config.SMBIOSConfig = test_smbios
+			tests.UpdateKubeVirtConfigValueAndWait(config)
 
 			By("Starting a VirtualMachineInstance")
 			vmi, err := virtClient.VirtualMachineInstance(tests.NamespaceTestDefault).Create(vmi)
@@ -2451,23 +2491,19 @@ var _ = Describe("Configurations", func() {
 			Expect(domXml).To(ContainSubstring("<entry name='version'>1.0</entry>"))
 
 			By("Expecting console")
-			expecter, err := tests.LoggedInFedoraExpecter(vmi)
-			Expect(err).ToNot(HaveOccurred())
-			defer expecter.Close()
+			Expect(libnet.WithIPv6(console.LoginToFedora)(vmi)).To(Succeed())
 
 			By("Check values in dmidecode")
 
 			// Check on the VM, if expected values are there with dmidecode
-			res, err := tests.ExpectBatchWithValidatedSend(expecter, []expect.Batcher{
+			Expect(console.SafeExpectBatch(vmi, []expect.Batcher{
 				&expect.BSnd{S: "[ $(sudo dmidecode -s system-family | tr -s ' ') = test ] && echo 'pass'\n"},
-				&expect.BExp{R: tests.RetValue("pass")},
+				&expect.BExp{R: console.RetValue("pass")},
 				&expect.BSnd{S: "[ $(sudo dmidecode -s system-product-name | tr -s ' ') = test ] && echo 'pass'\n"},
-				&expect.BExp{R: tests.RetValue("pass")},
+				&expect.BExp{R: console.RetValue("pass")},
 				&expect.BSnd{S: "[ $(sudo dmidecode -s system-manufacturer | tr -s ' ') = None ] && echo 'pass'\n"},
-				&expect.BExp{R: tests.RetValue("pass")},
-			}, 1*time.Second)
-			log.DefaultLogger().Object(vmi).Infof("%v", res)
-			Expect(err).ToNot(HaveOccurred())
+				&expect.BExp{R: console.RetValue("pass")},
+			}, 1)).To(Succeed())
 		})
 	})
 
@@ -2497,30 +2533,29 @@ var _ = Describe("Configurations", func() {
 		)
 	})
 
-	Context("Custom PCI Adresses with slots and function", func() {
+	Context("Custom PCI Addresses configuration", func() {
+		// The aim of the test is to validate the configurability of a range of PCI slots
+		// on the root PCI bus 0. We would like to test slots 2..1a (slots 0,1 and beyond 1a are reserved).
+		// In addition , we test usage of PCI functions on a single slot
+		// by occupying all the functions 1..7 on random port 2.
 
-		It("should configure custom pci address across all slots", func() {
-			pciSlotsAddr := make([]string, 25)
-			for i := range pciSlotsAddr {
-				pciSlotsAddr[i] = fmt.Sprintf("%x", i+2)
-				if len(pciSlotsAddr[i]) == 1 {
-					pciSlotsAddr[i] = "0" + pciSlotsAddr[i]
-				}
-				pciSlotsAddr[i] = fmt.Sprintf("0000:00:%v.0", pciSlotsAddr[i])
-			}
-			vmi1 := tests.NewRandomFedoraVMIWitGuestAgent()
-			for i, pci := range pciSlotsAddr[:len(pciSlotsAddr)/2] {
-				vmi1.Spec.Domain.Devices.Disks = append(vmi1.Spec.Domain.Devices.Disks,
+		addrPrefix := "0000:00" // PCI bus 0
+		numOfSlotsToTest := 24  // slots 2..1a
+		numOfFuncsToTest := 8
+		var vmi *v1.VirtualMachineInstance
+
+		createDisks := func(numOfDisks int, vmi *v1.VirtualMachineInstance) {
+			for i := 0; i < numOfDisks; i++ {
+				vmi.Spec.Domain.Devices.Disks = append(vmi.Spec.Domain.Devices.Disks,
 					v1.Disk{
 						Name: fmt.Sprintf("test%v", i),
 						DiskDevice: v1.DiskDevice{
 							Disk: &v1.DiskTarget{
-								Bus:        "virtio",
-								PciAddress: pci,
+								Bus: "virtio",
 							},
 						},
 					})
-				vmi1.Spec.Volumes = append(vmi1.Spec.Volumes,
+				vmi.Spec.Volumes = append(vmi.Spec.Volumes,
 					v1.Volume{
 						Name: fmt.Sprintf("test%v", i),
 						VolumeSource: v1.VolumeSource{
@@ -2530,117 +2565,110 @@ var _ = Describe("Configurations", func() {
 						},
 					})
 			}
+		}
+		assignDisksToSlots := func(startIndex int, vmi *v1.VirtualMachineInstance) {
+			var addr string
 
-			vmi2 := tests.NewRandomFedoraVMIWitGuestAgent()
-			for i, pci := range pciSlotsAddr[len(pciSlotsAddr)/2:] {
-				vmi2.Spec.Domain.Devices.Disks = append(vmi2.Spec.Domain.Devices.Disks, v1.Disk{
-					Name: fmt.Sprintf("test%v", i),
-					DiskDevice: v1.DiskDevice{
-						Disk: &v1.DiskTarget{
-							Bus:        "virtio",
-							PciAddress: pci,
-						},
-					},
-				})
-				vmi2.Spec.Volumes = append(vmi2.Spec.Volumes, v1.Volume{
-					Name: fmt.Sprintf("test%v", i),
-					VolumeSource: v1.VolumeSource{
-						EmptyDisk: &v1.EmptyDiskSource{
-							Capacity: resource.MustParse("1Mi"),
-						},
-					},
-				})
+			for i, disk := range vmi.Spec.Domain.Devices.Disks {
+				addr = fmt.Sprintf("%x", i+startIndex)
+				if len(addr) == 1 {
+					disk.DiskDevice.Disk.PciAddress = fmt.Sprintf("%s:0%v.0", addrPrefix, addr)
+				} else {
+					disk.DiskDevice.Disk.PciAddress = fmt.Sprintf("%s:%v.0", addrPrefix, addr)
+				}
 			}
+		}
 
-			vmi1, err = virtClient.VirtualMachineInstance(tests.NamespaceTestDefault).Create(vmi1)
-			Expect(err).ToNot(HaveOccurred())
-			tests.WaitUntilVMIReady(vmi1, tests.LoggedInFedoraExpecter)
-			Expect(len(vmi1.Spec.Domain.Devices.Disks)).Should(BeNumerically("==", 14))
+		assignDisksToFunctions := func(startIndex int, vmi *v1.VirtualMachineInstance) {
+			for i, disk := range vmi.Spec.Domain.Devices.Disks {
+				disk.DiskDevice.Disk.PciAddress = fmt.Sprintf("%s:02.%v", addrPrefix, fmt.Sprintf("%x", i+startIndex))
+			}
+		}
 
-			vmi2, err = virtClient.VirtualMachineInstance(tests.NamespaceTestDefault).Create(vmi2)
-			Expect(err).ToNot(HaveOccurred())
-			tests.WaitUntilVMIReady(vmi2, tests.LoggedInFedoraExpecter)
-			Expect(len(vmi2.Spec.Domain.Devices.Disks)).Should(BeNumerically("==", 15))
-
-			err = virtClient.VirtualMachineInstance(tests.NamespaceTestDefault).Delete(vmi1.Name, &metav1.DeleteOptions{})
-			Expect(err).ToNot(HaveOccurred())
-			err = virtClient.VirtualMachineInstance(tests.NamespaceTestDefault).Delete(vmi2.Name, &metav1.DeleteOptions{})
-			Expect(err).ToNot(HaveOccurred())
+		BeforeEach(func() {
+			var bootOrder uint = 1
+			vmi = tests.NewRandomFedoraVMIWitGuestAgent()
+			vmi.Spec.Domain.Resources.Requests[kubev1.ResourceMemory] = resource.MustParse("1024M")
+			vmi.Spec.Domain.Devices.Disks[0].BootOrder = &bootOrder
 		})
-		It("should configure custom pci address across all slot functions", func() {
-			vmi := tests.NewRandomFedoraVMIWitGuestAgent()
-			pciSlotsAddr := make([]string, 7)
-			for i := range pciSlotsAddr {
-				pciSlotsAddr[i] = fmt.Sprintf("0000:00:02.%d", i)
-			}
 
-			for i, pci := range pciSlotsAddr {
-				vmi.Spec.Domain.Devices.Disks = append(vmi.Spec.Domain.Devices.Disks, v1.Disk{
-					Name: fmt.Sprintf("test%v", i),
-					DiskDevice: v1.DiskDevice{
-						Disk: &v1.DiskTarget{
-							Bus:        "virtio",
-							PciAddress: pci,
-						},
-					},
-				})
-				vmi.Spec.Volumes = append(vmi.Spec.Volumes, v1.Volume{
-					Name: fmt.Sprintf("test%v", i),
-					VolumeSource: v1.VolumeSource{
-						EmptyDisk: &v1.EmptyDiskSource{
-							Capacity: resource.MustParse("1Mi"),
-						},
-					},
-				})
-			}
+		table.DescribeTable("should configure custom pci address", func(startIndex, numOfDevices int, testingPciFunctions bool) {
+			currentDisks := len(vmi.Spec.Domain.Devices.Disks)
+			numOfDisksToAdd := numOfDevices - currentDisks
 
+			createDisks(numOfDisksToAdd, vmi)
+			if testingPciFunctions {
+				assignDisksToFunctions(startIndex, vmi)
+			} else {
+				assignDisksToSlots(startIndex, vmi)
+			}
 			vmi, err = virtClient.VirtualMachineInstance(tests.NamespaceTestDefault).Create(vmi)
 			Expect(err).ToNot(HaveOccurred())
-			tests.WaitUntilVMIReady(vmi, tests.LoggedInFedoraExpecter)
-			Expect(len(vmi.Spec.Domain.Devices.Disks)).Should(BeNumerically("==", 9))
+			tests.WaitUntilVMIReady(vmi, console.LoginToFedora)
+			Expect(len(vmi.Spec.Domain.Devices.Disks)).Should(BeNumerically("==", numOfDevices))
 
 			err = virtClient.VirtualMachineInstance(tests.NamespaceTestDefault).Delete(vmi.Name, &metav1.DeleteOptions{})
 			Expect(err).ToNot(HaveOccurred())
-		})
+		},
+			table.Entry("[test_id:5269]across all available PCI root bus slots", 2, numOfSlotsToTest, false),
+			table.Entry("[test_id:5270]across all available PCI functions of a single slot", 0, numOfFuncsToTest, true),
+		)
 	})
 
-	It("[test_id:4153]VMI with masquerade binding and guest agent should expose Pod IP as its public address", func() {
-		vmi := tests.NewRandomFedoraVMIWitGuestAgent()
+	Context("Check KVM CPUID advertisement", func() {
+		var vmi *v1.VirtualMachineInstance
 
-		By("Starting a VirtualMachineInstance")
-		vmi, err := virtClient.VirtualMachineInstance(tests.NamespaceTestDefault).Create(vmi)
-		Expect(err).ToNot(HaveOccurred(), "Should successfully create VMI")
-		tests.WaitForSuccessfulVMIStart(vmi)
-
-		vmi, err = virtClient.VirtualMachineInstance(tests.NamespaceTestDefault).Get(vmi.Name, &metav1.GetOptions{})
-		Expect(err).ToNot(HaveOccurred(), "Should successfully get VMI")
-
-		vmiVirtLauncherPod := tests.GetRunningPodByVirtualMachineInstance(vmi, tests.NamespaceTestDefault)
-
-		tests.WaitAgentConnected(virtClient, vmi)
-
-		// Ensure that VMI 'ipAddress' and 'ipAddresses' stays equal to
-		// VMI virt-launcher pod 'PodIP' and 'PodIPs' even after Guest-Agent kicks in
-		Consistently(func() error {
-			vmi, err = virtClient.VirtualMachineInstance(tests.NamespaceTestDefault).Get(vmi.Name, &metav1.GetOptions{})
-			Expect(err).ToNot(HaveOccurred(), "Should successfully get VMI")
-
-			if vmiVirtLauncherPod.Status.PodIP != vmi.Status.Interfaces[0].IP {
-				return fmt.Errorf("VMI status.Interfaces.IP and VMI virt-launcher pod status.PodIP doesnt match")
+		BeforeEach(func() {
+			if tests.IsRunningOnKindInfra() {
+				Skip("Skip KVM MSR prescence test on kind")
 			}
 
-			if len(vmiVirtLauncherPod.Status.PodIPs) == 0 ||
-				len(vmiVirtLauncherPod.Status.PodIPs) != len(vmi.Status.Interfaces[0].IPs) {
-				return fmt.Errorf("VMI status.Interfaces.IPs and VMI virt-launcher pod status.PodIPs, length dosent match")
+			vmi = tests.NewRandomFedoraVMIWithVirtWhatCpuidHelper()
+		})
+
+		It("[test_id:5271]test cpuid hidden", func() {
+			vmi.Spec.Domain.Features = &v1.Features{
+				KVM: &v1.FeatureKVM{Hidden: true},
 			}
 
-			for idx := 0; idx < len(vmiVirtLauncherPod.Status.PodIPs); idx++ {
-				if vmiVirtLauncherPod.Status.PodIPs[idx].IP != vmi.Status.Interfaces[0].IPs[idx] {
-					return fmt.Errorf("VMI status.Interfaces.IPs and VMI virt-launcher pod status.PodIPs, are not identical")
-				}
-			}
+			By("Starting a VirtualMachineInstance")
+			vmi, err = virtClient.VirtualMachineInstance(tests.NamespaceTestDefault).Create(vmi)
+			Expect(err).ToNot(HaveOccurred())
+			tests.WaitForSuccessfulVMIStart(vmi)
 
-			return nil
-		}, 30*time.Second, 1*time.Second).ShouldNot(HaveOccurred(), "VMI status IP should match VMI Pod IP")
+			By("Check values in domain XML")
+			domXml, err := tests.GetRunningVirtualMachineInstanceDomainXML(virtClient, vmi)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(domXml).To(ContainSubstring("<hidden state='on'/>"))
+
+			By("Expecting console")
+			Expect(libnet.WithIPv6(console.LoginToFedora)(vmi)).To(Succeed())
+
+			By("Check virt-what-cpuid-helper does not match KVM")
+			Expect(console.ExpectBatch(vmi, []expect.Batcher{
+				&expect.BSnd{S: "virt-what-cpuid-helper > /dev/null 2>&1 && echo 'pass'\n"},
+				&expect.BExp{R: console.RetValue("pass")},
+				&expect.BSnd{S: "$(sudo virt-what-cpuid-helper | grep -q KVMKVMKVM) || echo 'pass'\n"},
+				&expect.BExp{R: console.RetValue("pass")},
+			}, 1*time.Second)).To(Succeed())
+		})
+
+		It("[test_id:5272]test cpuid default", func() {
+			By("Starting a VirtualMachineInstance")
+			vmi, err = virtClient.VirtualMachineInstance(tests.NamespaceTestDefault).Create(vmi)
+			Expect(err).ToNot(HaveOccurred())
+			tests.WaitForSuccessfulVMIStart(vmi)
+
+			By("Expecting console")
+			Expect(libnet.WithIPv6(console.LoginToFedora)(vmi)).To(Succeed())
+
+			By("Check virt-what-cpuid-helper matches KVM")
+			Expect(console.ExpectBatch(vmi, []expect.Batcher{
+				&expect.BSnd{S: "virt-what-cpuid-helper > /dev/null 2>&1 && echo 'pass'\n"},
+				&expect.BExp{R: console.RetValue("pass")},
+				&expect.BSnd{S: "$(sudo virt-what-cpuid-helper | grep -q KVMKVMKVM) && echo 'pass'\n"},
+				&expect.BExp{R: console.RetValue("pass")},
+			}, 1*time.Second)).To(Succeed())
+		})
 	})
 })

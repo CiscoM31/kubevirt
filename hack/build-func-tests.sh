@@ -22,4 +22,11 @@ set -e
 source hack/common.sh
 source hack/config.sh
 
-build_func_tests
+rm -rf "${TESTS_OUT_DIR}"
+mkdir -p "${TESTS_OUT_DIR}"
+bazel run \
+    :build-ginkgo -- ${TESTS_OUT_DIR}/ginkgo
+bazel run \
+    :build-functests -- ${TESTS_OUT_DIR}/tests.test
+bazel run \
+    :build-junit-merger -- ${TESTS_OUT_DIR}/junit-merger

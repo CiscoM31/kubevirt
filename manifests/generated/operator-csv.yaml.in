@@ -7,7 +7,7 @@ metadata:
 
             [
               {
-                "apiVersion":"kubevirt.io/v1alpha3",
+                "apiVersion":"kubevirt.io/v1",
                 "kind":"KubeVirt",
                 "metadata": {
                   "name":"kubevirt",
@@ -88,7 +88,7 @@ spec:
         path: operatorVersion
         x-descriptors:
         - urn:alm:descriptor:text
-      version: v1alpha3
+      version: v1
   description: |2
 
     **KubeVirt** is a virtual machine management add-on for Kubernetes.
@@ -355,6 +355,7 @@ spec:
           - list
           - watch
           - patch
+          - update
         - apiGroups:
           - kubevirt.io
           resources:
@@ -405,6 +406,15 @@ spec:
           - kubevirt.io
           resources:
           - kubevirts
+          verbs:
+          - get
+          - list
+          - watch
+        - apiGroups:
+          - snapshot.kubevirt.io
+          resources:
+          - virtualmachinesnapshots
+          - virtualmachinerestores
           verbs:
           - get
           - list
@@ -473,6 +483,10 @@ spec:
           - get
           - list
           - watch
+          - create
+          - update
+          - delete
+          - patch
         - apiGroups:
           - snapshot.kubevirt.io
           resources:
@@ -485,6 +499,14 @@ spec:
           - '*'
           verbs:
           - '*'
+        - apiGroups:
+          - subresources.kubevirt.io
+          resources:
+          - virtualmachineinstances/addvolume
+          - virtualmachineinstances/removevolume
+          verbs:
+          - get
+          - update
         - apiGroups:
           - cdi.kubevirt.io
           resources:
@@ -603,10 +625,18 @@ spec:
           resources:
           - virtualmachineinstances/console
           - virtualmachineinstances/vnc
-          - virtualmachineinstances/pause
-          - virtualmachineinstances/unpause
           verbs:
           - get
+        - apiGroups:
+          - subresources.kubevirt.io
+          resources:
+          - virtualmachineinstances/pause
+          - virtualmachineinstances/unpause
+          - virtualmachineinstances/addvolume
+          - virtualmachineinstances/removevolume
+          verbs:
+          - get
+          - update
         - apiGroups:
           - subresources.kubevirt.io
           resources:
@@ -633,14 +663,37 @@ spec:
           - watch
           - deletecollection
         - apiGroups:
+          - snapshot.kubevirt.io
+          resources:
+          - virtualmachinesnapshots
+          - virtualmachinesnapshotcontents
+          - virtualmachinerestores
+          verbs:
+          - get
+          - delete
+          - create
+          - update
+          - patch
+          - list
+          - watch
+          - deletecollection
+        - apiGroups:
           - subresources.kubevirt.io
           resources:
           - virtualmachineinstances/console
           - virtualmachineinstances/vnc
-          - virtualmachineinstances/pause
-          - virtualmachineinstances/unpause
           verbs:
           - get
+        - apiGroups:
+          - subresources.kubevirt.io
+          resources:
+          - virtualmachineinstances/pause
+          - virtualmachineinstances/unpause
+          - virtualmachineinstances/addvolume
+          - virtualmachineinstances/removevolume
+          verbs:
+          - get
+          - update
         - apiGroups:
           - subresources.kubevirt.io
           resources:
@@ -666,6 +719,20 @@ spec:
           - list
           - watch
         - apiGroups:
+          - snapshot.kubevirt.io
+          resources:
+          - virtualmachinesnapshots
+          - virtualmachinesnapshotcontents
+          - virtualmachinerestores
+          verbs:
+          - get
+          - delete
+          - create
+          - update
+          - patch
+          - list
+          - watch
+        - apiGroups:
           - kubevirt.io
           resources:
           - virtualmachines
@@ -673,6 +740,16 @@ spec:
           - virtualmachineinstancepresets
           - virtualmachineinstancereplicasets
           - virtualmachineinstancemigrations
+          verbs:
+          - get
+          - list
+          - watch
+        - apiGroups:
+          - snapshot.kubevirt.io
+          resources:
+          - virtualmachinesnapshots
+          - virtualmachinesnapshotcontents
+          - virtualmachinerestores
           verbs:
           - get
           - list

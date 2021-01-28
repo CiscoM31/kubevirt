@@ -39,6 +39,9 @@ const (
 	// Secret represents a secret type,
 	// https://kubernetes.io/docs/concepts/configuration/secret/
 	Secret Type = "secret"
+	// DownwardAPI represents a DownwardAPI type,
+	// https://kubernetes.io/docs/tasks/inject-data-application/downward-api-volume-expose-pod-information/
+	DownwardAPI Type = "downwardapi"
 	// ServiceAccount represents a secret type,
 	// https://kubernetes.io/docs/tasks/configure-pod-container/configure-service-account/
 	ServiceAccount Type = "serviceaccount"
@@ -51,6 +54,8 @@ var (
 	ConfigMapSourceDir = mountBaseDir + "/config-map"
 	// SecretSourceDir represents a location where Secrets is attached to the pod
 	SecretSourceDir = mountBaseDir + "/secret"
+	// DownwardAPISourceDir represents a location where downwardapi is attached to the pod
+	DownwardAPISourceDir = mountBaseDir + "/downwardapi"
 	// ServiceAccountSourceDir represents the location where the ServiceAccount token is attached to the pod
 	ServiceAccountSourceDir = "/var/run/secrets/kubernetes.io/serviceaccount/"
 
@@ -58,9 +63,11 @@ var (
 	ConfigMapDisksDir = mountBaseDir + "/config-map-disks"
 	// SecretDisksDir represents a path to Secrets iso images
 	SecretDisksDir = mountBaseDir + "/secret-disks"
-	// ServiceAccountDisksDir represents a path to the ServiceAccount iso image
+	// DownwardAPIDisksDir represents a path to DownwardAPI iso images
+	DownwardAPIDisksDir = mountBaseDir + "/downwardapi-disks"
+	// ServiceAccountDiskDir represents a path to the ServiceAccount iso image
 	ServiceAccountDiskDir = mountBaseDir + "/service-account-disk"
-	// ServiceAccountDisksName represents the name of the ServiceAccount iso image
+	// ServiceAccountDiskName represents the name of the ServiceAccount iso image
 	ServiceAccountDiskName = "service-account.iso"
 
 	createISOImage = defaultCreateIsoImage
@@ -101,6 +108,7 @@ func defaultCreateIsoImage(output string, volID string, files []string) error {
 	args = append(args, "-graft-points")
 	args = append(args, files...)
 
+	// #nosec No risk for attacket injection. Parameters are predefined strings
 	cmd := exec.Command("genisoimage", args...)
 	err := cmd.Run()
 	if err != nil {

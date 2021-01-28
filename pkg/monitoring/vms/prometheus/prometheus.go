@@ -25,6 +25,8 @@ import (
 	"strings"
 	"time"
 
+	libvirt "libvirt.org/libvirt-go"
+
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
@@ -119,6 +121,27 @@ func (metrics *vmiMetrics) updateMemory(vmStats *stats.DomainStats) {
 		tryToPushMetric(memoryAvailableDesc, mv, err, metrics.ch)
 	}
 
+	if vmStats.Memory.UnusedSet {
+		memoryUnusedLabels := []string{"node", "namespace", "name"}
+		memoryUnusedLabels = append(memoryUnusedLabels, metrics.k8sLabels...)
+		memoryUnusedDesc := prometheus.NewDesc(
+			"kubevirt_vmi_memory_unused_bytes",
+			"amount of unused memory as seen by the domain.",
+			memoryUnusedLabels,
+			nil,
+		)
+
+		memoryUnusedLabelValues := []string{metrics.vmi.Status.NodeName, metrics.vmi.Namespace, metrics.vmi.Name}
+		memoryUnusedLabelValues = append(memoryUnusedLabelValues, metrics.k8sLabelValues...)
+		mv, err := prometheus.NewConstMetric(
+			memoryUnusedDesc, prometheus.GaugeValue,
+			// the libvirt value is in KiB
+			float64(vmStats.Memory.Unused)*1024,
+			memoryUnusedLabelValues...,
+		)
+		tryToPushMetric(memoryUnusedDesc, mv, err, metrics.ch)
+	}
+
 	if vmStats.Memory.SwapInSet || vmStats.Memory.SwapOutSet {
 		swapTrafficLabels := []string{"node", "namespace", "name", "type"}
 		swapTrafficLabels = append(swapTrafficLabels, metrics.k8sLabels...)
@@ -171,7 +194,7 @@ func (metrics *vmiMetrics) updateVcpu(vmStats *stats.DomainStats) {
 				nil,
 			)
 
-			vcpuUsageLabelValues := []string{metrics.vmi.Status.NodeName, metrics.vmi.Namespace, metrics.vmi.Name, fmt.Sprintf("%v", vcpuId), fmt.Sprintf("%v", vcpu.State)}
+			vcpuUsageLabelValues := []string{metrics.vmi.Status.NodeName, metrics.vmi.Namespace, metrics.vmi.Name, fmt.Sprintf("%v", vcpuId), humanReadableState(vcpu.State)}
 			vcpuUsageLabelValues = append(vcpuUsageLabelValues, metrics.k8sLabelValues...)
 			mv, err := prometheus.NewConstMetric(
 				vcpuUsageDesc, prometheus.GaugeValue,
@@ -588,7 +611,7 @@ func (ps *prometheusScraper) Report(socketFile string, vmi *k6tv1.VirtualMachine
 	// In this case the next functions will end up writing on a closed channel. This will panic.
 	// It is actually OK in this case to abort the goroutine that panicked -that's what we want anyway,
 	// and the very reason we collect in throwaway goroutines. We need however to avoid dump stacktraces in the logs.
-	// Since this is a known failure condition, let's handle it explicitely.
+	// Since this is a known failure condition, let's handle it explicitly.
 	defer func() {
 		if err := recover(); err != nil {
 			log.Log.V(2).Warningf("collector goroutine panicked for VM %s: %s", socketFile, err)
@@ -640,5 +663,18 @@ func newVmiMetrics(vmi *k6tv1.VirtualMachineInstance, ch chan<- prometheus.Metri
 		k8sLabels:      []string{},
 		k8sLabelValues: []string{},
 		ch:             ch,
+	}
+}
+
+func humanReadableState(state int) string {
+	switch state {
+	case int(libvirt.VCPU_OFFLINE):
+		return "offline"
+	case int(libvirt.VCPU_BLOCKED):
+		return "blocked"
+	case int(libvirt.VCPU_RUNNING):
+		return "running"
+	default:
+		return "unknown"
 	}
 }

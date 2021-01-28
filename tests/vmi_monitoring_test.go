@@ -30,51 +30,37 @@ import (
 	v1 "kubevirt.io/client-go/api/v1"
 	"kubevirt.io/client-go/kubecli"
 	"kubevirt.io/kubevirt/tests"
+	"kubevirt.io/kubevirt/tests/console"
 )
 
 var _ = Describe("Health Monitoring", func() {
 
-	var err error
 	var virtClient kubecli.KubevirtClient
 
-	var launchVMI func(*v1.VirtualMachineInstance)
-
-	tests.BeforeAll(func() {
-		virtClient, err = kubecli.GetKubevirtClient()
-		tests.PanicOnError(err)
-
-		launchVMI = func(vmi *v1.VirtualMachineInstance) {
-			By("Starting a VirtualMachineInstance")
-			obj, err := virtClient.RestClient().Post().Resource("virtualmachineinstances").Namespace(tests.NamespaceTestDefault).Body(vmi).Do().Get()
-			Expect(err).To(BeNil())
-
-			tests.WaitForSuccessfulVMIStart(obj)
-		}
-	})
-
 	BeforeEach(func() {
+		var err error
+		virtClient, err = kubecli.GetKubevirtClient()
+		Expect(err).ToNot(HaveOccurred())
 		tests.BeforeTestCleanup()
 	})
 
 	Describe("A VirtualMachineInstance with a watchdog device", func() {
 		It("[test_id:4641]should be shut down when the watchdog expires", func() {
 			vmi := tests.NewRandomVMIWithWatchdog()
-			Expect(err).ToNot(HaveOccurred())
-			launchVMI(vmi)
+			obj, err := virtClient.VirtualMachineInstance(tests.NamespaceTestDefault).Create(vmi)
+			Expect(err).To(BeNil())
+			tests.WaitForSuccessfulVMIStart(obj)
 
 			By("Expecting the VirtualMachineInstance console")
-			expecter, err := tests.LoggedInAlpineExpecter(vmi)
-			Expect(err).ToNot(HaveOccurred())
-			defer expecter.Close()
+			Expect(console.LoginToAlpine(vmi)).To(Succeed())
 
 			By("Killing the watchdog device")
-			_, err = expecter.ExpectBatch([]expect.Batcher{
+			Expect(console.SafeExpectBatch(vmi, []expect.Batcher{
 				&expect.BSnd{S: "watchdog -t 2000ms -T 4000ms /dev/watchdog && sleep 5 && killall -9 watchdog\n"},
-				&expect.BExp{R: "\\#"},
+				&expect.BExp{R: console.PromptExpression},
 				&expect.BSnd{S: "echo $?\n"},
-				&expect.BExp{R: tests.RetValue("0")},
-			}, 250*time.Second)
-			Expect(err).ToNot(HaveOccurred())
+				&expect.BExp{R: console.RetValue("0")},
+			}, 250)).To(Succeed())
 
 			namespace := vmi.ObjectMeta.Namespace
 			name := vmi.ObjectMeta.Name

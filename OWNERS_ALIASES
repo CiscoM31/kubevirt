@@ -13,6 +13,8 @@ aliases:
       - dhiller
       - jean-edouard
       - ashleyschuett
+      - mhenriks
+      - enp0s3
   emeritus_approvers:
       - cynepco3hahue
       - slintes
@@ -26,12 +28,14 @@ aliases:
       - phoracek
       - dhiller
       - vatsalparekh
-      - danielBelenky
       - enp0s3
       - jean-edouard
       - AlonaKaplan
       - omeryahud
       - ashleyschuett
+      - mhenriks
+      - maiqueb
+      - EdDev
   ux-reviewers:
       - matthewcarleton
   test-reviewers:
@@ -43,9 +47,7 @@ aliases:
       - ILpinto
       - kbidarkar
       - phoracek
-  ci-approvers:
-      - dhiller
-      - danielBelenky
+      - enp0s3
   network-reviewers:
       - AlonaKaplan
       - EdDev

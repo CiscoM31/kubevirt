@@ -165,16 +165,26 @@ func (c *EvacuationController) nodeFromVMI(obj interface{}) string {
 
 func (c *EvacuationController) addMigration(obj interface{}) {
 	migration := obj.(*virtv1.VirtualMachineInstanceMigration)
-	o, exists, err := c.vmiInformer.GetStore().GetByKey(migration.Namespace + "/" + migration.Spec.VMIName)
-	if err != nil {
-		return
-	}
-	if exists {
-		node := c.nodeFromVMI(o)
-		if node != "" {
-			c.migrationExpectations.CreationObserved(node)
-			c.Queue.Add(node)
+
+	node := ""
+
+	// only observe the migration expectation if our controller created it
+	key, ok := migration.Annotations[virtv1.EvacuationMigrationAnnotation]
+	if ok {
+		c.migrationExpectations.CreationObserved(key)
+		node = key
+	} else {
+		o, exists, err := c.vmiInformer.GetStore().GetByKey(migration.Namespace + "/" + migration.Spec.VMIName)
+		if err != nil {
+			return
 		}
+		if exists {
+			node = c.nodeFromVMI(o)
+		}
+	}
+
+	if node != "" {
+		c.Queue.Add(node)
 	}
 }
 
@@ -305,17 +315,6 @@ func (c *EvacuationController) execute(key string) error {
 
 	node := obj.(*k8sv1.Node)
 
-	// If the node has no drain taint, we have nothing to do
-	taintKey := *c.clusterConfig.GetMigrationConfiguration().NodeDrainTaintKey
-	taint := &k8sv1.Taint{
-		Key:    taintKey,
-		Effect: k8sv1.TaintEffectNoSchedule,
-	}
-
-	if !nodeHasTaint(taint, node) {
-		return nil
-	}
-
 	vmis, err := c.listVMIsOnNode(node.Name)
 	if err != nil {
 		return fmt.Errorf("failed to list VMIs on node: %v", err)
@@ -328,16 +327,48 @@ func (c *EvacuationController) execute(key string) error {
 	}
 
 	return c.sync(node, vmis, migrations)
+}
 
+func getMarkedForEvictionVMIs(vmis []*virtv1.VirtualMachineInstance) []*virtv1.VirtualMachineInstance {
+	var evictionCandidates []*virtv1.VirtualMachineInstance
+	for _, vmi := range vmis {
+		if vmi.IsMarkedForEviction() && !hasMigratedOnEviction(vmi) && !migrationutils.IsMigrating(vmi) {
+			evictionCandidates = append(evictionCandidates, vmi)
+		}
+	}
+	return evictionCandidates
+}
+
+func GenerateNewMigration(vmiName string, key string) *virtv1.VirtualMachineInstanceMigration {
+
+	annotations := map[string]string{
+		virtv1.EvacuationMigrationAnnotation: key,
+	}
+	return &virtv1.VirtualMachineInstanceMigration{
+		ObjectMeta: v1.ObjectMeta{
+			Annotations:  annotations,
+			GenerateName: "kubevirt-evacuation-",
+		},
+		Spec: virtv1.VirtualMachineInstanceMigrationSpec{
+			VMIName: vmiName,
+		},
+	}
 }
 
 func (c *EvacuationController) sync(node *k8sv1.Node, vmisOnNode []*virtv1.VirtualMachineInstance, activeMigrations []*virtv1.VirtualMachineInstanceMigration) error {
-	if len(vmisOnNode) == 0 {
-		// nothing to do
+	// If the node has no drain taint, we have nothing to do
+	taintKey := *c.clusterConfig.GetMigrationConfiguration().NodeDrainTaintKey
+	taint := &k8sv1.Taint{
+		Key:    taintKey,
+		Effect: k8sv1.TaintEffectNoSchedule,
+	}
+
+	vmisToMigrate := vmisToMigrate(node, vmisOnNode, taint)
+	if len(vmisToMigrate) == 0 {
 		return nil
 	}
 
-	migrationCandidates, nonMigrateable := c.filterRunningNonMigratingVMIs(vmisOnNode, activeMigrations)
+	migrationCandidates, nonMigrateable := c.filterRunningNonMigratingVMIs(vmisToMigrate, activeMigrations)
 
 	// Don't create hundreds of pending migration objects.
 	// This is just best-effort and is *not* intended to not overload the cluster.
@@ -388,14 +419,7 @@ func (c *EvacuationController) sync(node *k8sv1.Node, vmisOnNode []*virtv1.Virtu
 	for _, vmi := range selectedCandidates {
 		go func(vmi *virtv1.VirtualMachineInstance) {
 			defer wg.Done()
-			createdMigration, err := c.clientset.VirtualMachineInstanceMigration(vmi.Namespace).Create(&virtv1.VirtualMachineInstanceMigration{
-				ObjectMeta: v1.ObjectMeta{
-					GenerateName: "kubevirt-evacuation-",
-				},
-				Spec: virtv1.VirtualMachineInstanceMigrationSpec{
-					VMIName: vmi.Name,
-				},
-			})
+			createdMigration, err := c.clientset.VirtualMachineInstanceMigration(vmi.Namespace).Create(GenerateNewMigration(vmi.Name, node.Name))
 			if err != nil {
 				c.migrationExpectations.CreationObserved(node.Name)
 				c.recorder.Eventf(vmi, k8sv1.EventTypeWarning, FailedCreateVirtualMachineInstanceMigrationReason, "Error creating a Migration: %v", err)
@@ -415,6 +439,20 @@ func (c *EvacuationController) sync(node *k8sv1.Node, vmisOnNode []*virtv1.Virtu
 	default:
 	}
 	return nil
+}
+
+func hasMigratedOnEviction(vmi *virtv1.VirtualMachineInstance) bool {
+	return vmi.Status.NodeName != vmi.Status.EvacuationNodeName
+}
+
+func vmisToMigrate(node *k8sv1.Node, vmisOnNode []*virtv1.VirtualMachineInstance, taint *k8sv1.Taint) []*virtv1.VirtualMachineInstance {
+	var vmisToMigrate []*virtv1.VirtualMachineInstance
+	if nodeHasTaint(taint, node) {
+		vmisToMigrate = vmisOnNode
+	} else if evictedVMIs := getMarkedForEvictionVMIs(vmisOnNode); len(evictedVMIs) > 0 {
+		vmisToMigrate = evictedVMIs
+	}
+	return vmisToMigrate
 }
 
 func (c *EvacuationController) listVMIsOnNode(nodeName string) ([]*virtv1.VirtualMachineInstance, error) {
@@ -456,6 +494,8 @@ func (c *EvacuationController) filterRunningNonMigratingVMIs(vmis []*virtv1.Virt
 	return migrateable, nonMigrateable
 }
 
+// deprecated
+// This node evacuation method is deprecated. Use node drain to trigger evictions instead.
 func nodeHasTaint(taint *k8sv1.Taint, node *k8sv1.Node) bool {
 	for _, t := range node.Spec.Taints {
 		if t.MatchTaint(taint) {

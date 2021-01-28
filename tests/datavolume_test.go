@@ -34,19 +34,22 @@ import (
 	rbacv1 "k8s.io/api/rbac/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/utils/pointer"
 
 	cdiv1 "kubevirt.io/containerized-data-importer/pkg/apis/core/v1alpha1"
 
 	v1 "kubevirt.io/client-go/api/v1"
 	"kubevirt.io/client-go/kubecli"
 	"kubevirt.io/kubevirt/tests"
+	"kubevirt.io/kubevirt/tests/console"
+	cd "kubevirt.io/kubevirt/tests/containerdisk"
 	"kubevirt.io/kubevirt/tests/flags"
 )
 
 const InvalidDataVolumeUrl = "http://127.0.0.1/invalid"
 const DummyFilePath = "/usr/share/nginx/html/dummy.file"
 
-var _ = Describe("DataVolume Integration", func() {
+var _ = Describe("[Serial]DataVolume Integration", func() {
 
 	var virtClient kubecli.KubevirtClient
 	var err error
@@ -59,12 +62,9 @@ var _ = Describe("DataVolume Integration", func() {
 		if !tests.HasCDI() {
 			Skip("Skip DataVolume tests when CDI is not present")
 		}
-
 	})
 
-	runVMIAndExpectLaunch := func(vmi *v1.VirtualMachineInstance, timeout int) *v1.VirtualMachineInstance {
-		tests.WaitForSuccessfulDataVolumeImportOfVMI(vmi, timeout)
-
+	runVMIAndExpectLaunch := func(vmi *v1.VirtualMachineInstance, dv *cdiv1.DataVolume, timeout int) *v1.VirtualMachineInstance {
 		By("Starting a VirtualMachineInstance with DataVolume")
 		var obj *v1.VirtualMachineInstance
 		var err error
@@ -73,13 +73,32 @@ var _ = Describe("DataVolume Integration", func() {
 			return err
 		}, timeout, 1*time.Second).ShouldNot(HaveOccurred())
 
+		By("Waiting until the DV is ready")
+		tests.WaitForSuccessfulDataVolumeImport(dv, timeout)
+
 		By("Waiting until the VirtualMachineInstance will start")
 		tests.WaitForSuccessfulVMIStartWithTimeout(obj, timeout)
 		return obj
 	}
 
 	Describe("[rfe_id:3188][crit:high][vendor:cnv-qe@redhat.com][level:system] Starting a VirtualMachineInstance with a DataVolume as a volume source", func() {
-		Context("using Alpine import", func() {
+
+		Context("Alpine import", func() {
+			BeforeEach(func() {
+				cdis, err := virtClient.CdiClient().CdiV1beta1().CDIs().List(metav1.ListOptions{})
+				Expect(err).ToNot(HaveOccurred())
+				Expect(cdis.Items).To(HaveLen(1))
+				hasWaitForCustomerGate := false
+				for _, feature := range cdis.Items[0].Spec.Config.FeatureGates {
+					if feature == "HonorWaitForFirstConsumer" {
+						hasWaitForCustomerGate = true
+						break
+					}
+				}
+				if !hasWaitForCustomerGate {
+					Skip("HonorWaitForFirstConsumer is disabled in CDI, skipping tests relying on it")
+				}
+			})
 			It("[test_id:3189]should be successfully started and stopped multiple times", func() {
 
 				dataVolume := tests.NewRandomDataVolumeWithHttpImport(tests.GetUrl(tests.AlpineHttpUrl), tests.NamespaceTestDefault, k8sv1.ReadWriteOnce)
@@ -88,24 +107,51 @@ var _ = Describe("DataVolume Integration", func() {
 				_, err := virtClient.CdiClient().CdiV1alpha1().DataVolumes(dataVolume.Namespace).Create(dataVolume)
 				Expect(err).To(BeNil())
 
+				// This will only work on storage with binding mode WaitForFirstConsumer,
+				if tests.HasBindingModeWaitForFirstConsumer() {
+					tests.WaitForDataVolumePhaseWFFC(dataVolume.Namespace, dataVolume.Name, 30)
+				}
 				num := 2
 				By("Starting and stopping the VirtualMachineInstance a number of times")
 				for i := 1; i <= num; i++ {
-					vmi := runVMIAndExpectLaunch(vmi, 240)
-
+					tests.WaitForDataVolumeReadyToStartVMI(vmi, 140)
+					vmi := runVMIAndExpectLaunch(vmi, dataVolume, 500)
 					// Verify console on last iteration to verify the VirtualMachineInstance is still booting properly
 					// after being restarted multiple times
 					if i == num {
 						By("Checking that the VirtualMachineInstance console has expected output")
-						expecter, err := tests.LoggedInAlpineExpecter(vmi)
-						Expect(err).To(BeNil())
-						expecter.Close()
+						Expect(console.LoginToAlpine(vmi)).To(Succeed())
 					}
 
 					err = virtClient.VirtualMachineInstance(vmi.Namespace).Delete(vmi.Name, &metav1.DeleteOptions{})
 					Expect(err).To(BeNil())
 					tests.WaitForVirtualMachineToDisappearWithTimeout(vmi, 120)
 				}
+				err = virtClient.CdiClient().CdiV1alpha1().DataVolumes(dataVolume.Namespace).Delete(dataVolume.Name, &metav1.DeleteOptions{})
+				Expect(err).To(BeNil())
+			})
+
+			It("[test_id:5252]should be successfully started when using a PVC volume owned by a DataVolume", func() {
+				dataVolume := tests.NewRandomDataVolumeWithHttpImport(tests.GetUrl(tests.AlpineHttpUrl), tests.NamespaceTestDefault, k8sv1.ReadWriteOnce)
+				vmi := tests.NewRandomVMIWithPVC(dataVolume.Name)
+
+				_, err := virtClient.CdiClient().CdiV1alpha1().DataVolumes(dataVolume.Namespace).Create(dataVolume)
+				Expect(err).To(BeNil())
+				// This will only work on storage with binding mode WaitForFirstConsumer,
+				if tests.HasBindingModeWaitForFirstConsumer() {
+					tests.WaitForDataVolumePhaseWFFC(dataVolume.Namespace, dataVolume.Name, 30)
+				}
+				// with WFFC the run actually starts the import and then runs VM, so the timeout has t oinclude both
+				// import and start
+				vmi = runVMIAndExpectLaunch(vmi, dataVolume, 500)
+
+				By("Checking that the VirtualMachineInstance console has expected output")
+				Expect(console.LoginToAlpine(vmi)).To(Succeed())
+
+				err = virtClient.VirtualMachineInstance(vmi.Namespace).Delete(vmi.Name, &metav1.DeleteOptions{})
+				Expect(err).To(BeNil())
+				tests.WaitForVirtualMachineToDisappearWithTimeout(vmi, 120)
+
 				err = virtClient.CdiClient().CdiV1alpha1().DataVolumes(dataVolume.Namespace).Delete(dataVolume.Name, &metav1.DeleteOptions{})
 				Expect(err).To(BeNil())
 			})
@@ -117,16 +163,6 @@ var _ = Describe("DataVolume Integration", func() {
 			deleteDataVolume := func(dv *cdiv1.DataVolume) {
 				By("Deleting the DataVolume")
 				ExpectWithOffset(1, virtClient.CdiClient().CdiV1alpha1().DataVolumes(dv.Namespace).Delete(dv.Name, &metav1.DeleteOptions{})).To(Succeed())
-			}
-
-			waitForDv := func(dataVolume *cdiv1.DataVolume) {
-				Eventually(func() cdiv1.DataVolumePhase {
-					dv, err := virtClient.CdiClient().CdiV1alpha1().DataVolumes(dataVolume.Namespace).Get(dataVolume.Name, metav1.GetOptions{})
-					Expect(err).ToNot(HaveOccurred())
-
-					return dv.Status.Phase
-				}, 30*time.Second, 1*time.Second).
-					Should(Equal(cdiv1.ImportInProgress), "Timed out waiting for DataVolume to enter ImportInProgress phase")
 			}
 
 			deleteDummyFile := func(fileName string) {
@@ -189,9 +225,8 @@ var _ = Describe("DataVolume Integration", func() {
 				defer deleteDataVolume(dataVolume)
 
 				By("Creating DataVolume with invalid URL")
-				_, err := virtClient.CdiClient().CdiV1alpha1().DataVolumes(dataVolume.Namespace).Create(dataVolume)
+				dataVolume, err := virtClient.CdiClient().CdiV1alpha1().DataVolumes(dataVolume.Namespace).Create(dataVolume)
 				Expect(err).To(BeNil())
-				waitForDv(dataVolume)
 
 				By("Creating a VM with an invalid DataVolume")
 				//  Add the invalid DataVolume to a VMI
@@ -503,9 +538,15 @@ var _ = Describe("DataVolume Integration", func() {
 	})
 
 	Describe("[rfe_id:3188][crit:high][vendor:cnv-qe@redhat.com][level:system] Starting a VirtualMachine with a DataVolume", func() {
-		Context("using Alpine import", func() {
-			It("[test_id:3191]should be successfully started and stopped multiple times", func() {
-				vm := tests.NewRandomVMWithDataVolume(tests.GetUrl(tests.AlpineHttpUrl), tests.NamespaceTestDefault)
+		Context("using Alpine http import", func() {
+			table.DescribeTable("[test_id:3191]should be successfully started and stopped multiple times", func(isHTTP bool) {
+				var vm *v1.VirtualMachine
+				if isHTTP {
+					vm = tests.NewRandomVMWithDataVolume(tests.GetUrl(tests.AlpineHttpUrl), tests.NamespaceTestDefault)
+				} else {
+					url := "docker://" + cd.ContainerDiskFor(cd.ContainerDiskAlpine)
+					vm = tests.NewRandomVMWithRegistryDataVolume(url, tests.NamespaceTestDefault)
+				}
 				vm, err = virtClient.VirtualMachine(tests.NamespaceTestDefault).Create(vm)
 				Expect(err).ToNot(HaveOccurred())
 				num := 2
@@ -519,14 +560,16 @@ var _ = Describe("DataVolume Integration", func() {
 						By("Checking that the VirtualMachineInstance console has expected output")
 						vmi, err := virtClient.VirtualMachineInstance(vm.Namespace).Get(vm.Name, &metav1.GetOptions{})
 						Expect(err).ToNot(HaveOccurred())
-						expecter, err := tests.LoggedInAlpineExpecter(vmi)
-						Expect(err).To(BeNil())
-						expecter.Close()
+						Expect(console.LoginToAlpine(vmi)).To(Succeed())
 					}
 					vm = tests.StopVirtualMachine(vm)
 				}
 				Expect(virtClient.VirtualMachine(vm.Namespace).Delete(vm.Name, &metav1.DeleteOptions{})).To(Succeed())
-			})
+			},
+
+				table.Entry("with http import", true),
+				table.Entry("with registry import", false),
+			)
 
 			It("[test_id:3192]should remove owner references on DataVolume if VM is orphan deleted.", func() {
 				// Cascade=false delete fails in ocp 3.11 with CRDs that contain multiple versions.
@@ -572,10 +615,16 @@ var _ = Describe("DataVolume Integration", func() {
 			var createdVirtualMachine *v1.VirtualMachine
 			var cloneRole *rbacv1.Role
 			var cloneRoleBinding *rbacv1.RoleBinding
+			var storageClass string
 
 			BeforeEach(func() {
+				var exists bool
+				storageClass, exists = tests.GetCephStorageClass()
+				if !exists {
+					Skip("Skip OCS tests when Ceph is not present")
+				}
 				var err error
-				dv := tests.NewRandomDataVolumeWithHttpImport(tests.GetUrl(tests.AlpineHttpUrl), tests.NamespaceTestAlternative, k8sv1.ReadWriteOnce)
+				dv := tests.NewRandomDataVolumeWithHttpImportInStorageClass(tests.GetUrl(tests.AlpineHttpUrl), tests.NamespaceTestAlternative, storageClass, k8sv1.ReadWriteOnce)
 				dataVolume, err = virtClient.CdiClient().CdiV1alpha1().DataVolumes(dv.Namespace).Create(dv)
 				Expect(err).ToNot(HaveOccurred())
 
@@ -611,7 +660,7 @@ var _ = Describe("DataVolume Integration", func() {
 				}
 			})
 
-			table.DescribeTable("deny then allow clone request", func(role *rbacv1.Role) {
+			table.DescribeTable("deny then allow clone request on rook-ceph", func(role *rbacv1.Role, allServiceAccounts, allServiceAccountsInNamespace bool) {
 				vm := tests.NewRandomVMWithCloneDataVolume(dataVolume.Namespace, dataVolume.Name, tests.NamespaceTestDefault)
 				saVol := v1.Volume{
 					Name: "sa",
@@ -621,6 +670,7 @@ var _ = Describe("DataVolume Integration", func() {
 						},
 					},
 				}
+				vm.Spec.DataVolumeTemplates[0].Spec.PVC.StorageClassName = pointer.StringPtr(storageClass)
 				vm.Spec.Template.Spec.Volumes = append(vm.Spec.Template.Spec.Volumes, saVol)
 
 				vmBytes, err := json.Marshal(vm)
@@ -635,8 +685,18 @@ var _ = Describe("DataVolume Integration", func() {
 				}
 				Expect(stdErr).Should(ContainSubstring("Authorization failed, message is:"))
 
+				saName := tests.AdminServiceAccountName
+				saNamespace := tests.NamespaceTestDefault
+
+				if allServiceAccounts {
+					saName = ""
+					saNamespace = ""
+				} else if allServiceAccountsInNamespace {
+					saName = ""
+				}
+
 				// add permission
-				cloneRole, cloneRoleBinding = addClonePermission(virtClient, role, tests.AdminServiceAccountName, tests.NamespaceTestDefault, tests.NamespaceTestAlternative)
+				cloneRole, cloneRoleBinding = addClonePermission(virtClient, role, saName, saNamespace, tests.NamespaceTestAlternative)
 
 				// sometimes it takes a bit for permission to actually be applied so eventually
 				Eventually(func() bool {
@@ -666,8 +726,10 @@ var _ = Describe("DataVolume Integration", func() {
 				createdVirtualMachine = tests.StartVirtualMachine(createdVirtualMachine)
 				createdVirtualMachine = tests.StopVirtualMachine(createdVirtualMachine)
 			},
-				table.Entry("[test_id:3193]with explicit role", explicitCloneRole),
-				table.Entry("[test_id:3194]with implicit role", implicitCloneRole),
+				table.Entry("[test_id:3193]with explicit role", explicitCloneRole, false, false),
+				table.Entry("[test_id:3194]with implicit role", implicitCloneRole, false, false),
+				table.Entry("[test_id:5253]with explicit role (all namespaces)", explicitCloneRole, true, false),
+				table.Entry("[test_id:5254]with explicit role (one namespace)", explicitCloneRole, false, true),
 			)
 		})
 	})
@@ -724,13 +786,28 @@ func addClonePermission(client kubecli.KubevirtClient, role *rbacv1.Role, sa, sa
 			Name:     role.Name,
 			APIGroup: "rbac.authorization.k8s.io",
 		},
-		Subjects: []rbacv1.Subject{
+	}
+
+	if sa != "" {
+		rb.Subjects = []rbacv1.Subject{
 			{
 				Kind:      "ServiceAccount",
 				Name:      sa,
 				Namespace: saNamespace,
 			},
-		},
+		}
+	} else {
+		g := "system:serviceaccounts"
+		if saNamespace != "" {
+			g += ":" + saNamespace
+		}
+		rb.Subjects = []rbacv1.Subject{
+			{
+				Kind:     "Group",
+				Name:     g,
+				APIGroup: "rbac.authorization.k8s.io",
+			},
+		}
 	}
 
 	rb, err = client.RbacV1().RoleBindings(targetNamesace).Create(rb)

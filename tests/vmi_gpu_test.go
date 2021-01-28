@@ -14,11 +14,13 @@ import (
 	v1 "kubevirt.io/client-go/api/v1"
 	"kubevirt.io/client-go/kubecli"
 	"kubevirt.io/client-go/log"
-	"kubevirt.io/kubevirt/pkg/util"
+	hwutil "kubevirt.io/kubevirt/pkg/util/hardware"
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/api"
 
 	"kubevirt.io/kubevirt/tests"
+	"kubevirt.io/kubevirt/tests/console"
 	cd "kubevirt.io/kubevirt/tests/containerdisk"
+	"kubevirt.io/kubevirt/tests/libvmi"
 )
 
 func parseDeviceAddress(addrString string) []string {
@@ -36,20 +38,20 @@ func parseDeviceAddress(addrString string) []string {
 	return addrs
 }
 
-func checkGPUDevice(vmi *v1.VirtualMachineInstance, gpuName string, prompt string) {
+func checkGPUDevice(vmi *v1.VirtualMachineInstance, gpuName string) {
 	cmdCheck := fmt.Sprintf("lspci -m %s\n", gpuName)
-	err := tests.CheckForTextExpecter(vmi, []expect.Batcher{
+	err := console.SafeExpectBatch(vmi, []expect.Batcher{
 		&expect.BSnd{S: "\n"},
-		&expect.BExp{R: prompt},
+		&expect.BExp{R: console.PromptExpression},
 		&expect.BSnd{S: cmdCheck},
-		&expect.BExp{R: prompt},
+		&expect.BExp{R: console.PromptExpression},
 		&expect.BSnd{S: "echo $?\n"},
-		&expect.BExp{R: tests.RetValue("0")},
+		&expect.BExp{R: console.RetValue("0")},
 	}, 15)
 	Expect(err).ToNot(HaveOccurred(), "GPU device %q was not found in the VMI %s within the given timeout", gpuName, vmi.Name)
 }
 
-var _ = Describe("GPU", func() {
+var _ = Describe("[Serial]GPU", func() {
 	var err error
 	var virtClient kubecli.KubevirtClient
 
@@ -72,7 +74,7 @@ var _ = Describe("GPU", func() {
 			vmi, apiErr := virtClient.VirtualMachineInstance(tests.NamespaceTestDefault).Create(randomVMI)
 			Expect(apiErr).ToNot(HaveOccurred())
 
-			pod := tests.GetPodByVirtualMachineInstance(vmi, tests.NamespaceTestDefault)
+			pod := libvmi.GetPodByVirtualMachineInstance(vmi, tests.NamespaceTestDefault)
 			Expect(pod.Status.Phase).To(Equal(k8sv1.PodPending))
 			Expect(pod.Status.Conditions[0].Type).To(Equal(k8sv1.PodScheduled))
 			Expect(strings.Contains(pod.Status.Conditions[0].Message, "Insufficient "+gpuName)).To(Equal(true))
@@ -127,7 +129,7 @@ var _ = Describe("GPU", func() {
 				Expect(domSpec.Devices.HostDevices[n].Type).To(Equal("pci"))
 				Expect(domSpec.Devices.HostDevices[n].Managed).To(Equal("yes"))
 				Expect(domSpec.Devices.HostDevices[n].Mode).To(Equal("subsystem"))
-				dbsfFields, err := util.ParsePciAddress(addr)
+				dbsfFields, err := hwutil.ParsePciAddress(addr)
 				Expect(err).ToNot(HaveOccurred())
 				Expect(domSpec.Devices.HostDevices[n].Source.Address.Domain).To(Equal("0x" + dbsfFields[0]))
 				Expect(domSpec.Devices.HostDevices[n].Source.Address.Bus).To(Equal("0x" + dbsfFields[1]))
@@ -135,7 +137,7 @@ var _ = Describe("GPU", func() {
 				Expect(domSpec.Devices.HostDevices[n].Source.Address.Function).To(Equal("0x" + dbsfFields[3]))
 			}
 
-			checkGPUDevice(randomVMI, "10de", "$")
+			checkGPUDevice(randomVMI, "10de")
 		})
 	})
 })

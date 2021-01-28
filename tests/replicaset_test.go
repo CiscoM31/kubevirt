@@ -29,6 +29,7 @@ import (
 	"github.com/onsi/ginkgo/extensions/table"
 	. "github.com/onsi/gomega"
 	autov1 "k8s.io/api/autoscaling/v1"
+	v13 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	v12 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1beta1"
@@ -37,11 +38,12 @@ import (
 
 	v1 "kubevirt.io/client-go/api/v1"
 	"kubevirt.io/client-go/kubecli"
+	"kubevirt.io/kubevirt/pkg/controller"
 	"kubevirt.io/kubevirt/tests"
 	cd "kubevirt.io/kubevirt/tests/containerdisk"
 )
 
-var _ = Describe("[rfe_id:588][crit:medium][vendor:cnv-qe@redhat.com][level:component]VirtualMachineInstanceReplicaSet", func() {
+var _ = Describe("[Serial][rfe_id:588][crit:medium][vendor:cnv-qe@redhat.com][level:component]VirtualMachineInstanceReplicaSet", func() {
 	var err error
 	var virtClient kubecli.KubevirtClient
 
@@ -133,13 +135,17 @@ var _ = Describe("[rfe_id:588][crit:medium][vendor:cnv-qe@redhat.com][level:comp
 		ExpectWithOffset(1, err).ToNot(HaveOccurred())
 	}
 
-	newReplicaSet := func() *v1.VirtualMachineInstanceReplicaSet {
-		By("Create a new VirtualMachineInstance replica set")
-		template := tests.NewRandomVMIWithEphemeralDiskAndUserdata(cd.ContainerDiskFor(cd.ContainerDiskCirros), "#!/bin/bash\necho 'hello'\n")
+	newReplicaSetWithTemplate := func(template *v1.VirtualMachineInstance) *v1.VirtualMachineInstanceReplicaSet {
 		newRS := tests.NewRandomReplicaSetFromVMI(template, int32(0))
 		newRS, err = virtClient.ReplicaSet(tests.NamespaceTestDefault).Create(newRS)
 		Expect(err).ToNot(HaveOccurred())
 		return newRS
+	}
+
+	newReplicaSet := func() *v1.VirtualMachineInstanceReplicaSet {
+		By("Create a new VirtualMachineInstance replica set")
+		template := tests.NewRandomVMIWithEphemeralDiskAndUserdata(cd.ContainerDiskFor(cd.ContainerDiskCirros), "#!/bin/bash\necho 'hello'\n")
+		return newReplicaSetWithTemplate(template)
 	}
 
 	table.DescribeTable("[rfe_id:588][crit:medium][vendor:cnv-qe@redhat.com][level:component]should scale", func(startScale int, stopScale int) {
@@ -254,7 +260,7 @@ var _ = Describe("[rfe_id:588][crit:medium][vendor:cnv-qe@redhat.com][level:comp
 
 		By("checking the output of server-side table printing")
 		rawTable, err := virtClient.RestClient().Get().
-			RequestURI(fmt.Sprintf("/apis/kubevirt.io/v1alpha3/namespaces/%s/virtualmachineinstancereplicasets/%s", tests.NamespaceTestDefault, newRS.ObjectMeta.Name)).
+			RequestURI(fmt.Sprintf("/apis/kubevirt.io/%s/namespaces/%s/virtualmachineinstancereplicasets/%s", v1.ApiLatestVersion, tests.NamespaceTestDefault, newRS.ObjectMeta.Name)).
 			SetHeader("Accept", "application/json;as=Table;v=v1beta1;g=meta.k8s.io, application/json").
 			DoRaw()
 
@@ -387,7 +393,7 @@ var _ = Describe("[rfe_id:588][crit:medium][vendor:cnv-qe@redhat.com][level:comp
 		}, 10*time.Second, 1*time.Second).Should(Equal(int32(2)))
 	})
 
-	It("[test_id:1418]should remove the finished VM", func() {
+	It("[test_id:1418]should replace finished VMIs", func() {
 		By("Creating new replica set")
 		rs := newReplicaSet()
 		doScale(rs.ObjectMeta.Name, int32(2))
@@ -415,10 +421,65 @@ var _ = Describe("[rfe_id:588][crit:medium][vendor:cnv-qe@redhat.com][level:comp
 			return false
 		}, 120*time.Second, time.Second).Should(BeTrue())
 
-		By("Checking number of RS VM's")
+		By("Checking number of RS VM's to see that we got a replacement")
 		vmis, err = virtClient.VirtualMachineInstance(tests.NamespaceTestDefault).List(&v12.ListOptions{})
 		Expect(err).ToNot(HaveOccurred())
 		Expect(len(vmis.Items)).Should(Equal(2))
+	})
+
+	It("should replace a VMI immediately when a virt-launcher pod gets deleted", func() {
+		By("Creating new replica set")
+		template := tests.NewRandomVMIWithEphemeralDiskAndUserdata(cd.ContainerDiskFor(cd.ContainerDiskCirros), "#!/bin/bash\necho 'hello'\n")
+		var gracePeriod int64 = 200
+		template.Spec.TerminationGracePeriodSeconds = &gracePeriod
+		rs := newReplicaSetWithTemplate(template)
+
+		// ensure that the shutdown will take as long as possible
+
+		doScale(rs.ObjectMeta.Name, int32(2))
+
+		vmis, err := virtClient.VirtualMachineInstance(tests.NamespaceTestDefault).List(&v12.ListOptions{})
+		Expect(err).ToNot(HaveOccurred())
+		Expect(vmis.Items).ToNot(BeEmpty())
+
+		By("Waiting until the VMIs are running")
+		Eventually(func() int {
+			vmis, err := virtClient.VirtualMachineInstance(tests.NamespaceTestDefault).List(&v12.ListOptions{})
+			Expect(err).ToNot(HaveOccurred())
+			return len(tests.Running(vmis))
+		}, 40*time.Second, time.Second).Should(Equal(2))
+
+		vmi := &vmis.Items[0]
+		pods, err := virtClient.CoreV1().Pods(tests.NamespaceTestDefault).List(tests.UnfinishedVMIPodSelector(vmi))
+		Expect(err).ToNot(HaveOccurred())
+		Expect(len(pods.Items)).To(Equal(1))
+		pod := pods.Items[0]
+
+		By("Deleting one of the RS VMS pods, which will take some time to really stop the VMI")
+		err = virtClient.CoreV1().Pods(tests.NamespaceTestDefault).Delete(pod.Name, &v12.DeleteOptions{})
+		Expect(err).ToNot(HaveOccurred())
+
+		By("Checking that then number of VMIs increases to three")
+		Expect(err).ToNot(HaveOccurred())
+		Eventually(func() int {
+			vmis, err = virtClient.VirtualMachineInstance(tests.NamespaceTestDefault).List(&v12.ListOptions{})
+			Expect(err).ToNot(HaveOccurred())
+			return len(vmis.Items)
+		}, 20*time.Second, time.Second).Should(Equal(3))
+
+		By("Checking that the shutting donw VMI is still running, reporting the pod deletion and being marked for deletion")
+		vmi, err = virtClient.VirtualMachineInstance(tests.NamespaceTestDefault).Get(vmi.Name, &v12.GetOptions{})
+		Expect(err).ToNot(HaveOccurred())
+		Expect(vmi.Status.Phase).To(Equal(v1.Running))
+		Expect(controller.NewVirtualMachineInstanceConditionManager().
+			HasConditionWithStatusAndReason(
+				vmi,
+				v1.VirtualMachineInstanceConditionType(v13.PodReady),
+				v13.ConditionFalse,
+				v1.PodTerminatingReason,
+			),
+		).To(BeTrue())
+		Expect(vmi.DeletionTimestamp).ToNot(BeNil())
 	})
 
 	It("[test_id:4121]should create and verify kubectl/oc output for vm replicaset", func() {

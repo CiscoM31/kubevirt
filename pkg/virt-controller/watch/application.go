@@ -58,6 +58,7 @@ import (
 	"kubevirt.io/kubevirt/pkg/virt-controller/services"
 	"kubevirt.io/kubevirt/pkg/virt-controller/watch/drain/disruptionbudget"
 	"kubevirt.io/kubevirt/pkg/virt-controller/watch/drain/evacuation"
+	"kubevirt.io/kubevirt/pkg/virt-controller/watch/snapshot"
 )
 
 const (
@@ -73,14 +74,19 @@ const (
 
 	ephemeralDiskDir = virtShareDir + "-ephemeral-disks"
 
-	defaultControllerThreads = 3
+	defaultControllerThreads    = 3
+	defaultVMIControllerThreads = 10
 
 	defaultLauncherSubGid                 = 107
 	defaultSnapshotControllerResyncPeriod = 5 * time.Minute
+
+	defaultPromCertFilePath = "/etc/virt-controller/certificates/tls.crt"
+	defaultPromKeyFilePath  = "/etc/virt-controller/certificates/tls.key"
 )
 
 var (
 	containerDiskDir = filepath.Join(util.VirtShareDir, "/container-disks")
+	hotplugDiskDir   = filepath.Join(util.VirtShareDir, "/hotplug-disks")
 
 	leaderGauge = prometheus.NewGauge(
 		prometheus.GaugeOpts{
@@ -104,7 +110,7 @@ type VirtControllerApp struct {
 	templateService services.TemplateService
 	restClient      *clientrest.RESTClient
 	informerFactory controller.KubeInformerFactory
-	podInformer     cache.SharedIndexInformer
+	kvPodInformer   cache.SharedIndexInformer
 
 	nodeInformer   cache.SharedIndexInformer
 	nodeController *NodeController
@@ -132,10 +138,13 @@ type VirtControllerApp struct {
 	migrationController *MigrationController
 	migrationInformer   cache.SharedIndexInformer
 
-	snapshotController        *SnapshotController
+	snapshotController        *snapshot.VMSnapshotController
+	restoreController         *snapshot.VMRestoreController
 	vmSnapshotInformer        cache.SharedIndexInformer
 	vmSnapshotContentInformer cache.SharedIndexInformer
+	vmRestoreInformer         cache.SharedIndexInformer
 	storageClassInformer      cache.SharedIndexInformer
+	allPodInformer            cache.SharedIndexInformer
 
 	crdInformer cache.SharedIndexInformer
 
@@ -147,8 +156,10 @@ type VirtControllerApp struct {
 	virtLibDir                 string
 	ephemeralDiskDir           string
 	containerDiskDir           string
+	hotplugDiskDir             string
 	readyChan                  chan bool
 	kubevirtNamespace          string
+	host                       string
 	evacuationController       *evacuation.EvacuationController
 	disruptionBudgetController *disruptionbudget.DisruptionBudgetController
 
@@ -169,7 +180,12 @@ type VirtControllerApp struct {
 	disruptionBudgetControllerThreads int
 	launcherSubGid                    int64
 	snapshotControllerThreads         int
+	restoreControllerThreads          int
 	snapshotControllerResyncPeriod    time.Duration
+
+	caConfigMapName  string
+	promCertFilePath string
+	promKeyFilePath  string
 }
 
 var _ service.Service = &VirtControllerApp{}
@@ -208,6 +224,12 @@ func Execute() {
 		golog.Fatalf("Error searching for namespace: %v", err)
 	}
 
+	host, err := os.Hostname()
+	if err != nil {
+		golog.Fatalf("unable to get hostname: %v", err)
+	}
+	app.host = host
+
 	ctx, cancel := context.WithCancel(context.Background())
 	stopChan := ctx.Done()
 	app.ctx = ctx
@@ -225,6 +247,7 @@ func Execute() {
 	app.reInitChan = make(chan string, 10)
 	app.hasCDI = app.clusterConfig.HasDataVolumeAPI()
 	app.clusterConfig.SetConfigModifiedCallback(app.configModificationCallback)
+	app.clusterConfig.SetConfigModifiedCallback(app.shouldChangeLogVerbosity)
 
 	webService := new(restful.WebService)
 	webService.Path("/").Consumes(restful.MIME_JSON).Produces(restful.MIME_JSON)
@@ -233,7 +256,7 @@ func Execute() {
 	restful.Add(webService)
 
 	app.vmiInformer = app.informerFactory.VMI()
-	app.podInformer = app.informerFactory.KubeVirtPod()
+	app.kvPodInformer = app.informerFactory.KubeVirtPod()
 	app.nodeInformer = app.informerFactory.KubeVirtNode()
 
 	app.vmiCache = app.vmiInformer.GetStore()
@@ -252,7 +275,9 @@ func Execute() {
 
 	app.vmSnapshotInformer = app.informerFactory.VirtualMachineSnapshot()
 	app.vmSnapshotContentInformer = app.informerFactory.VirtualMachineSnapshotContent()
+	app.vmRestoreInformer = app.informerFactory.VirtualMachineRestore()
 	app.storageClassInformer = app.informerFactory.StorageClass()
+	app.allPodInformer = app.informerFactory.Pod()
 
 	if app.hasCDI {
 		app.dataVolumeInformer = app.informerFactory.DataVolume()
@@ -271,6 +296,7 @@ func Execute() {
 	app.initDisruptionBudgetController()
 	app.initEvacuationController()
 	app.initSnapshotController()
+	app.initRestoreController()
 	go app.Run()
 
 	select {
@@ -293,12 +319,17 @@ func (vca *VirtControllerApp) configModificationCallback() {
 	}
 }
 
+// Update virt-controller log verbosity on relevant config changes
+func (vca *VirtControllerApp) shouldChangeLogVerbosity() {
+	verbosity := vca.clusterConfig.GetVirtHandlerVerbosity(vca.host)
+	log.Log.SetVerbosityLevel(int(verbosity))
+	log.Log.V(2).Infof("set log verbosity to %d", verbosity)
+}
+
 func (vca *VirtControllerApp) Run() {
 	logger := log.Log
 
-	stop := vca.ctx.Done()
-
-	promCertManager := bootstrap.NewFileCertificateManager("/etc/virt-controller/certificates")
+	promCertManager := bootstrap.NewFileCertificateManager(vca.promCertFilePath, vca.promKeyFilePath)
 	go promCertManager.Start()
 	promTLSConfig := webhooks.SetupPromTLS(promCertManager)
 
@@ -318,18 +349,13 @@ func (vca *VirtControllerApp) Run() {
 
 	recorder := vca.getNewRecorder(k8sv1.NamespaceAll, leaderelectionconfig.DefaultEndpointName)
 
-	id, err := os.Hostname()
-	if err != nil {
-		golog.Fatalf("unable to get hostname: %v", err)
-	}
-
 	rl, err := resourcelock.New(vca.LeaderElection.ResourceLock,
 		vca.kubevirtNamespace,
 		leaderelectionconfig.DefaultEndpointName,
 		vca.clientSet.CoreV1(),
 		vca.clientSet.CoordinationV1(),
 		resourcelock.ResourceLockConfig{
-			Identity:      id,
+			Identity:      vca.host,
 			EventRecorder: recorder,
 		})
 	if err != nil {
@@ -343,28 +369,7 @@ func (vca *VirtControllerApp) Run() {
 			RenewDeadline: vca.LeaderElection.RenewDeadline.Duration,
 			RetryPeriod:   vca.LeaderElection.RetryPeriod.Duration,
 			Callbacks: leaderelection.LeaderCallbacks{
-				OnStartedLeading: func(ctx context.Context) {
-					vca.informerFactory.Start(stop)
-
-					golog.Printf("STARTING controllers with following threads : "+
-						"node %d, vmi %d, replicaset %d, vm %d, migration %d, evacuation %d, disruptionBudget %d",
-						vca.nodeControllerThreads, vca.vmiControllerThreads, vca.rsControllerThreads,
-						vca.vmControllerThreads, vca.migrationControllerThreads, vca.evacuationControllerThreads,
-						vca.disruptionBudgetControllerThreads)
-
-					leaderGauge.Set(1)
-
-					go vca.evacuationController.Run(vca.evacuationControllerThreads, stop)
-					go vca.disruptionBudgetController.Run(vca.disruptionBudgetControllerThreads, stop)
-					go vca.nodeController.Run(vca.nodeControllerThreads, stop)
-					go vca.vmiController.Run(vca.vmiControllerThreads, stop)
-					go vca.rsController.Run(vca.rsControllerThreads, stop)
-					go vca.vmController.Run(vca.vmControllerThreads, stop)
-					go vca.migrationController.Run(vca.migrationControllerThreads, stop)
-					go vca.snapshotController.Run(vca.snapshotControllerThreads, stop)
-					cache.WaitForCacheSync(stop, vca.persistentVolumeClaimInformer.HasSynced)
-					close(vca.readyChan)
-				},
+				OnStartedLeading: vca.onStartedLeading(),
 				OnStoppedLeading: func() {
 					golog.Fatal("leaderelection lost")
 				},
@@ -378,6 +383,32 @@ func (vca *VirtControllerApp) Run() {
 	leaderElector.Run(vca.ctx)
 	readyGauge.Set(0)
 	panic("unreachable")
+}
+
+func (vca *VirtControllerApp) onStartedLeading() func(ctx context.Context) {
+	return func(ctx context.Context) {
+		stop := ctx.Done()
+		vca.informerFactory.Start(stop)
+
+		golog.Printf("STARTING controllers with following threads : "+
+			"node %d, vmi %d, replicaset %d, vm %d, migration %d, evacuation %d, disruptionBudget %d",
+			vca.nodeControllerThreads, vca.vmiControllerThreads, vca.rsControllerThreads,
+			vca.vmControllerThreads, vca.migrationControllerThreads, vca.evacuationControllerThreads,
+			vca.disruptionBudgetControllerThreads)
+
+		go vca.evacuationController.Run(vca.evacuationControllerThreads, stop)
+		go vca.disruptionBudgetController.Run(vca.disruptionBudgetControllerThreads, stop)
+		go vca.nodeController.Run(vca.nodeControllerThreads, stop)
+		go vca.vmiController.Run(vca.vmiControllerThreads, stop)
+		go vca.rsController.Run(vca.rsControllerThreads, stop)
+		go vca.vmController.Run(vca.vmControllerThreads, stop)
+		go vca.migrationController.Run(vca.migrationControllerThreads, stop)
+		go vca.snapshotController.Run(vca.snapshotControllerThreads, stop)
+		go vca.restoreController.Run(vca.restoreControllerThreads, stop)
+		cache.WaitForCacheSync(stop, vca.persistentVolumeClaimInformer.HasSynced)
+		close(vca.readyChan)
+		leaderGauge.Set(1)
+	}
 }
 
 func (vca *VirtControllerApp) getNewRecorder(namespace string, componentName string) record.EventRecorder {
@@ -400,6 +431,7 @@ func (vca *VirtControllerApp) initCommon() {
 		vca.virtLibDir,
 		vca.ephemeralDiskDir,
 		vca.containerDiskDir,
+		vca.hotplugDiskDir,
 		vca.imagePullSecret,
 		vca.persistentVolumeClaimCache,
 		virtClient,
@@ -407,10 +439,10 @@ func (vca *VirtControllerApp) initCommon() {
 		vca.launcherSubGid,
 	)
 
-	vca.vmiController = NewVMIController(vca.templateService, vca.vmiInformer, vca.podInformer, vca.persistentVolumeClaimInformer, vca.vmiRecorder, vca.clientSet, vca.dataVolumeInformer)
+	vca.vmiController = NewVMIController(vca.templateService, vca.vmiInformer, vca.kvPodInformer, vca.persistentVolumeClaimInformer, vca.vmiRecorder, vca.clientSet, vca.dataVolumeInformer)
 	recorder := vca.getNewRecorder(k8sv1.NamespaceAll, "node-controller")
 	vca.nodeController = NewNodeController(vca.clientSet, vca.nodeInformer, vca.vmiInformer, recorder)
-	vca.migrationController = NewMigrationController(vca.templateService, vca.vmiInformer, vca.podInformer, vca.migrationInformer, vca.vmiRecorder, vca.clientSet, vca.clusterConfig)
+	vca.migrationController = NewMigrationController(vca.templateService, vca.vmiInformer, vca.kvPodInformer, vca.migrationInformer, vca.vmiRecorder, vca.clientSet, vca.clusterConfig)
 }
 
 func (vca *VirtControllerApp) initReplicaSet() {
@@ -455,17 +487,38 @@ func (vca *VirtControllerApp) initEvacuationController() {
 
 func (vca *VirtControllerApp) initSnapshotController() {
 	recorder := vca.getNewRecorder(k8sv1.NamespaceAll, "snapshot-controller")
-	vca.snapshotController = NewSnapshotController(
-		vca.clientSet,
-		vca.vmSnapshotInformer,
-		vca.vmSnapshotContentInformer,
-		vca.vmInformer,
-		vca.storageClassInformer,
-		vca.persistentVolumeClaimInformer,
-		vca.crdInformer,
-		recorder,
-		vca.snapshotControllerResyncPeriod,
-	)
+	vca.snapshotController = &snapshot.VMSnapshotController{
+		Client:                    vca.clientSet,
+		VMSnapshotInformer:        vca.vmSnapshotInformer,
+		VMSnapshotContentInformer: vca.vmSnapshotContentInformer,
+		VMInformer:                vca.vmInformer,
+		VMIInformer:               vca.vmiInformer,
+		StorageClassInformer:      vca.storageClassInformer,
+		PVCInformer:               vca.persistentVolumeClaimInformer,
+		CRDInformer:               vca.crdInformer,
+		PodInformer:               vca.allPodInformer,
+		DVInformer:                vca.dataVolumeInformer,
+		Recorder:                  recorder,
+		ResyncPeriod:              vca.snapshotControllerResyncPeriod,
+	}
+	vca.snapshotController.Init()
+}
+
+func (vca *VirtControllerApp) initRestoreController() {
+	recorder := vca.getNewRecorder(k8sv1.NamespaceAll, "restore-controller")
+	vca.restoreController = &snapshot.VMRestoreController{
+		Client:                    vca.clientSet,
+		VMRestoreInformer:         vca.vmRestoreInformer,
+		VMSnapshotInformer:        vca.vmSnapshotInformer,
+		VMSnapshotContentInformer: vca.vmSnapshotContentInformer,
+		VMInformer:                vca.vmInformer,
+		VMIInformer:               vca.vmiInformer,
+		DataVolumeInformer:        vca.dataVolumeInformer,
+		PVCInformer:               vca.persistentVolumeClaimInformer,
+		StorageClassInformer:      vca.storageClassInformer,
+		Recorder:                  recorder,
+	}
+	vca.restoreController.Init()
 }
 
 func (vca *VirtControllerApp) leaderProbe(_ *restful.Request, response *restful.Response) {
@@ -512,11 +565,14 @@ func (vca *VirtControllerApp) AddFlags() {
 	flag.StringVar(&vca.containerDiskDir, "container-disk-dir", containerDiskDir,
 		"Base directory for container disk data")
 
+	flag.StringVar(&vca.hotplugDiskDir, "hotplug-disk-dir", hotplugDiskDir,
+		"Base directory for hotplug disk data")
+
 	// allows user-defined threads based on the underlying hardware in use
 	flag.IntVar(&vca.nodeControllerThreads, "node-controller-threads", defaultControllerThreads,
 		"Number of goroutines to run for node controller")
 
-	flag.IntVar(&vca.vmiControllerThreads, "vmi-controller-threads", defaultControllerThreads,
+	flag.IntVar(&vca.vmiControllerThreads, "vmi-controller-threads", defaultVMIControllerThreads,
 		"Number of goroutines to run for vmi controller")
 
 	flag.IntVar(&vca.rsControllerThreads, "rs-controller-threads", defaultControllerThreads,
@@ -537,9 +593,18 @@ func (vca *VirtControllerApp) AddFlags() {
 	flag.Int64Var(&vca.launcherSubGid, "launcher-subgid", defaultLauncherSubGid,
 		"ID of subgroup to virt-launcher")
 
-	flag.IntVar(&vca.snapshotControllerThreads, "snapshot-controller-threads", 1,
+	flag.IntVar(&vca.snapshotControllerThreads, "snapshot-controller-threads", defaultControllerThreads,
 		"Number of goroutines to run for snapshot controller")
+
+	flag.IntVar(&vca.restoreControllerThreads, "restore-controller-threads", defaultControllerThreads,
+		"Number of goroutines to run for restore controller")
 
 	flag.DurationVar(&vca.snapshotControllerResyncPeriod, "snapshot-controller-resync-period", defaultSnapshotControllerResyncPeriod,
 		"Number of goroutines to run for snapshot controller")
+
+	flag.StringVar(&vca.promCertFilePath, "prom-cert-file", defaultPromCertFilePath,
+		"Client certificate used to prove the identity of the virt-controller when it must call out Promethus during a request")
+
+	flag.StringVar(&vca.promKeyFilePath, "prom-key-file", defaultPromKeyFilePath,
+		"Private key for the client certificate used to prove the identity of the virt-controller when it must call out Promethus during a request")
 }
