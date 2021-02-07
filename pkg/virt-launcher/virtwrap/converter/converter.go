@@ -1312,6 +1312,9 @@ func Convert_v1_VirtualMachine_To_api_Domain(vmi *v1.VirtualMachineInstance, dom
 			Type:  "usb",
 			Index: "0",
 			Model: "qemu-xhci",
+			Alias: &api.Alias{
+				Name: "usbController",
+			},
 		})
 	}
 
@@ -1320,6 +1323,9 @@ func Convert_v1_VirtualMachine_To_api_Domain(vmi *v1.VirtualMachineInstance, dom
 			Type:  "scsi",
 			Index: "0",
 			Model: "virtio-scsi",
+			Alias: &api.Alias{
+				Name: "scsiController",
+			},
 		})
 	}
 
