@@ -201,7 +201,10 @@ func (app *virtHandlerApp) Run() {
 		os.Exit(0)
 	}()
 
-	broadcaster := record.NewBroadcaster()
+	broadcaster := record.NewBroadcasterWithCorrelatorOptions(record.CorrelatorOptions{
+		BurstSize: 500,
+		QPS:       100,
+	})
 	broadcaster.StartRecordingToSink(&k8coresv1.EventSinkImpl{Interface: app.virtCli.CoreV1().Events(k8sv1.NamespaceAll)})
 	// Scheme is used to create an ObjectReference from an Object (e.g. VirtualMachineInstance) during Event creation
 	recorder := broadcaster.NewRecorder(scheme.Scheme, k8sv1.EventSource{Component: "virt-handler", Host: app.HostOverride})

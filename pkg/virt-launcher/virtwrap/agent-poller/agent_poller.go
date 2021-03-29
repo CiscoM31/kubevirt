@@ -296,7 +296,15 @@ func (p *AgentPoller) Start() {
 	for i := 0; i < len(p.workers); i++ {
 		log.Log.Infof("Starting agent poller with commands: %v", p.workers[i].AgentCommands)
 		go p.workers[i].Poll(func(commands []AgentCommand) {
-			executeAgentCommands(commands, p.Connection, p.agentStore, p.domainName)
+			for {
+				ticker := time.NewTicker(30 * time.Second)
+				select {
+				case <-ticker.C:
+					executeAgentCommands(commands, p.Connection, p.agentStore, p.domainName)
+				case <-p.agentDone:
+					return
+				}
+			}
 		}, p.agentDone)
 	}
 }
