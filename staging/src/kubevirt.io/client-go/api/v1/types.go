@@ -687,6 +687,7 @@ const (
 	Migrated                     SyncEvent = "Migrated"
 	SyncFailed                   SyncEvent = "SyncFailed"
 	Resumed                      SyncEvent = "Resumed"
+	VMInterfaceIPChange          SyncEvent = "VMInterfaceIPChanged"
 	AccessCredentialsSyncFailed  SyncEvent = "AccessCredentialsSyncFailed"
 	AccessCredentialsSyncSuccess SyncEvent = "AccessCredentialsSyncSuccess"
 )
