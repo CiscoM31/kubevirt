@@ -20,6 +20,7 @@
 package tests_test
 
 import (
+	"context"
 	"fmt"
 	"io/ioutil"
 	"net/http"
@@ -67,9 +68,10 @@ var getWindowsVMISpec = func() v1.VirtualMachineInstanceSpec {
 				ACPI: v1.FeatureState{},
 				APIC: &v1.FeatureAPIC{},
 				Hyperv: &v1.FeatureHyperv{
-					Relaxed:   &v1.FeatureState{},
-					VAPIC:     &v1.FeatureState{},
-					Spinlocks: &v1.FeatureSpinlocks{Retries: &spinlocks},
+					Relaxed:    &v1.FeatureState{},
+					SyNICTimer: &v1.SyNICTimer{Direct: &v1.FeatureState{}},
+					VAPIC:      &v1.FeatureState{},
+					Spinlocks:  &v1.FeatureSpinlocks{Retries: &spinlocks},
 				},
 			},
 			Clock: &v1.Clock{
@@ -112,7 +114,7 @@ var getWindowsVMISpec = func() v1.VirtualMachineInstanceSpec {
 
 }
 
-var _ = Describe("[Serial]Windows VirtualMachineInstance", func() {
+var _ = Describe("[Serial][sig-compute]Windows VirtualMachineInstance", func() {
 	var err error
 	var virtClient kubecli.KubevirtClient
 
@@ -168,7 +170,7 @@ var _ = Describe("[Serial]Windows VirtualMachineInstance", func() {
 					},
 				},
 			}
-			winrmcliPod, err = virtClient.CoreV1().Pods(tests.NamespaceTestDefault).Create(winrmcliPod)
+			winrmcliPod, err = virtClient.CoreV1().Pods(tests.NamespaceTestDefault).Create(context.Background(), winrmcliPod, metav1.CreateOptions{})
 			Expect(err).ToNot(HaveOccurred())
 
 			By("Starting the windows VirtualMachineInstance")
@@ -304,12 +306,12 @@ var _ = Describe("[Serial]Windows VirtualMachineInstance", func() {
 			Expect(err).ToNot(HaveOccurred())
 
 			By("Checking that the vmi does not exist anymore")
-			result := virtClient.RestClient().Get().Resource(tests.VMIResource).Namespace(k8sv1.NamespaceDefault).Name(windowsVMI.Name).Do()
+			result := virtClient.RestClient().Get().Resource(tests.VMIResource).Namespace(k8sv1.NamespaceDefault).Name(windowsVMI.Name).Do(context.Background())
 			Expect(result).To(testutils.HaveStatusCode(http.StatusNotFound))
 
 			By("Checking that the vmi pod terminated")
 			Eventually(func() int {
-				pods, err := virtClient.CoreV1().Pods(tests.NamespaceTestDefault).List(podSelector)
+				pods, err := virtClient.CoreV1().Pods(tests.NamespaceTestDefault).List(context.Background(), podSelector)
 				Expect(err).ToNot(HaveOccurred())
 				return len(pods.Items)
 			}, 75, 0.5).Should(Equal(0))

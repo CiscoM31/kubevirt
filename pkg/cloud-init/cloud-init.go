@@ -35,6 +35,7 @@ import (
 	"kubevirt.io/client-go/log"
 	"kubevirt.io/client-go/precond"
 	diskutils "kubevirt.io/kubevirt/pkg/ephemeral-disk-utils"
+	"kubevirt.io/kubevirt/pkg/util"
 	"kubevirt.io/kubevirt/pkg/util/net/dns"
 )
 
@@ -56,7 +57,6 @@ const (
 	DataSourceNoCloud     DataSourceType     = "noCloud"
 	DataSourceConfigDrive DataSourceType     = "configDrive"
 	NICMetadataType       DeviceMetadataType = "nic"
-	DiskMetadataType      DeviceMetadataType = "disk"
 )
 
 // CloudInitData is a data source independent struct that
@@ -413,7 +413,7 @@ func SetIsoCreationFunction(isoFunc IsoCreationFunc) {
 }
 
 func SetLocalDirectory(dir string) error {
-	err := os.MkdirAll(dir, 0755)
+	err := util.MkdirAllWithNosec(dir)
 	if err != nil {
 		return fmt.Errorf("unable to initialize cloudInit local cache directory (%s). %v", dir, err)
 	}
@@ -505,7 +505,7 @@ func GenerateLocalData(vmiName string, namespace string, data *CloudInitData) er
 		return fmt.Errorf("Invalid cloud-init data source: '%v'", data.DataSource)
 	}
 
-	err = os.MkdirAll(dataPath, 0755)
+	err = util.MkdirAllWithNosec(dataPath)
 	if err != nil {
 		log.Log.V(2).Reason(err).Errorf("unable to create cloud-init base path %s", domainBasePath)
 		return err
@@ -521,30 +521,29 @@ func GenerateLocalData(vmiName string, namespace string, data *CloudInitData) er
 		networkData = []byte(data.NetworkData)
 	}
 
-	diskutils.RemoveFile(userFile)
-	diskutils.RemoveFile(metaFile)
-	diskutils.RemoveFile(networkFile)
-	diskutils.RemoveFile(isoStaging)
-
-	err = ioutil.WriteFile(userFile, userData, 0644)
-	if err != nil {
-		return err
-	}
-	err = ioutil.WriteFile(metaFile, metaData, 0644)
+	err = diskutils.RemoveFilesIfExist(userFile, metaFile, networkFile, isoStaging)
 	if err != nil {
 		return err
 	}
 
-	files := make([]string, 0, 3)
-	files = append(files, metaFile)
-	files = append(files, userFile)
+	err = ioutil.WriteFile(userFile, userData, 0600)
+	if err != nil {
+		return err
+	}
+	defer os.Remove(userFile)
+
+	err = ioutil.WriteFile(metaFile, metaData, 0600)
+	if err != nil {
+		return err
+	}
+	defer os.Remove(metaFile)
 
 	if len(networkData) > 0 {
-		err = ioutil.WriteFile(networkFile, networkData, 0644)
+		err = ioutil.WriteFile(networkFile, networkData, 0600)
 		if err != nil {
 			return err
 		}
-		files = append(files, networkFile)
+		defer os.Remove(networkFile)
 	}
 
 	switch data.DataSource {
@@ -556,9 +555,6 @@ func GenerateLocalData(vmiName string, namespace string, data *CloudInitData) er
 	if err != nil {
 		return err
 	}
-	diskutils.RemoveFile(metaFile)
-	diskutils.RemoveFile(userFile)
-	diskutils.RemoveFile(networkFile)
 
 	if err := diskutils.DefaultOwnershipManager.SetFileOwnership(isoStaging); err != nil {
 		return err
@@ -572,9 +568,4 @@ func GenerateLocalData(vmiName string, namespace string, data *CloudInitData) er
 
 	log.Log.V(2).Infof("generated nocloud iso file %s", iso)
 	return nil
-}
-
-// Lists all vmis cloud-init has local data for
-func listVmWithLocalData() ([]*v1.VirtualMachineInstance, error) {
-	return diskutils.ListVmWithEphemeralDisk(cloudInitLocalDir)
 }

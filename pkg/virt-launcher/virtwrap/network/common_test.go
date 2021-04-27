@@ -21,58 +21,17 @@ package network
 
 import (
 	"fmt"
-	"io/ioutil"
 	"net"
-	"os"
-	"strings"
+
+	"github.com/coreos/go-iptables/iptables"
+	"github.com/onsi/ginkgo/extensions/table"
 
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
 	"github.com/vishvananda/netlink"
-
-	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/api"
 )
 
 var _ = Describe("Common Methods", func() {
-	pid := "self"
-	Context("Functions Read and Write from cache", func() {
-		It("should persist interface payload", func() {
-			tmpDir, err := ioutil.TempDir("", "commontest")
-			Expect(err).ToNot(HaveOccurred())
-			defer os.RemoveAll(tmpDir)
-			setInterfaceCacheFile(tmpDir + "/cache-%s.json")
-
-			ifaceName := "iface_name"
-			iface := api.Interface{Type: "fake_type", Source: api.InterfaceSource{Bridge: "fake_br"}}
-			err = writeToCachedFile(&iface, interfaceCacheFile, pid, ifaceName)
-			Expect(err).ToNot(HaveOccurred())
-
-			var cached_iface api.Interface
-			isExist, err := readFromCachedFile(pid, ifaceName, interfaceCacheFile, &cached_iface)
-			Expect(err).ToNot(HaveOccurred())
-			Expect(isExist).To(BeTrue())
-
-			Expect(iface).To(Equal(cached_iface))
-		})
-		It("should persist qemu arg payload", func() {
-			tmpDir, err := ioutil.TempDir("", "commontest")
-			Expect(err).ToNot(HaveOccurred())
-			defer os.RemoveAll(tmpDir)
-			setInterfaceCacheFile(tmpDir + "/cache-%s.json")
-
-			qemuArgName := "iface_name"
-			qemuArg := api.Arg{Value: "test_value"}
-			err = writeToCachedFile(&qemuArg, interfaceCacheFile, pid, qemuArgName)
-			Expect(err).ToNot(HaveOccurred())
-
-			var cached_qemuArg api.Arg
-			isExist, err := readFromCachedFile(pid, qemuArgName, interfaceCacheFile, &cached_qemuArg)
-			Expect(err).ToNot(HaveOccurred())
-			Expect(isExist).To(BeTrue())
-
-			Expect(qemuArg).To(Equal(cached_qemuArg))
-		})
-	})
 	Context("GetAvailableAddrsFromCIDR function", func() {
 		It("Should return 2 addresses", func() {
 			networkHandler := NetworkUtilsHandler{}
@@ -99,13 +58,19 @@ var _ = Describe("Common Methods", func() {
 			Expect(err).To(HaveOccurred())
 		})
 	})
-	Context("GenerateRandomMac function", func() {
-		It("should return a valid mac address", func() {
-			networkHandler := NetworkUtilsHandler{}
-			mac, err := networkHandler.GenerateRandomMac()
-			Expect(err).ToNot(HaveOccurred())
-			Expect(strings.HasPrefix(mac.String(), "02:00:00")).To(BeTrue())
-		})
+	Context("composeNftablesLoad function", func() {
+		table.DescribeTable("should compose the correct command",
+			func(protocol iptables.Protocol, protocolVersionNum string) {
+				cmd := composeNftablesLoad(protocol)
+				Expect(cmd.Path).To(Equal("nft"))
+				Expect(cmd.Args).To(Equal([]string{
+					"nft",
+					"-f",
+					fmt.Sprintf("/etc/nftables/ipv%s-nat.nft", protocolVersionNum)}))
+			},
+			table.Entry("ipv4", iptables.ProtocolIPv4, "4"),
+			table.Entry("ipv6", iptables.ProtocolIPv6, "6"),
+		)
 	})
 })
 
@@ -149,3 +114,7 @@ func createDummyVIF(vifName, ipv4cidr, ipv4gateway, ipv6cidr, macStr string, mtu
 
 	return vif
 }
+
+var _ = Describe("infocache", func() {
+
+})

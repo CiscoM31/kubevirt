@@ -22,6 +22,7 @@ package cli
 //go:generate mockgen -source $GOFILE -imports "libvirt=libvirt.org/libvirt-go" -package=$GOPACKAGE -destination=generated_mock_$GOFILE
 
 import (
+	"encoding/xml"
 	"fmt"
 	"io"
 	"sync"
@@ -31,6 +32,7 @@ import (
 	libvirt "libvirt.org/libvirt-go"
 
 	"kubevirt.io/client-go/log"
+	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/api"
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/errors"
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/stats"
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/statsconv"
@@ -48,6 +50,8 @@ type Connection interface {
 	DomainEventDeviceAddedRegister(callback libvirt.DomainEventDeviceAddedCallback) error
 	DomainEventDeviceRemovedRegister(callback libvirt.DomainEventDeviceRemovedCallback) error
 	AgentEventLifecycleRegister(callback libvirt.DomainEventAgentLifecycleCallback) error
+	VolatileDomainEventDeviceRemovedRegister(domain VirDomain, callback libvirt.DomainEventDeviceRemovedCallback) (int, error)
+	DomainEventDeregister(registrationID int) error
 	ListAllDomains(flags libvirt.ConnectListAllDomainsFlags) ([]VirDomain, error)
 	NewStream(flags libvirt.StreamFlags) (Stream, error)
 	SetReconnectChan(reconnect chan bool)
@@ -165,7 +169,7 @@ func (l *LibvirtConnection) DomainEventDeviceRemovedRegister(callback libvirt.Do
 	}
 
 	l.domainDeviceRemovedEventCallbacks = append(l.domainDeviceRemovedEventCallbacks, callback)
-	_, err = l.Connect.DomainEventDeviceRemovedRegister(nil, callback)
+	_, err = l.VolatileDomainEventDeviceRemovedRegister(nil, callback)
 	l.checkConnectionLost(err)
 	return
 }
@@ -179,6 +183,18 @@ func (l *LibvirtConnection) AgentEventLifecycleRegister(callback libvirt.DomainE
 	_, err = l.Connect.DomainEventAgentLifecycleRegister(nil, callback)
 	l.checkConnectionLost(err)
 	return
+}
+
+func (l *LibvirtConnection) VolatileDomainEventDeviceRemovedRegister(domain VirDomain, callback libvirt.DomainEventDeviceRemovedCallback) (int, error) {
+	var dom *libvirt.Domain
+	if domain != nil {
+		dom = domain.(*libvirt.Domain)
+	}
+	return l.Connect.DomainEventDeviceRemovedRegister(dom, callback)
+}
+
+func (l *LibvirtConnection) DomainEventDeregister(registrationID int) error {
+	return l.Connect.DomainEventDeregister(registrationID)
 }
 
 func (l *LibvirtConnection) LookupDomainByName(name string) (dom VirDomain, err error) {
@@ -253,6 +269,15 @@ func (l *LibvirtConnection) GetDomainStats(statsTypes libvirt.DomainStatsTypes, 
 	if err != nil {
 		return nil, err
 	}
+	// Free memory allocated for domains
+	defer func() {
+		for i := range domStats {
+			err := domStats[i].Domain.Free()
+			if err != nil {
+				log.Log.Reason(err).Warning("Error freeing a domain.")
+			}
+		}
+	}()
 
 	var list []*stats.DomainStats
 	for i, domStat := range domStats {
@@ -263,17 +288,58 @@ func (l *LibvirtConnection) GetDomainStats(statsTypes libvirt.DomainStatsTypes, 
 			return list, err
 		}
 
-		stat := &stats.DomainStats{}
-		err = statsconv.Convert_libvirt_DomainStats_to_stats_DomainStats(statsconv.DomainIdentifier(domStat.Domain), &domStats[i], memStats, stat)
+		devAliasMap, err := l.GetDeviceAliasMap(domStat.Domain)
 		if err != nil {
 			return list, err
 		}
 
+		domInfo, err := domStat.Domain.GetInfo()
+		if err != nil {
+			return list, err
+		}
+
+		stat := &stats.DomainStats{}
+		err = statsconv.Convert_libvirt_DomainStats_to_stats_DomainStats(statsconv.DomainIdentifier(domStat.Domain), &domStats[i], memStats, domInfo, devAliasMap, stat)
+		if err != nil {
+			return list, err
+		}
+
+		cpuMap, err := domStat.Domain.GetVcpuPinInfo(libvirt.DOMAIN_AFFECT_CURRENT)
+		if err != nil {
+			return list, err
+		}
+
+		stat.CPUMap = cpuMap
+		stat.CPUMapSet = true
+
 		list = append(list, stat)
-		domStat.Domain.Free()
 	}
 
 	return list, nil
+}
+
+func (l *LibvirtConnection) GetDeviceAliasMap(domain *libvirt.Domain) (map[string]string, error) {
+	devAliasMap := make(map[string]string)
+
+	domSpec := &api.DomainSpec{}
+	domxml, err := domain.GetXMLDesc(0)
+	if err != nil {
+		return devAliasMap, err
+	}
+	err = xml.Unmarshal([]byte(domxml), domSpec)
+	if err != nil {
+		return devAliasMap, err
+	}
+
+	for _, iface := range domSpec.Devices.Interfaces {
+		devAliasMap[iface.Target.Device] = iface.Alias.GetName()
+	}
+
+	for _, disk := range domSpec.Devices.Disks {
+		devAliasMap[disk.Target.Device] = disk.Alias.GetName()
+	}
+
+	return devAliasMap, nil
 }
 
 // Installs a watchdog which will check periodically if the libvirt connection is still alive.
@@ -393,7 +459,9 @@ type VirDomain interface {
 	Suspend() error
 	Resume() error
 	AttachDevice(xml string) error
+	AttachDeviceFlags(xml string, flags libvirt.DomainDeviceModifyFlags) error
 	DetachDevice(xml string) error
+	DetachDeviceFlags(xml string, flags libvirt.DomainDeviceModifyFlags) error
 	DestroyFlags(flags libvirt.DomainDestroyFlags) error
 	ShutdownFlags(flags libvirt.DomainShutdownFlags) error
 	UndefineFlags(flags libvirt.DomainUndefineFlagsValues) error
@@ -407,19 +475,25 @@ type VirDomain interface {
 	MemoryStats(nrStats uint32, flags uint32) ([]libvirt.DomainMemoryStat, error)
 	GetJobStats(flags libvirt.DomainGetJobStatsFlags) (*libvirt.DomainJobInfo, error)
 	GetJobInfo() (*libvirt.DomainJobInfo, error)
+	GetDiskErrors(flags uint32) ([]libvirt.DomainDiskError, error)
 	SetTime(secs int64, nsecs uint, flags libvirt.DomainSetTimeFlags) error
+	IsPersistent() (bool, error)
 	AbortJob() error
 	Free() error
 }
 
 func NewConnection(uri string, user string, pass string, checkInterval time.Duration) (Connection, error) {
+	return NewConnectionWithTimeout(uri, user, pass, checkInterval, ConnectionInterval, ConnectionTimeout)
+}
+
+func NewConnectionWithTimeout(uri string, user string, pass string, checkInterval, connectionInterval, connectionTimeout time.Duration) (Connection, error) {
 	logger := log.Log
 	logger.V(1).Infof("Connecting to libvirt daemon: %s", uri)
 
 	var err error
 	var virConn *libvirt.Connect
 
-	err = utilwait.PollImmediate(ConnectionInterval, ConnectionTimeout, func() (done bool, err error) {
+	err = utilwait.PollImmediate(connectionInterval, connectionTimeout, func() (done bool, err error) {
 		virConn, err = newConnection(uri, user, pass)
 		if err != nil {
 			logger.V(1).Infof("Connecting to libvirt daemon failed: %v", err)

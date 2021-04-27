@@ -130,15 +130,37 @@ func (s *AsyncAgentStore) GetSysInfo() api.DomainSysInfo {
 	}
 }
 
+// GetInterfaceStatus returns the interfaces Guest Agent reported
+func (s *AsyncAgentStore) GetInterfaceStatus() []api.InterfaceStatus {
+	data, ok := s.store.Load(GET_INTERFACES)
+	interfacesStatus := []api.InterfaceStatus{}
+	if ok {
+		interfacesStatus = data.([]api.InterfaceStatus)
+	}
+
+	return interfacesStatus
+}
+
+// GetGuestOSInfo returns the Guest OS version and architecture
+func (s *AsyncAgentStore) GetGuestOSInfo() api.GuestOSInfo {
+	data, ok := s.store.Load(GET_OSINFO)
+	osinfo := api.GuestOSInfo{}
+	if ok {
+		osinfo = data.(api.GuestOSInfo)
+	}
+
+	return osinfo
+}
+
 // GetGA returns guest agent record with its version if present
-func (s *AsyncAgentStore) GetGA() string {
+func (s *AsyncAgentStore) GetGA() AgentInfo {
 	data, ok := s.store.Load(GET_AGENT)
-	agent := ""
+	agent := AgentInfo{}
 	if !ok {
 		return agent
 	}
 
-	agent = data.(string)
+	agent = data.(AgentInfo)
 	return agent
 }
 
@@ -192,7 +214,7 @@ type PollerWorker struct {
 type agentCommandsExecutor func(commands []AgentCommand)
 
 // Poll is the call to the guestagent
-func (p *PollerWorker) Poll(execAgentCommands agentCommandsExecutor, closeChan chan struct{}) {
+func (p *PollerWorker) Poll(execAgentCommands agentCommandsExecutor, closeChan chan struct{}, initialInterval time.Duration) {
 	log.Log.Infof("Polling command: %v", p.AgentCommands)
 
 	// do the first round to fill the cache immediately
@@ -201,8 +223,8 @@ func (p *PollerWorker) Poll(execAgentCommands agentCommandsExecutor, closeChan c
 	pollMaxInterval := p.CallTick * time.Second
 	pollInterval := pollMaxInterval
 
-	if pollInitialInterval < pollMaxInterval {
-		pollInterval = pollInitialInterval
+	if initialInterval < pollMaxInterval {
+		pollInterval = initialInterval
 	}
 	ticker := time.NewTicker(pollInterval)
 
@@ -223,7 +245,7 @@ func (p *PollerWorker) Poll(execAgentCommands agentCommandsExecutor, closeChan c
 
 func replaceTicker(ticker *time.Ticker, interval time.Duration) *time.Ticker {
 	ticker.Stop()
-	return time.NewTicker(time.Second * interval)
+	return time.NewTicker(interval)
 }
 
 func incrementPollInterval(interval time.Duration, maxInterval time.Duration) time.Duration {
@@ -297,7 +319,7 @@ func (p *AgentPoller) Start() {
 		log.Log.Infof("Starting agent poller with commands: %v", p.workers[i].AgentCommands)
 		go p.workers[i].Poll(func(commands []AgentCommand) {
 			executeAgentCommands(commands, p.Connection, p.agentStore, p.domainName)
-		}, p.agentDone)
+		}, p.agentDone, pollInitialInterval)
 	}
 }
 
@@ -361,7 +383,7 @@ func executeAgentCommands(commands []AgentCommand, con cli.Connection, agentStor
 		case GET_AGENT:
 			agent, err := parseAgent(cmdResult)
 			if err != nil {
-				log.Log.Errorf("Cannot parse guest agent version %s", err.Error())
+				log.Log.Errorf("Cannot parse guest agent information %s", err.Error())
 			}
 			agentStore.Store(GET_AGENT, agent)
 		}

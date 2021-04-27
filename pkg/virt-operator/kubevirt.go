@@ -20,10 +20,13 @@
 package virt_operator
 
 import (
+	"context"
 	"fmt"
 	"reflect"
 	"sync"
 	"time"
+
+	"golang.org/x/time/rate"
 
 	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
@@ -40,8 +43,9 @@ import (
 	"kubevirt.io/client-go/kubecli"
 	"kubevirt.io/client-go/log"
 	"kubevirt.io/kubevirt/pkg/controller"
-	"kubevirt.io/kubevirt/pkg/virt-operator/creation/components"
-	installstrategy "kubevirt.io/kubevirt/pkg/virt-operator/install-strategy"
+	"kubevirt.io/kubevirt/pkg/virt-operator/resource/apply"
+	"kubevirt.io/kubevirt/pkg/virt-operator/resource/generate/components"
+	install "kubevirt.io/kubevirt/pkg/virt-operator/resource/generate/install"
 	"kubevirt.io/kubevirt/pkg/virt-operator/util"
 	operatorutil "kubevirt.io/kubevirt/pkg/virt-operator/util"
 )
@@ -60,15 +64,15 @@ type KubeVirtController struct {
 	informers            util.Informers
 	kubeVirtExpectations util.Expectations
 	installStrategyMutex sync.Mutex
-	installStrategyMap   map[string]*installstrategy.InstallStrategy
+	installStrategyMap   map[string]*install.Strategy
 	operatorNamespace    string
-	aggregatorClient     installstrategy.APIServiceInterface
+	aggregatorClient     install.APIServiceInterface
 	statusUpdater        *status.KVStatusUpdater
 }
 
 func NewKubeVirtController(
 	clientset kubecli.KubevirtClient,
-	aggregatorClient installstrategy.APIServiceInterface,
+	aggregatorClient install.APIServiceInterface,
 	informer cache.SharedIndexInformer,
 	recorder record.EventRecorder,
 	stores util.Stores,
@@ -76,10 +80,15 @@ func NewKubeVirtController(
 	operatorNamespace string,
 ) *KubeVirtController {
 
+	rl := workqueue.NewMaxOfRateLimiter(
+		workqueue.NewItemExponentialFailureRateLimiter(5*time.Second, 1000*time.Second),
+		&workqueue.BucketRateLimiter{Limiter: rate.NewLimiter(rate.Every(5*time.Second), 1)},
+	)
+
 	c := KubeVirtController{
 		clientset:        clientset,
 		aggregatorClient: aggregatorClient,
-		queue:            workqueue.NewRateLimitingQueue(workqueue.DefaultControllerRateLimiter()),
+		queue:            workqueue.NewRateLimitingQueue(rl),
 		kubeVirtInformer: informer,
 		recorder:         recorder,
 		stores:           stores,
@@ -106,7 +115,7 @@ func NewKubeVirtController(
 			Secrets:                  controller.NewUIDTrackingControllerExpectations(controller.NewControllerExpectationsWithName("Secret")),
 			ConfigMap:                controller.NewUIDTrackingControllerExpectations(controller.NewControllerExpectationsWithName("ConfigMap")),
 		},
-		installStrategyMap: make(map[string]*installstrategy.InstallStrategy),
+		installStrategyMap: make(map[string]*install.Strategy),
 		operatorNamespace:  operatorNamespace,
 		statusUpdater:      status.NewKubeVirtStatusUpdater(clientset),
 	}
@@ -507,7 +516,7 @@ func (c *KubeVirtController) deleteKubeVirt(obj interface{}) {
 	c.enqueueKubeVirt(obj)
 }
 
-func (c *KubeVirtController) updateKubeVirt(old, curr interface{}) {
+func (c *KubeVirtController) updateKubeVirt(_, curr interface{}) {
 	c.enqueueKubeVirt(curr)
 }
 
@@ -760,7 +769,7 @@ func (c *KubeVirtController) garbageCollectInstallStrategyJobs() error {
 		}
 
 		propagationPolicy := metav1.DeletePropagationForeground
-		err := batch.Jobs(job.Namespace).Delete(job.Name, &metav1.DeleteOptions{
+		err := batch.Jobs(job.Namespace).Delete(context.Background(), job.Name, metav1.DeleteOptions{
 			PropagationPolicy: &propagationPolicy,
 		})
 		if err != nil {
@@ -772,7 +781,7 @@ func (c *KubeVirtController) garbageCollectInstallStrategyJobs() error {
 	return nil
 }
 
-func (c *KubeVirtController) getInstallStrategyFromMap(config *operatorutil.KubeVirtDeploymentConfig, generation int64) (*installstrategy.InstallStrategy, bool) {
+func (c *KubeVirtController) getInstallStrategyFromMap(config *operatorutil.KubeVirtDeploymentConfig, generation int64) (*install.Strategy, bool) {
 	c.installStrategyMutex.Lock()
 	defer c.installStrategyMutex.Unlock()
 
@@ -780,7 +789,7 @@ func (c *KubeVirtController) getInstallStrategyFromMap(config *operatorutil.Kube
 	return strategy, ok
 }
 
-func (c *KubeVirtController) cacheInstallStrategyInMap(strategy *installstrategy.InstallStrategy, config *operatorutil.KubeVirtDeploymentConfig, generation int64) {
+func (c *KubeVirtController) cacheInstallStrategyInMap(strategy *install.Strategy, config *operatorutil.KubeVirtDeploymentConfig, generation int64) {
 
 	c.installStrategyMutex.Lock()
 	defer c.installStrategyMutex.Unlock()
@@ -792,7 +801,7 @@ func (c *KubeVirtController) deleteAllInstallStrategy() error {
 	for _, obj := range c.stores.InstallStrategyConfigMapCache.List() {
 		configMap, ok := obj.(*k8sv1.ConfigMap)
 		if ok && configMap.DeletionTimestamp == nil {
-			err := c.clientset.CoreV1().ConfigMaps(configMap.Namespace).Delete(configMap.Name, &metav1.DeleteOptions{})
+			err := c.clientset.CoreV1().ConfigMaps(configMap.Namespace).Delete(context.Background(), configMap.Name, metav1.DeleteOptions{})
 			if err != nil {
 				log.Log.Errorf("Failed to delete configmap %+v: %v", configMap, err)
 				return err
@@ -803,7 +812,7 @@ func (c *KubeVirtController) deleteAllInstallStrategy() error {
 	c.installStrategyMutex.Lock()
 	defer c.installStrategyMutex.Unlock()
 	// reset the local map
-	c.installStrategyMap = make(map[string]*installstrategy.InstallStrategy)
+	c.installStrategyMap = make(map[string]*install.Strategy)
 
 	return nil
 }
@@ -827,7 +836,7 @@ func (c *KubeVirtController) getInstallStrategyJob(config *operatorutil.KubeVirt
 
 // Loads install strategies into memory, and generates jobs to
 // create install strategies that don't exist yet.
-func (c *KubeVirtController) loadInstallStrategy(kv *v1.KubeVirt) (*installstrategy.InstallStrategy, bool, error) {
+func (c *KubeVirtController) loadInstallStrategy(kv *v1.KubeVirt) (*install.Strategy, bool, error) {
 
 	kvkey, err := controller.KeyFunc(kv)
 	if err != nil {
@@ -843,7 +852,7 @@ func (c *KubeVirtController) loadInstallStrategy(kv *v1.KubeVirt) (*installstrat
 	}
 
 	// 2. look for install strategy config map in cache.
-	strategy, err = installstrategy.LoadInstallStrategyFromCache(c.stores, config)
+	strategy, err = install.LoadInstallStrategyFromCache(c.stores, config)
 	if err == nil {
 		c.cacheInstallStrategyInMap(strategy, config, kv.Generation)
 		log.Log.Infof("Loaded install strategy for kubevirt version %s into cache", config.GetKubeVirtVersion())
@@ -887,7 +896,7 @@ func (c *KubeVirtController) loadInstallStrategy(kv *v1.KubeVirt) (*installstrat
 
 					c.kubeVirtExpectations.InstallStrategyJob.AddExpectedDeletion(kvkey, key)
 					propagationPolicy := metav1.DeletePropagationForeground
-					err = batch.Jobs(cachedJob.Namespace).Delete(cachedJob.Name, &metav1.DeleteOptions{
+					err = batch.Jobs(cachedJob.Namespace).Delete(context.Background(), cachedJob.Name, metav1.DeleteOptions{
 						PropagationPolicy: &propagationPolicy,
 					})
 					if err != nil {
@@ -912,7 +921,7 @@ func (c *KubeVirtController) loadInstallStrategy(kv *v1.KubeVirt) (*installstrat
 		return nil, true, err
 	}
 	c.kubeVirtExpectations.InstallStrategyJob.RaiseExpectations(kvkey, 1, 0)
-	_, err = batch.Jobs(c.operatorNamespace).Create(job)
+	_, err = batch.Jobs(c.operatorNamespace).Create(context.Background(), job, metav1.CreateOptions{})
 	if err != nil {
 		c.kubeVirtExpectations.InstallStrategyJob.LowerExpectations(kvkey, 1, 0)
 		return nil, true, err
@@ -955,7 +964,7 @@ func isUpdating(kv *v1.KubeVirt) bool {
 }
 
 func (c *KubeVirtController) syncInstallation(kv *v1.KubeVirt) error {
-	var targetStrategy *installstrategy.InstallStrategy
+	var targetStrategy *install.Strategy
 	var targetPending bool
 	var err error
 
@@ -1006,7 +1015,7 @@ func (c *KubeVirtController) syncInstallation(kv *v1.KubeVirt) error {
 		return err
 	}
 
-	reconciler, err := installstrategy.NewReconciler(kv, targetStrategy, c.stores, c.clientset, c.aggregatorClient, &c.kubeVirtExpectations)
+	reconciler, err := apply.NewReconciler(kv, targetStrategy, c.stores, c.clientset, c.aggregatorClient, &c.kubeVirtExpectations)
 	if err != nil {
 		// deployment failed
 		util.UpdateConditionsFailedError(kv, err)
@@ -1085,7 +1094,7 @@ func (c *KubeVirtController) syncDeletion(kv *v1.KubeVirt) error {
 
 	// If we still have cached objects around, more deletions need to take place.
 	if !c.stores.AllEmpty() {
-		strategy, pending, err := c.loadInstallStrategy(kv)
+		_, pending, err := c.loadInstallStrategy(kv)
 		if err != nil {
 			return err
 		}
@@ -1095,7 +1104,7 @@ func (c *KubeVirtController) syncDeletion(kv *v1.KubeVirt) error {
 			return nil
 		}
 
-		err = installstrategy.DeleteAll(kv, strategy, c.stores, c.clientset, c.aggregatorClient, &c.kubeVirtExpectations)
+		err = apply.DeleteAll(kv, c.stores, c.clientset, c.aggregatorClient, &c.kubeVirtExpectations)
 		if err != nil {
 			// deletion failed
 			util.UpdateConditionsDeletionFailed(kv, err)
@@ -1136,8 +1145,4 @@ func (c *KubeVirtController) syncDeletion(kv *v1.KubeVirt) error {
 
 	logger.Info("Processed deletion for this round")
 	return nil
-}
-
-func isKubeVirtActive(kv *v1.KubeVirt) bool {
-	return kv.Status.Phase != v1.KubeVirtPhaseDeleted
 }

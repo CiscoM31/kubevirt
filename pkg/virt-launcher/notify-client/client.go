@@ -12,7 +12,6 @@ import (
 
 	k8sv1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/json"
 	utilwait "k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/apimachinery/pkg/watch"
@@ -28,6 +27,7 @@ import (
 	agentpoller "kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/agent-poller"
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/api"
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/cli"
+	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/converter"
 	domainerrors "kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/errors"
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/util"
 )
@@ -44,6 +44,10 @@ type Notifier struct {
 	connLock         sync.Mutex
 	pipeSocketPath   string
 	legacySocketPath string
+
+	intervalTimeout time.Duration
+	sendTimeout     time.Duration
+	totalTimeout    time.Duration
 }
 
 type libvirtEvent struct {
@@ -56,8 +60,17 @@ func NewNotifier(virtShareDir string) *Notifier {
 	return &Notifier{
 		pipeSocketPath:   filepath.Join(virtShareDir, "domain-notify-pipe.sock"),
 		legacySocketPath: filepath.Join(virtShareDir, "domain-notify.sock"),
+		intervalTimeout:  defaultIntervalTimeout,
+		sendTimeout:      defaultSendTimeout,
+		totalTimeout:     defaultTotalTimeout,
 	}
 }
+
+var (
+	defaultIntervalTimeout = 1 * time.Second
+	defaultSendTimeout     = 5 * time.Second
+	defaultTotalTimeout    = 20 * time.Second
+)
 
 func negotiateVersion(infoClient info.NotifyInfoClient) (uint32, error) {
 	ctx, _ := context.WithTimeout(context.Background(), 5*time.Second)
@@ -80,6 +93,14 @@ func negotiateVersion(infoClient info.NotifyInfoClient) (uint32, error) {
 	return version, nil
 }
 
+// used by unit tests
+func (n *Notifier) SetCustomTimeouts(interval, send, total time.Duration) {
+	n.intervalTimeout = interval
+	n.sendTimeout = send
+	n.totalTimeout = total
+
+}
+
 func (n *Notifier) detectSocketPath() string {
 
 	// use the legacy domain socket if it exists. This would
@@ -95,56 +116,40 @@ func (n *Notifier) detectSocketPath() string {
 }
 
 func (n *Notifier) connect() error {
-	connectionInterval := 2 * time.Second
-	connectionTimeout := 20 * time.Second
-
-	err := utilwait.PollImmediate(connectionInterval, connectionTimeout, func() (done bool, err error) {
-		n.connLock.Lock()
-		defer n.connLock.Unlock()
-		if n.conn != nil {
-			// already connected
-			return true, nil
-		}
-
-		socketPath := n.detectSocketPath()
-
-		// dial socket
-		conn, err := grpcutil.DialSocketWithTimeout(socketPath, 5)
-		if err != nil {
-			log.Log.Reason(err).Infof("failed to dial notify socket: %s", socketPath)
-			return false, nil
-		}
-
-		version, err := negotiateVersion(info.NewNotifyInfoClient(conn))
-		if err != nil {
-			log.Log.Reason(err).Infof("failed to negotiate version")
-			conn.Close()
-			return false, nil
-		}
-
-		// create cmd v1client
-		switch version {
-		case 1:
-			client := notifyv1.NewNotifyClient(conn)
-			n.v1client = client
-			n.conn = conn
-		default:
-			conn.Close()
-			return false, fmt.Errorf("cmd v1client version %v not implemented yet", version)
-		}
-
-		log.Log.Infof("Successfully connected to domain notify socket at %s", socketPath)
-		return true, nil
-	})
-
-	return err
-}
-
-func newV1Notifier(client notifyv1.NotifyClient, conn *grpc.ClientConn) *Notifier {
-	return &Notifier{
-		v1client: client,
-		conn:     conn,
+	if n.conn != nil {
+		// already connected
+		return nil
 	}
+
+	socketPath := n.detectSocketPath()
+
+	// dial socket
+	conn, err := grpcutil.DialSocketWithTimeout(socketPath, 5)
+	if err != nil {
+		log.Log.Reason(err).Infof("failed to dial notify socket: %s", socketPath)
+		return err
+	}
+
+	version, err := negotiateVersion(info.NewNotifyInfoClient(conn))
+	if err != nil {
+		log.Log.Reason(err).Infof("failed to negotiate version")
+		conn.Close()
+		return err
+	}
+
+	// create cmd v1client
+	switch version {
+	case 1:
+		client := notifyv1.NewNotifyClient(conn)
+		n.v1client = client
+		n.conn = conn
+	default:
+		conn.Close()
+		return fmt.Errorf("cmd v1client version %v not implemented yet", version)
+	}
+
+	log.Log.Infof("Successfully connected to domain notify socket at %s", socketPath)
+	return nil
 }
 
 func (n *Notifier) SendDomainEvent(event watch.Event) error {
@@ -152,11 +157,6 @@ func (n *Notifier) SendDomainEvent(event watch.Event) error {
 	var domainJSON []byte
 	var statusJSON []byte
 	var err error
-
-	err = n.connect()
-	if err != nil {
-		return err
-	}
 
 	if event.Type == watch.Error {
 		status := event.Object.(*metav1.Status)
@@ -179,9 +179,30 @@ func (n *Notifier) SendDomainEvent(event watch.Event) error {
 		EventType:  string(event.Type),
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	response, err := n.v1client.HandleDomainEvent(ctx, &request)
+	var response *notifyv1.Response
+	err = utilwait.PollImmediate(n.intervalTimeout, n.totalTimeout, func() (done bool, err error) {
+		n.connLock.Lock()
+		defer n.connLock.Unlock()
+
+		err = n.connect()
+		if err != nil {
+			log.Log.Reason(err).Errorf("Failed to connect to notify server")
+			return false, nil
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), n.sendTimeout)
+		defer cancel()
+		response, err = n.v1client.HandleDomainEvent(ctx, &request)
+
+		if err != nil {
+			log.Log.Reason(err).Errorf("Failed to send domain notify event. closing connection.")
+			n._close()
+			return false, nil
+		}
+
+		return true, nil
+
+	})
 
 	if err != nil {
 		log.Log.Reason(err).Infof("Failed to send domain notify event")
@@ -199,7 +220,7 @@ func newWatchEventError(err error) watch.Event {
 }
 
 func eventCallback(c cli.Connection, domain *api.Domain, libvirtEvent libvirtEvent, client *Notifier, events chan watch.Event,
-	interfaceStatus []api.InterfaceStatus, osInfo *api.GuestOSInfo) {
+	interfaceStatus []api.InterfaceStatus, osInfo *api.GuestOSInfo, vmi *v1.VirtualMachineInstance) {
 	d, err := c.LookupDomainByName(util.DomainFromNamespaceName(domain.ObjectMeta.Namespace, domain.ObjectMeta.Name))
 	if err != nil {
 		if !domainerrors.IsNotFound(err) {
@@ -248,6 +269,28 @@ func eventCallback(c cli.Connection, domain *api.Domain, libvirtEvent libvirtEve
 		watchEvent := watch.Event{Type: watch.Modified, Object: domain}
 		client.SendDomainEvent(watchEvent)
 		updateEvents(watchEvent, domain, events)
+	case api.ReasonPausedIOError:
+		domainDisksWithErrors, err := d.GetDiskErrors(0)
+		if err != nil {
+			log.Log.Reason(err).Error("Could not get disks with errors")
+		}
+		for _, disk := range domainDisksWithErrors {
+			volumeName := converter.GetVolumeNameByTarget(domain, disk.Disk)
+			var reasonError string
+			switch disk.Error {
+			case libvirt.DOMAIN_DISK_ERROR_NONE:
+				continue
+			case libvirt.DOMAIN_DISK_ERROR_UNSPEC:
+				reasonError = fmt.Sprintf("VM Paused due to IO error at the volume: %s", volumeName)
+			case libvirt.DOMAIN_DISK_ERROR_NO_SPACE:
+				reasonError = fmt.Sprintf("VM Paused due to not enough space on volume: %s", volumeName)
+			}
+			err = client.SendK8sEvent(vmi, "Warning", "IOerror", reasonError)
+			if err != nil {
+				log.Log.Reason(err).Error(fmt.Sprintf("Could not send k8s event"))
+			}
+			client.SendDomainEvent(newWatchEventError(fmt.Errorf(reasonError)))
+		}
 	default:
 		if libvirtEvent.Event != nil {
 			if libvirtEvent.Event.Event == libvirt.DOMAIN_EVENT_DEFINED && libvirt.DomainEventDefinedDetailType(libvirtEvent.Event.Detail) == libvirt.DOMAIN_EVENT_DEFINED_ADDED {
@@ -294,7 +337,7 @@ func updateEventsClosure() func(event watch.Event, domain *api.Domain, events ch
 func (n *Notifier) StartDomainNotifier(
 	domainConn cli.Connection,
 	deleteNotificationSent chan watch.Event,
-	vmiUID types.UID,
+	vmi *v1.VirtualMachineInstance,
 	domainName string,
 	agentStore *agentpoller.AsyncAgentStore,
 	qemuAgentSysInterval time.Duration,
@@ -313,7 +356,7 @@ func (n *Notifier) StartDomainNotifier(
 
 	agentPoller := agentpoller.CreatePoller(
 		domainConn,
-		vmiUID,
+		vmi.UID,
 		domainName,
 		agentStore,
 		qemuAgentSysInterval,
@@ -329,8 +372,8 @@ func (n *Notifier) StartDomainNotifier(
 		for {
 			select {
 			case event := <-eventChan:
-				domainCache = util.NewDomainFromName(event.Domain, vmiUID)
-				eventCallback(domainConn, domainCache, event, n, deleteNotificationSent, interfaceStatuses, guestOsInfo)
+				domainCache = util.NewDomainFromName(event.Domain, vmi.UID)
+				eventCallback(domainConn, domainCache, event, n, deleteNotificationSent, interfaceStatuses, guestOsInfo, vmi)
 				log.Log.Infof("Domain name event: %v", domainCache.Spec.Name)
 				if event.AgentEvent != nil {
 					if event.AgentEvent.State == libvirt.CONNECT_DOMAIN_EVENT_AGENT_LIFECYCLE_STATE_CONNECTED {
@@ -347,7 +390,7 @@ func (n *Notifier) StartDomainNotifier(
 				}
 
 				eventCallback(domainConn, domainCache, libvirtEvent{}, n, deleteNotificationSent,
-					interfaceStatuses, guestOsInfo)
+					interfaceStatuses, guestOsInfo, vmi)
 			case <-reconnectChan:
 				n.SendDomainEvent(newWatchEventError(fmt.Errorf("Libvirt reconnect, domain %s", domainName)))
 			}
@@ -434,12 +477,6 @@ func (n *Notifier) StartDomainNotifier(
 }
 
 func (n *Notifier) SendK8sEvent(vmi *v1.VirtualMachineInstance, severity string, reason string, message string) error {
-
-	err := n.connect()
-	if err != nil {
-		return err
-	}
-
 	vmiRef, err := reference.GetReference(v1.Scheme, vmi)
 	if err != nil {
 		return err
@@ -461,9 +498,29 @@ func (n *Notifier) SendK8sEvent(vmi *v1.VirtualMachineInstance, severity string,
 		EventJSON: json,
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	response, err := n.v1client.HandleK8SEvent(ctx, &request)
+	var response *notifyv1.Response
+	err = utilwait.PollImmediate(n.intervalTimeout, n.totalTimeout, func() (done bool, err error) {
+		n.connLock.Lock()
+		defer n.connLock.Unlock()
+
+		err = n.connect()
+		if err != nil {
+			log.Log.Reason(err).Errorf("Failed to connect to notify server")
+			return false, nil
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), n.sendTimeout)
+		defer cancel()
+		response, err = n.v1client.HandleK8SEvent(ctx, &request)
+
+		if err != nil {
+			log.Log.Reason(err).Errorf("Failed to send k8s notify event. closing connection.")
+			n._close()
+			return false, nil
+		}
+
+		return true, nil
+	})
 
 	if err != nil {
 		return err
@@ -475,12 +532,16 @@ func (n *Notifier) SendK8sEvent(vmi *v1.VirtualMachineInstance, severity string,
 	return nil
 }
 
-func (n *Notifier) Close() {
-	n.connLock.Lock()
-	defer n.connLock.Unlock()
-
+func (n *Notifier) _close() {
 	if n.conn != nil {
 		n.conn.Close()
 		n.conn = nil
 	}
+}
+
+func (n *Notifier) Close() {
+	n.connLock.Lock()
+	defer n.connLock.Unlock()
+	n._close()
+
 }

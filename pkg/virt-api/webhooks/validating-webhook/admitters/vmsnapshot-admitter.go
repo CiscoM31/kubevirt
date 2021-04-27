@@ -24,7 +24,7 @@ import (
 	"fmt"
 	"reflect"
 
-	"k8s.io/api/admission/v1beta1"
+	admissionv1 "k8s.io/api/admission/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	k8sfield "k8s.io/apimachinery/pkg/util/validation/field"
@@ -51,13 +51,13 @@ func NewVMSnapshotAdmitter(config *virtconfig.ClusterConfig, client kubecli.Kube
 }
 
 // Admit validates an AdmissionReview
-func (admitter *VMSnapshotAdmitter) Admit(ar *v1beta1.AdmissionReview) *v1beta1.AdmissionResponse {
+func (admitter *VMSnapshotAdmitter) Admit(ar *admissionv1.AdmissionReview) *admissionv1.AdmissionResponse {
 	if ar.Request.Resource.Group != snapshotv1.SchemeGroupVersion.Group ||
 		ar.Request.Resource.Resource != "virtualmachinesnapshots" {
 		return webhookutils.ToAdmissionResponseError(fmt.Errorf("unexpected resource %+v", ar.Request.Resource))
 	}
 
-	if ar.Request.Operation == v1beta1.Create && !admitter.Config.SnapshotEnabled() {
+	if ar.Request.Operation == admissionv1.Create && !admitter.Config.SnapshotEnabled() {
 		return webhookutils.ToAdmissionResponseError(fmt.Errorf("snapshot feature gate not enabled"))
 	}
 
@@ -71,7 +71,7 @@ func (admitter *VMSnapshotAdmitter) Admit(ar *v1beta1.AdmissionReview) *v1beta1.
 	var causes []metav1.StatusCause
 
 	switch ar.Request.Operation {
-	case v1beta1.Create:
+	case admissionv1.Create:
 		sourceField := k8sfield.NewPath("spec", "source")
 
 		if vmSnapshot.Spec.Source.APIGroup == nil {
@@ -112,7 +112,7 @@ func (admitter *VMSnapshotAdmitter) Admit(ar *v1beta1.AdmissionReview) *v1beta1.
 			}
 		}
 
-	case v1beta1.Update:
+	case admissionv1.Update:
 		prevObj := &snapshotv1.VirtualMachineSnapshot{}
 		err = json.Unmarshal(ar.Request.OldObject.Raw, prevObj)
 		if err != nil {
@@ -136,14 +136,14 @@ func (admitter *VMSnapshotAdmitter) Admit(ar *v1beta1.AdmissionReview) *v1beta1.
 		return webhookutils.ToAdmissionResponse(causes)
 	}
 
-	reviewResponse := v1beta1.AdmissionResponse{
+	reviewResponse := admissionv1.AdmissionResponse{
 		Allowed: true,
 	}
 	return &reviewResponse
 }
 
 func (admitter *VMSnapshotAdmitter) validateCreateVM(field *k8sfield.Path, namespace, name string) ([]metav1.StatusCause, error) {
-	vm, err := admitter.Client.VirtualMachine(namespace).Get(name, &metav1.GetOptions{})
+	_, err := admitter.Client.VirtualMachine(namespace).Get(name, &metav1.GetOptions{})
 	if errors.IsNotFound(err) {
 		return []metav1.StatusCause{
 			{
@@ -158,21 +158,5 @@ func (admitter *VMSnapshotAdmitter) validateCreateVM(field *k8sfield.Path, names
 		return nil, err
 	}
 
-	var causes []metav1.StatusCause
-
-	rs, err := vm.RunStrategy()
-	if err != nil {
-		return nil, err
-	}
-
-	if rs != v1.RunStrategyHalted {
-		cause := metav1.StatusCause{
-			Type:    metav1.CauseTypeFieldValueInvalid,
-			Message: fmt.Sprintf("VirtualMachine %q is running", name),
-			Field:   field.String(),
-		}
-		causes = append(causes, cause)
-	}
-
-	return causes, nil
+	return []metav1.StatusCause{}, nil
 }

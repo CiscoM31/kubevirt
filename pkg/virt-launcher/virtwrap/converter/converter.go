@@ -20,11 +20,8 @@
 package converter
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
-	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -32,10 +29,15 @@ import (
 	"strings"
 	"syscall"
 
+	"golang.org/x/sys/unix"
+
+	"kubevirt.io/kubevirt/pkg/virt-controller/services"
+
 	k8sv1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/api"
+	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/device"
 
 	v1 "kubevirt.io/client-go/api/v1"
 	"kubevirt.io/client-go/log"
@@ -50,26 +52,27 @@ import (
 	hostdisk "kubevirt.io/kubevirt/pkg/host-disk"
 	"kubevirt.io/kubevirt/pkg/ignition"
 	"kubevirt.io/kubevirt/pkg/util"
-	hwutil "kubevirt.io/kubevirt/pkg/util/hardware"
-	"kubevirt.io/kubevirt/pkg/util/net/dns"
 )
 
 type HostDeviceType string
 
+// The location of uefi boot loader on ARM64 is different from that on x86
 const (
-	CPUModeHostPassthrough                = "host-passthrough"
-	CPUModeHostModel                      = "host-model"
-	defaultIOThread                       = uint(1)
-	EFICode                               = "OVMF_CODE.fd"
-	EFIVars                               = "OVMF_VARS.fd"
-	EFICodeSecureBoot                     = "OVMF_CODE.secboot.fd"
-	EFIVarsSecureBoot                     = "OVMF_VARS.secboot.fd"
-	HostDevicePCI          HostDeviceType = "pci"
-	HostDeviceMDEV         HostDeviceType = "mdev"
-	resolvConf                            = "/etc/resolv.conf"
+	defaultIOThread                  = uint(1)
+	EFICode                          = "OVMF_CODE.fd"
+	EFIVars                          = "OVMF_VARS.fd"
+	EFICodeAARCH64                   = "AAVMF_CODE.fd"
+	EFIVarsAARCH64                   = "AAVMF_VARS.fd"
+	EFICodeSecureBoot                = "OVMF_CODE.secboot.fd"
+	EFIVarsSecureBoot                = "OVMF_VARS.secboot.fd"
+	HostDevicePCI     HostDeviceType = "pci"
+	HostDeviceMDEV    HostDeviceType = "mdev"
+	resolvConf                       = "/etc/resolv.conf"
 )
+
 const (
-	multiQueueMaxQueues = uint32(256)
+	multiQueueMaxQueues  = uint32(256)
+	QEMUSeaBiosDebugPipe = "/QEMUSeaBiosDebugPipe"
 )
 
 type deviceNamer struct {
@@ -93,7 +96,7 @@ type ConverterContext struct {
 	HotplugVolumes        map[string]v1.VolumeStatus
 	PermanentVolumes      map[string]v1.VolumeStatus
 	DiskType              map[string]*containerdisk.DiskInfo
-	SRIOVDevices          map[string][]string
+	SRIOVDevices          []api.HostDevice
 	SMBios                *cmdv1.SMBios
 	GpuDevices            []string
 	VgpuDevices           []string
@@ -102,6 +105,30 @@ type ConverterContext struct {
 	OVMFPath              string
 	MemBalloonStatsPeriod uint
 	UseVirtioTransitional bool
+	VolumesDiscardIgnore  []string
+}
+
+func contains(volumes []string, name string) bool {
+	for _, v := range volumes {
+		if name == v {
+			return true
+		}
+	}
+	return false
+}
+
+func isPPC64(arch string) bool {
+	if arch == "ppc64le" {
+		return true
+	}
+	return false
+}
+
+func isARM64(arch string) bool {
+	if arch == "arm64" {
+		return true
+	}
+	return false
 }
 
 // pop next device ID or address from a list
@@ -172,7 +199,7 @@ func Convert_v1_Disk_To_api_Disk(c *ConverterContext, diskDevice *v1.Disk, disk 
 			if diskDevice.Disk.Bus != "virtio" {
 				return fmt.Errorf("setting a pci address is not allowed for non-virtio bus types, for disk %s", diskDevice.Name)
 			}
-			addr, err := decoratePciAddressField(diskDevice.Disk.PciAddress)
+			addr, err := device.NewPciAddressField(diskDevice.Disk.PciAddress)
 			if err != nil {
 				return fmt.Errorf("failed to configure disk %s: %v", diskDevice.Name, err)
 			}
@@ -206,14 +233,20 @@ func Convert_v1_Disk_To_api_Disk(c *ConverterContext, diskDevice *v1.Disk, disk 
 		}
 	}
 	disk.Driver = &api.DiskDriver{
-		Name:  "qemu",
-		Cache: string(diskDevice.Cache),
-		IO:    string(diskDevice.IO),
+		Name:        "qemu",
+		Cache:       string(diskDevice.Cache),
+		IO:          string(diskDevice.IO),
+		ErrorPolicy: "stop",
+	}
+	if diskDevice.Disk != nil || diskDevice.LUN != nil {
+		if !contains(c.VolumesDiscardIgnore, diskDevice.Name) {
+			disk.Driver.Discard = "unmap"
+		}
 	}
 	if numQueues != nil && disk.Target.Bus == "virtio" {
 		disk.Driver.Queues = numQueues
 	}
-	disk.Alias = &api.Alias{Name: diskDevice.Name}
+	disk.Alias = api.NewUserDefinedAlias(diskDevice.Name)
 	if diskDevice.BootOrder != nil {
 		disk.BootOrder = &api.BootOrder{Order: *diskDevice.BootOrder}
 	}
@@ -231,6 +264,88 @@ func checkDirectIOFlag(path string) bool {
 	}
 	defer util.CloseIOAndCheckErr(f, nil)
 	return true
+}
+
+func Convert_v1_BlockSize_To_api_BlockIO(source *v1.Disk, disk *api.Disk) error {
+	if source.BlockSize == nil {
+		return nil
+	}
+
+	if blockSize := source.BlockSize.Custom; blockSize != nil {
+		disk.BlockIO = &api.BlockIO{
+			LogicalBlockSize:  blockSize.Logical,
+			PhysicalBlockSize: blockSize.Physical,
+		}
+	} else if matchFeature := source.BlockSize.MatchVolume; matchFeature != nil && (matchFeature.Enabled == nil || *matchFeature.Enabled) {
+		blockIO, err := getOptimalBlockIO(disk)
+		if err != nil {
+			return fmt.Errorf("failed to configure disk with block size detection enabled: %v", err)
+		}
+		disk.BlockIO = blockIO
+	}
+	return nil
+}
+
+func getOptimalBlockIO(disk *api.Disk) (*api.BlockIO, error) {
+	if disk.Source.Dev != "" {
+		return getOptimalBlockIOForDevice(disk.Source.Dev)
+	} else if disk.Source.File != "" {
+		return getOptimalBlockIOForFile(disk.Source.File)
+	}
+	return nil, fmt.Errorf("disk is neither a block device nor a file")
+}
+
+// getOptimalBlockIOForDevice determines the optimal sizes based on the physical device properties.
+func getOptimalBlockIOForDevice(path string) (*api.BlockIO, error) {
+	f, err := os.OpenFile(path, syscall.O_RDONLY, 0)
+	if err != nil {
+		return nil, fmt.Errorf("unable to open device %v: %v", path, err)
+	}
+	defer util.CloseIOAndCheckErr(f, nil)
+
+	logicalSize, err := unix.IoctlGetInt(int(f.Fd()), unix.BLKSSZGET)
+	if err != nil {
+		return nil, fmt.Errorf("unable to get logical block size from device %v: %v", path, err)
+	}
+	physicalSize, err := unix.IoctlGetInt(int(f.Fd()), unix.BLKBSZGET)
+	if err != nil {
+		return nil, fmt.Errorf("unable to get physical block size from device %v: %v", path, err)
+	}
+
+	log.Log.Infof("Detected logical size of %d and physical size of %d for device %v", logicalSize, physicalSize, path)
+
+	if logicalSize == 0 && physicalSize == 0 {
+		return nil, fmt.Errorf("block sizes returned by device %v are 0", path)
+	}
+	blockIO := &api.BlockIO{
+		LogicalBlockSize:  uint(logicalSize),
+		PhysicalBlockSize: uint(physicalSize),
+	}
+	if logicalSize == 0 || physicalSize == 0 {
+		if logicalSize > physicalSize {
+			log.Log.Infof("Invalid physical size %d. Matching it to the logical size %d", physicalSize, logicalSize)
+			blockIO.PhysicalBlockSize = uint(logicalSize)
+		} else {
+			log.Log.Infof("Invalid logical size %d. Matching it to the physical size %d", logicalSize, physicalSize)
+			blockIO.LogicalBlockSize = uint(physicalSize)
+		}
+	}
+	return blockIO, nil
+}
+
+// getOptimalBlockIOForFile determines the optimal sizes based on the filesystem settings
+// the VM's disk image is residing on. A filesystem does not differentiate between sizes.
+// The physical size will always match the logical size. The rest is up to the filesystem.
+func getOptimalBlockIOForFile(path string) (*api.BlockIO, error) {
+	var statfs syscall.Statfs_t
+	err := syscall.Statfs(path, &statfs)
+	if err != nil {
+		return nil, fmt.Errorf("failed to stat file %v: %v", path, err)
+	}
+	return &api.BlockIO{
+		LogicalBlockSize:  uint(statfs.Bsize),
+		PhysicalBlockSize: uint(statfs.Bsize),
+	}, nil
 }
 
 func SetDriverCacheMode(disk *api.Disk) error {
@@ -411,8 +526,12 @@ func Convert_v1_Volume_To_api_Disk(source *v1.Volume, disk *api.Disk, c *Convert
 		return Convert_v1_CloudInitSource_To_api_Disk(source.VolumeSource, disk, c)
 	}
 
+	if source.Sysprep != nil {
+		return Convert_v1_SysprepSource_To_api_Disk(source.Name, disk)
+	}
+
 	if source.HostDisk != nil {
-		return Convert_v1_HostDisk_To_api_Disk(source.Name, source.HostDisk.Path, disk, c)
+		return Convert_v1_HostDisk_To_api_Disk(source.Name, source.HostDisk.Path, disk)
 	}
 
 	if source.PersistentVolumeClaim != nil {
@@ -424,10 +543,10 @@ func Convert_v1_Volume_To_api_Disk(source *v1.Volume, disk *api.Disk, c *Convert
 	}
 
 	if source.Ephemeral != nil {
-		return Convert_v1_EphemeralVolumeSource_To_api_Disk(source.Name, source.Ephemeral, disk, c)
+		return Convert_v1_EphemeralVolumeSource_To_api_Disk(source.Name, disk, c)
 	}
 	if source.EmptyDisk != nil {
-		return Convert_v1_EmptyDiskSource_To_api_Disk(source.Name, source.EmptyDisk, disk, c)
+		return Convert_v1_EmptyDiskSource_To_api_Disk(source.Name, source.EmptyDisk, disk)
 	}
 	if source.ConfigMap != nil {
 		return Convert_v1_Config_To_api_Disk(source.Name, disk, config.ConfigMap)
@@ -442,7 +561,7 @@ func Convert_v1_Volume_To_api_Disk(source *v1.Volume, disk *api.Disk, c *Convert
 		return Convert_v1_Config_To_api_Disk(source.Name, disk, config.ServiceAccount)
 	}
 
-	return fmt.Errorf("disk %s references an unsupported source", disk.Alias.Name)
+	return fmt.Errorf("disk %s references an unsupported source", disk.Alias.GetName())
 }
 
 // Convert_v1_Hotplug_Volume_To_api_Disk convers a hotplug volume to an api disk
@@ -460,12 +579,13 @@ func Convert_v1_Hotplug_Volume_To_api_Disk(source *v1.Volume, disk *api.Disk, c 
 	if source.DataVolume != nil {
 		return Convert_v1_Hotplug_DataVolume_To_api_Disk(source.Name, disk, c)
 	}
-	return fmt.Errorf("hotplug disk %s references an unsupported source", disk.Alias.Name)
+	return fmt.Errorf("hotplug disk %s references an unsupported source", disk.Alias.GetName())
 }
 
 func Convert_v1_Config_To_api_Disk(volumeName string, disk *api.Disk, configType config.Type) error {
 	disk.Type = "file"
 	disk.Driver.Type = "raw"
+	disk.Driver.ErrorPolicy = "stop"
 	switch configType {
 	case config.ConfigMap:
 		disk.Source.File = config.GetConfigMapDiskPath(volumeName)
@@ -506,75 +626,103 @@ func GetHotplugBlockDeviceVolumePath(volumeName string) string {
 
 func Convert_v1_PersistentVolumeClaim_To_api_Disk(name string, disk *api.Disk, c *ConverterContext) error {
 	if c.IsBlockPVC[name] {
-		return Convert_v1_BlockVolumeSource_To_api_Disk(name, disk, c)
+		return Convert_v1_BlockVolumeSource_To_api_Disk(name, disk, c.VolumesDiscardIgnore)
 	}
-	return Convert_v1_FilesystemVolumeSource_To_api_Disk(name, disk, c)
+	return Convert_v1_FilesystemVolumeSource_To_api_Disk(name, disk, c.VolumesDiscardIgnore)
 }
 
 // Convert_v1_Hotplug_PersistentVolumeClaim_To_api_Disk converts a Hotplugged PVC to an api disk
 func Convert_v1_Hotplug_PersistentVolumeClaim_To_api_Disk(name string, disk *api.Disk, c *ConverterContext) error {
-	if c.IsBlockDV[name] {
-		return Convert_v1_Hotplug_BlockVolumeSource_To_api_Disk(name, disk, c)
+	if c.IsBlockPVC[name] {
+		return Convert_v1_Hotplug_BlockVolumeSource_To_api_Disk(name, disk, c.VolumesDiscardIgnore)
 	}
-	return Convert_v1_Hotplug_FilesystemVolumeSource_To_api_Disk(name, disk, c)
+	return Convert_v1_Hotplug_FilesystemVolumeSource_To_api_Disk(name, disk, c.VolumesDiscardIgnore)
 }
 
 func Convert_v1_DataVolume_To_api_Disk(name string, disk *api.Disk, c *ConverterContext) error {
 	if c.IsBlockDV[name] {
-		return Convert_v1_BlockVolumeSource_To_api_Disk(name, disk, c)
+		return Convert_v1_BlockVolumeSource_To_api_Disk(name, disk, c.VolumesDiscardIgnore)
 	}
-	return Convert_v1_FilesystemVolumeSource_To_api_Disk(name, disk, c)
+	return Convert_v1_FilesystemVolumeSource_To_api_Disk(name, disk, c.VolumesDiscardIgnore)
 }
 
 // Convert_v1_Hotplug_DataVolume_To_api_Disk converts a Hotplugged DataVolume to an api disk
 func Convert_v1_Hotplug_DataVolume_To_api_Disk(name string, disk *api.Disk, c *ConverterContext) error {
 	if c.IsBlockDV[name] {
-		return Convert_v1_Hotplug_BlockVolumeSource_To_api_Disk(name, disk, c)
+		return Convert_v1_Hotplug_BlockVolumeSource_To_api_Disk(name, disk, c.VolumesDiscardIgnore)
 	}
-	return Convert_v1_Hotplug_FilesystemVolumeSource_To_api_Disk(name, disk, c)
+	return Convert_v1_Hotplug_FilesystemVolumeSource_To_api_Disk(name, disk, c.VolumesDiscardIgnore)
 }
 
 // Convert_v1_FilesystemVolumeSource_To_api_Disk takes a FS source and builds the domain Disk representation
-func Convert_v1_FilesystemVolumeSource_To_api_Disk(volumeName string, disk *api.Disk, c *ConverterContext) error {
+func Convert_v1_FilesystemVolumeSource_To_api_Disk(volumeName string, disk *api.Disk, volumesDiscardIgnore []string) error {
 	disk.Type = "file"
 	disk.Driver.Type = "raw"
+	disk.Driver.ErrorPolicy = "stop"
 	disk.Source.File = GetFilesystemVolumePath(volumeName)
+	if !contains(volumesDiscardIgnore, volumeName) {
+		disk.Driver.Discard = "unmap"
+	}
 	return nil
 }
 
 // Convert_v1_Hotplug_FilesystemVolumeSource_To_api_Disk takes a FS source and builds the KVM Disk representation
-func Convert_v1_Hotplug_FilesystemVolumeSource_To_api_Disk(volumeName string, disk *api.Disk, c *ConverterContext) error {
+func Convert_v1_Hotplug_FilesystemVolumeSource_To_api_Disk(volumeName string, disk *api.Disk, volumesDiscardIgnore []string) error {
 	disk.Type = "file"
 	disk.Driver.Type = "raw"
+	disk.Driver.ErrorPolicy = "stop"
+	if !contains(volumesDiscardIgnore, volumeName) {
+		disk.Driver.Discard = "unmap"
+	}
 	disk.Source.File = GetHotplugFilesystemVolumePath(volumeName)
 	return nil
 }
 
-func Convert_v1_BlockVolumeSource_To_api_Disk(volumeName string, disk *api.Disk, c *ConverterContext) error {
+func Convert_v1_BlockVolumeSource_To_api_Disk(volumeName string, disk *api.Disk, volumesDiscardIgnore []string) error {
 	disk.Type = "block"
 	disk.Driver.Type = "raw"
+	disk.Driver.ErrorPolicy = "stop"
+	if !contains(volumesDiscardIgnore, volumeName) {
+		disk.Driver.Discard = "unmap"
+	}
 	disk.Source.Dev = GetBlockDeviceVolumePath(volumeName)
 	return nil
 }
 
 // Convert_v1_Hotplug_BlockVolumeSource_To_api_Disk takes a block device source and builds the domain Disk representation
-func Convert_v1_Hotplug_BlockVolumeSource_To_api_Disk(volumeName string, disk *api.Disk, c *ConverterContext) error {
+func Convert_v1_Hotplug_BlockVolumeSource_To_api_Disk(volumeName string, disk *api.Disk, volumesDiscardIgnore []string) error {
 	disk.Type = "block"
 	disk.Driver.Type = "raw"
+	disk.Driver.ErrorPolicy = "stop"
+	if !contains(volumesDiscardIgnore, volumeName) {
+		disk.Driver.Discard = "unmap"
+	}
 	disk.Source.Dev = GetHotplugBlockDeviceVolumePath(volumeName)
 	return nil
 }
 
-func Convert_v1_HostDisk_To_api_Disk(volumeName string, path string, disk *api.Disk, c *ConverterContext) error {
+func Convert_v1_HostDisk_To_api_Disk(volumeName string, path string, disk *api.Disk) error {
 	disk.Type = "file"
 	disk.Driver.Type = "raw"
+	disk.Driver.ErrorPolicy = "stop"
 	disk.Source.File = hostdisk.GetMountedHostDiskPath(volumeName, path)
+	return nil
+}
+
+func Convert_v1_SysprepSource_To_api_Disk(volumeName string, disk *api.Disk) error {
+	if disk.Type == "lun" {
+		return fmt.Errorf("device %s is of type lun. Not compatible with a file based disk", disk.Alias.GetName())
+	}
+
+	disk.Source.File = config.GetSysprepDiskPath(volumeName)
+	disk.Type = "file"
+	disk.Driver.Type = "raw"
 	return nil
 }
 
 func Convert_v1_CloudInitSource_To_api_Disk(source v1.VolumeSource, disk *api.Disk, c *ConverterContext) error {
 	if disk.Type == "lun" {
-		return fmt.Errorf("device %s is of type lun. Not compatible with a file based disk", disk.Alias.Name)
+		return fmt.Errorf("device %s is of type lun. Not compatible with a file based disk", disk.Alias.GetName())
 	}
 
 	var dataSource cloudinit.DataSourceType
@@ -589,34 +737,32 @@ func Convert_v1_CloudInitSource_To_api_Disk(source v1.VolumeSource, disk *api.Di
 	disk.Source.File = cloudinit.GetIsoFilePath(dataSource, c.VirtualMachine.Name, c.VirtualMachine.Namespace)
 	disk.Type = "file"
 	disk.Driver.Type = "raw"
+	disk.Driver.ErrorPolicy = "stop"
 	return nil
 }
 
-func Convert_v1_IgnitionData_To_api_Disk(disk *api.Disk, c *ConverterContext) error {
-	disk.Source.File = fmt.Sprintf("%s/%s", ignition.GetDomainBasePath(c.VirtualMachine.Name, c.VirtualMachine.Namespace), c.VirtualMachine.Annotations[v1.IgnitionAnnotation])
-	disk.Type = "file"
-	disk.Driver.Type = "raw"
-	return nil
-}
-
-func Convert_v1_EmptyDiskSource_To_api_Disk(volumeName string, _ *v1.EmptyDiskSource, disk *api.Disk, c *ConverterContext) error {
+func Convert_v1_EmptyDiskSource_To_api_Disk(volumeName string, _ *v1.EmptyDiskSource, disk *api.Disk) error {
 	if disk.Type == "lun" {
-		return fmt.Errorf("device %s is of type lun. Not compatible with a file based disk", disk.Alias.Name)
+		return fmt.Errorf("device %s is of type lun. Not compatible with a file based disk", disk.Alias.GetName())
 	}
 
 	disk.Type = "file"
 	disk.Driver.Type = "qcow2"
+	disk.Driver.Discard = "unmap"
 	disk.Source.File = emptydisk.FilePathForVolumeName(volumeName)
+	disk.Driver.ErrorPolicy = "stop"
 
 	return nil
 }
 
 func Convert_v1_ContainerDiskSource_To_api_Disk(volumeName string, _ *v1.ContainerDiskSource, disk *api.Disk, c *ConverterContext, diskIndex int) error {
 	if disk.Type == "lun" {
-		return fmt.Errorf("device %s is of type lun. Not compatible with a file based disk", disk.Alias.Name)
+		return fmt.Errorf("device %s is of type lun. Not compatible with a file based disk", disk.Alias.GetName())
 	}
 	disk.Type = "file"
 	disk.Driver.Type = "qcow2"
+	disk.Driver.ErrorPolicy = "stop"
+	disk.Driver.Discard = "unmap"
 	disk.Source.File = ephemeraldisk.GetFilePath(volumeName)
 	disk.BackingStore = &api.BackingStore{
 		Format: &api.BackingStoreFormat{},
@@ -632,17 +778,22 @@ func Convert_v1_ContainerDiskSource_To_api_Disk(volumeName string, _ *v1.Contain
 	return nil
 }
 
-func Convert_v1_EphemeralVolumeSource_To_api_Disk(volumeName string, source *v1.EphemeralVolumeSource, disk *api.Disk, c *ConverterContext) error {
+func Convert_v1_EphemeralVolumeSource_To_api_Disk(volumeName string, disk *api.Disk, c *ConverterContext) error {
 	disk.Type = "file"
 	disk.Driver.Type = "qcow2"
+	disk.Driver.ErrorPolicy = "stop"
+	disk.Driver.Discard = "unmap"
 	disk.Source.File = ephemeraldisk.GetFilePath(volumeName)
 	disk.BackingStore = &api.BackingStore{
 		Format: &api.BackingStoreFormat{},
 		Source: &api.DiskSource{},
 	}
+	if !contains(c.VolumesDiscardIgnore, volumeName) {
+		disk.Driver.Discard = "unmap"
+	}
 
 	backingDisk := &api.Disk{Driver: &api.DiskDriver{}}
-	err := Convert_v1_FilesystemVolumeSource_To_api_Disk(volumeName, backingDisk, c)
+	err := Convert_v1_FilesystemVolumeSource_To_api_Disk(volumeName, backingDisk, c.VolumesDiscardIgnore)
 	if err != nil {
 		return err
 	}
@@ -655,9 +806,7 @@ func Convert_v1_EphemeralVolumeSource_To_api_Disk(volumeName string, source *v1.
 }
 
 func Convert_v1_Watchdog_To_api_Watchdog(source *v1.Watchdog, watchdog *api.Watchdog, _ *ConverterContext) error {
-	watchdog.Alias = &api.Alias{
-		Name: source.Name,
-	}
+	watchdog.Alias = api.NewUserDefinedAlias(source.Name)
 	if source.I6300ESB != nil {
 		watchdog.Model = "i6300esb"
 		watchdog.Action = string(source.I6300ESB.Action)
@@ -682,7 +831,7 @@ func Convert_v1_Rng_To_api_Rng(_ *v1.Rng, rng *api.Rng, c *ConverterContext) err
 	return nil
 }
 
-func Convert_v1_Input_To_api_InputDevice(input *v1.Input, inputDevice *api.Input, c *ConverterContext) error {
+func Convert_v1_Input_To_api_InputDevice(input *v1.Input, inputDevice *api.Input) error {
 	if input.Bus != "virtio" && input.Bus != "usb" && input.Bus != "" {
 		return fmt.Errorf("input contains unsupported bus %s", input.Bus)
 	}
@@ -697,7 +846,7 @@ func Convert_v1_Input_To_api_InputDevice(input *v1.Input, inputDevice *api.Input
 
 	inputDevice.Bus = input.Bus
 	inputDevice.Type = input.Type
-	inputDevice.Alias = &api.Alias{Name: input.Name}
+	inputDevice.Alias = api.NewUserDefinedAlias(input.Name)
 
 	if input.Bus == "virtio" {
 		inputDevice.Model = "virtio"
@@ -705,7 +854,7 @@ func Convert_v1_Input_To_api_InputDevice(input *v1.Input, inputDevice *api.Input
 	return nil
 }
 
-func Convert_v1_Clock_To_api_Clock(source *v1.Clock, clock *api.Clock, c *ConverterContext) error {
+func Convert_v1_Clock_To_api_Clock(source *v1.Clock, clock *api.Clock) error {
 	if source.UTC != nil {
 		clock.Offset = "utc"
 		if source.UTC.OffsetSeconds != nil {
@@ -778,7 +927,7 @@ func Convert_v1_Features_To_api_Features(source *v1.Features, features *api.Feat
 	}
 	if source.Hyperv != nil {
 		features.Hyperv = &api.FeatureHyperv{}
-		err := Convert_v1_FeatureHyperv_To_api_FeatureHyperv(source.Hyperv, features.Hyperv, c)
+		err := Convert_v1_FeatureHyperv_To_api_FeatureHyperv(source.Hyperv, features.Hyperv)
 		if err != nil {
 			return nil
 		}
@@ -790,16 +939,21 @@ func Convert_v1_Features_To_api_Features(source *v1.Features, features *api.Feat
 			},
 		}
 	}
+	if source.Pvspinlock != nil {
+		features.PVSpinlock = &api.FeaturePVSpinlock{
+			State: boolToOnOff(source.Pvspinlock.Enabled, true),
+		}
+	}
 	return nil
 }
 
-func Convert_v1_Machine_To_api_OSType(source *v1.Machine, ost *api.OSType, c *ConverterContext) error {
+func Convert_v1_Machine_To_api_OSType(source *v1.Machine, ost *api.OSType) error {
 	ost.Machine = source.Type
 
 	return nil
 }
 
-func Convert_v1_FeatureHyperv_To_api_FeatureHyperv(source *v1.FeatureHyperv, hyperv *api.FeatureHyperv, c *ConverterContext) error {
+func Convert_v1_FeatureHyperv_To_api_FeatureHyperv(source *v1.FeatureHyperv, hyperv *api.FeatureHyperv) error {
 	if source.Spinlocks != nil {
 		hyperv.Spinlocks = &api.FeatureSpinlocks{
 			State:   boolToOnOff(source.Spinlocks.Enabled, true),
@@ -812,11 +966,12 @@ func Convert_v1_FeatureHyperv_To_api_FeatureHyperv(source *v1.FeatureHyperv, hyp
 			Value: source.VendorID.VendorID,
 		}
 	}
+
 	hyperv.Relaxed = convertFeatureState(source.Relaxed)
 	hyperv.Reset = convertFeatureState(source.Reset)
 	hyperv.Runtime = convertFeatureState(source.Runtime)
 	hyperv.SyNIC = convertFeatureState(source.SyNIC)
-	hyperv.SyNICTimer = convertFeatureState(source.SyNICTimer)
+	hyperv.SyNICTimer = convertV1ToAPISyNICTimer(source.SyNICTimer)
 	hyperv.VAPIC = convertFeatureState(source.VAPIC)
 	hyperv.VPIndex = convertFeatureState(source.VPIndex)
 	hyperv.Frequencies = convertFeatureState(source.Frequencies)
@@ -825,6 +980,23 @@ func Convert_v1_FeatureHyperv_To_api_FeatureHyperv(source *v1.FeatureHyperv, hyp
 	hyperv.IPI = convertFeatureState(source.IPI)
 	hyperv.EVMCS = convertFeatureState(source.EVMCS)
 	return nil
+}
+
+func convertV1ToAPISyNICTimer(syNICTimer *v1.SyNICTimer) *api.SyNICTimer {
+	if syNICTimer == nil {
+		return nil
+	}
+
+	result := &api.SyNICTimer{
+		State: boolToOnOff(syNICTimer.Enabled, true),
+	}
+
+	if syNICTimer.Direct != nil {
+		result.Direct = &api.FeatureState{
+			State: boolToOnOff(syNICTimer.Direct.Enabled, true),
+		}
+	}
+	return result
 }
 
 func ConvertV1ToAPIBalloning(source *v1.Devices, ballooning *api.MemBalloon, c *ConverterContext) {
@@ -840,57 +1012,17 @@ func ConvertV1ToAPIBalloning(source *v1.Devices, ballooning *api.MemBalloon, c *
 	}
 }
 
-func filterAddress(addrs []string, addr string) []string {
-	var res []string
-	for _, a := range addrs {
-		if a != addr {
-			res = append(res, a)
-		}
+func initializeQEMUCmdAndQEMUArg(domain *api.Domain) {
+	if domain.Spec.QEMUCmd == nil {
+		domain.Spec.QEMUCmd = &api.Commandline{}
 	}
-	return res
+
+	if domain.Spec.QEMUCmd.QEMUArg == nil {
+		domain.Spec.QEMUCmd.QEMUArg = make([]api.Arg, 0)
+	}
 }
 
-func reserveAddress(addrsMap map[string][]string, addr string) {
-	// Sometimes the same address is available to multiple networks,
-	// specifically when two networks refer to the same resourceName. In this
-	// case, we should make sure that a reserved address is removed from *all*
-	// per-network lists of available devices, to avoid configuring the same
-	// device ID for multiple interfaces.
-	for networkName, addrs := range addrsMap {
-		addrsMap[networkName] = filterAddress(addrs, addr)
-	}
-	return
-}
-
-// Get the next PCI address available to a particular SR-IOV network. The
-// function makes sure that the allocated address is not allocated to next
-// callers, whether they request an address for the same network or another
-// network that is backed by the same resourceName.
-func popSRIOVPCIAddress(networkName string, addrsMap map[string][]string) (string, map[string][]string, error) {
-	if len(addrsMap[networkName]) > 0 {
-		addr := addrsMap[networkName][0]
-		reserveAddress(addrsMap, addr)
-		return addr, addrsMap, nil
-	}
-	return "", addrsMap, fmt.Errorf("no more SR-IOV PCI addresses to allocate")
-}
-
-func getInterfaceType(iface *v1.Interface) string {
-	if iface.Slirp != nil {
-		// Slirp configuration works only with e1000 or rtl8139
-		if iface.Model != "e1000" && iface.Model != "rtl8139" {
-			log.Log.Infof("The network interface type of %s was changed to e1000 due to unsupported interface type by qemu slirp network", iface.Name)
-			return "e1000"
-		}
-		return iface.Model
-	}
-	if iface.Model != "" {
-		return iface.Model
-	}
-	return "virtio"
-}
-
-func Convert_v1_VirtualMachine_To_api_Domain(vmi *v1.VirtualMachineInstance, domain *api.Domain, c *ConverterContext) (err error) {
+func Convert_v1_VirtualMachineInstance_To_api_Domain(vmi *v1.VirtualMachineInstance, domain *api.Domain, c *ConverterContext) (err error) {
 	precond.MustNotBeNil(vmi)
 	precond.MustNotBeNil(domain)
 	precond.MustNotBeNil(c)
@@ -959,6 +1091,17 @@ func Convert_v1_VirtualMachine_To_api_Domain(vmi *v1.VirtualMachineInstance, dom
 		}
 
 		if vmi.Spec.Domain.Firmware.Bootloader != nil && vmi.Spec.Domain.Firmware.Bootloader.EFI != nil {
+			// The location of uefi boot loader on ARM64 is different from that on x86 and ppc64le
+			efiCode := ""
+			efiVars := ""
+			if isARM64(c.Architecture) {
+				efiCode = EFICodeAARCH64
+				efiVars = EFIVarsAARCH64
+			} else {
+				efiCode = EFICode
+				efiVars = EFIVars
+			}
+
 			if vmi.Spec.Domain.Firmware.Bootloader.EFI.SecureBoot == nil || *vmi.Spec.Domain.Firmware.Bootloader.EFI.SecureBoot {
 				domain.Spec.OS.BootLoader = &api.Loader{
 					Path:     filepath.Join(c.OVMFPath, EFICodeSecureBoot),
@@ -973,7 +1116,7 @@ func Convert_v1_VirtualMachine_To_api_Domain(vmi *v1.VirtualMachineInstance, dom
 				}
 			} else {
 				domain.Spec.OS.BootLoader = &api.Loader{
-					Path:     filepath.Join(c.OVMFPath, EFICode),
+					Path:     filepath.Join(c.OVMFPath, efiCode),
 					ReadOnly: "yes",
 					Secure:   "no",
 					Type:     "pflash",
@@ -981,7 +1124,7 @@ func Convert_v1_VirtualMachine_To_api_Domain(vmi *v1.VirtualMachineInstance, dom
 
 				domain.Spec.OS.NVRam = &api.NVRam{
 					NVRam:    filepath.Join("/tmp", domain.Spec.Name),
-					Template: filepath.Join(c.OVMFPath, EFIVars),
+					Template: filepath.Join(c.OVMFPath, efiVars),
 				}
 			}
 		}
@@ -1026,7 +1169,8 @@ func Convert_v1_VirtualMachine_To_api_Domain(vmi *v1.VirtualMachineInstance, dom
 	// Take SMBios values from the VirtualMachineOptions
 	// SMBios option does not work in Power, attempting to set it will result in the following error message:
 	// "Option not supported for this target" issued by qemu-system-ppc64, so don't set it in case GOARCH is ppc64le
-	if c.Architecture != "ppc64le" {
+	// ARM64 use UEFI boot by default, set SMBios is unnecessory.
+	if !isPPC64(c.Architecture) && !isARM64(c.Architecture) {
 		domain.Spec.OS.SMBios = &api.SMBios{
 			Mode: "sysinfo",
 		}
@@ -1175,10 +1319,10 @@ func Convert_v1_VirtualMachine_To_api_Domain(vmi *v1.VirtualMachineInstance, dom
 	}
 
 	prefixMap := newDeviceNamer(vmi.Status.VolumeStatus, vmi.Spec.Domain.Devices.Disks)
-	for i, disk := range vmi.Spec.Domain.Devices.Disks {
+	for _, disk := range vmi.Spec.Domain.Devices.Disks {
 		newDisk := api.Disk{}
 
-		err := Convert_v1_Disk_To_api_Disk(c, &vmi.Spec.Domain.Devices.Disks[i], &newDisk, prefixMap, numBlkQueues)
+		err := Convert_v1_Disk_To_api_Disk(c, &disk, &newDisk, prefixMap, numBlkQueues)
 		if err != nil {
 			return err
 		}
@@ -1193,6 +1337,10 @@ func Convert_v1_VirtualMachine_To_api_Domain(vmi *v1.VirtualMachineInstance, dom
 			err = Convert_v1_Hotplug_Volume_To_api_Disk(volume, &newDisk, c)
 		}
 		if err != nil {
+			return err
+		}
+
+		if err := Convert_v1_BlockSize_To_api_BlockIO(&disk, &newDisk); err != nil {
 			return err
 		}
 
@@ -1281,7 +1429,7 @@ func Convert_v1_VirtualMachine_To_api_Domain(vmi *v1.VirtualMachineInstance, dom
 		inputDevices := make([]api.Input, 0)
 		for i := range vmi.Spec.Domain.Devices.Inputs {
 			inputDevice := api.Input{}
-			err := Convert_v1_Input_To_api_InputDevice(&vmi.Spec.Domain.Devices.Inputs[i], &inputDevice, c)
+			err := Convert_v1_Input_To_api_InputDevice(&vmi.Spec.Domain.Devices.Inputs[i], &inputDevice)
 			if err != nil {
 				return err
 			}
@@ -1327,7 +1475,7 @@ func Convert_v1_VirtualMachine_To_api_Domain(vmi *v1.VirtualMachineInstance, dom
 	if vmi.Spec.Domain.Clock != nil {
 		clock := vmi.Spec.Domain.Clock
 		newClock := &api.Clock{}
-		err := Convert_v1_Clock_To_api_Clock(clock, newClock, c)
+		err := Convert_v1_Clock_To_api_Clock(clock, newClock)
 		if err != nil {
 			return err
 		}
@@ -1342,7 +1490,7 @@ func Convert_v1_VirtualMachine_To_api_Domain(vmi *v1.VirtualMachineInstance, dom
 		}
 	}
 	apiOst := &vmi.Spec.Domain.Machine
-	err = Convert_v1_Machine_To_api_OSType(apiOst, &domain.Spec.OS.Type, c)
+	err = Convert_v1_Machine_To_api_OSType(apiOst, &domain.Spec.OS.Type)
 	if err != nil {
 		return err
 	}
@@ -1370,7 +1518,7 @@ func Convert_v1_VirtualMachine_To_api_Domain(vmi *v1.VirtualMachineInstance, dom
 
 		// Adjust guest vcpu config. Currently will handle vCPUs to pCPUs pinning
 		if vmi.IsCPUDedicated() {
-			if err := formatDomainCPUTune(vmi, domain, c); err != nil {
+			if err := formatDomainCPUTune(domain, c); err != nil {
 				log.Log.Reason(err).Error("failed to format domain cputune.")
 				return err
 			}
@@ -1477,124 +1625,17 @@ func Convert_v1_VirtualMachine_To_api_Domain(vmi *v1.VirtualMachineInstance, dom
 		}
 	}
 
-	if err := validateNetworksTypes(vmi.Spec.Networks); err != nil {
+	domainInterfaces, err := createDomainInterfaces(vmi, domain, c, virtioNetProhibited)
+	if err != nil {
 		return err
 	}
-
-	networks := indexNetworksByName(vmi.Spec.Networks)
-
-	sriovPciAddresses := make(map[string][]string)
-	for key, value := range c.SRIOVDevices {
-		sriovPciAddresses[key] = append([]string{}, value...)
-	}
-
-	for i, iface := range vmi.Spec.Domain.Devices.Interfaces {
-		net, isExist := networks[iface.Name]
-		if !isExist {
-			return fmt.Errorf("failed to find network %s", iface.Name)
-		}
-
-		if iface.SRIOV != nil {
-			var pciAddr string
-			pciAddr, sriovPciAddresses, err = popSRIOVPCIAddress(iface.Name, sriovPciAddresses)
-			if err != nil {
-				return fmt.Errorf("failed to configure SRIOV %s: %v", iface.Name, err)
-			}
-			hostDev, err := createSRIOVHostDevice(pciAddr, iface.PciAddress, iface.BootOrder)
-			if err != nil {
-				return fmt.Errorf("failed to configure SRIOV %s: %v", iface.Name, err)
-			}
-			log.Log.Infof("SR-IOV PCI device allocated: %s", pciAddr)
-			domain.Spec.Devices.HostDevices = append(domain.Spec.Devices.HostDevices, *hostDev)
-		} else {
-			ifaceType := getInterfaceType(&vmi.Spec.Domain.Devices.Interfaces[i])
-			domainIface := api.Interface{
-				Model: &api.Model{
-					Type: translateModel(c, ifaceType),
-				},
-				Alias: &api.Alias{
-					Name: iface.Name,
-				},
-			}
-
-			// if UseEmulation unset and at least one NIC model is virtio,
-			// /dev/vhost-net must be present as we should have asked for it.
-			var virtioNetMQRequested bool
-			if mq := vmi.Spec.Domain.Devices.NetworkInterfaceMultiQueue; mq != nil {
-				virtioNetMQRequested = *mq
-			}
-			if ifaceType == "virtio" && virtioNetProhibited {
-				return fmt.Errorf("In-kernel virtio-net device emulation '/dev/vhost-net' not present")
-			} else if ifaceType == "virtio" && virtioNetMQRequested {
-				queueCount := uint(CalculateNetworkQueues(vmi))
-				domainIface.Driver = &api.InterfaceDriver{Name: "vhost", Queues: &queueCount}
-			}
-
-			// Add a pciAddress if specified
-			if iface.PciAddress != "" {
-				addr, err := decoratePciAddressField(iface.PciAddress)
-				if err != nil {
-					return fmt.Errorf("failed to configure interface %s: %v", iface.Name, err)
-				}
-				domainIface.Address = addr
-			}
-
-			if iface.Bridge != nil || iface.Masquerade != nil {
-				// TODO:(ihar) consider abstracting interface type conversion /
-				// detection into drivers
-
-				// use "ethernet" interface type, since we're using pre-configured tap devices
-				// https://libvirt.org/formatdomain.html#elementsNICSEthernet
-				domainIface.Type = "ethernet"
-				if iface.BootOrder != nil {
-					domainIface.BootOrder = &api.BootOrder{Order: *iface.BootOrder}
-				} else {
-					domainIface.Rom = &api.Rom{Enabled: "no"}
-				}
-			} else if iface.Slirp != nil {
-				domainIface.Type = "user"
-
-				// Create network interface
-				if domain.Spec.QEMUCmd == nil {
-					domain.Spec.QEMUCmd = &api.Commandline{}
-				}
-
-				if domain.Spec.QEMUCmd.QEMUArg == nil {
-					domain.Spec.QEMUCmd.QEMUArg = make([]api.Arg, 0)
-				}
-
-				// TODO: (seba) Need to change this if multiple interface can be connected to the same network
-				// append the ports from all the interfaces connected to the same network
-				err := createSlirpNetwork(iface, *net, domain)
-				if err != nil {
-					return err
-				}
-			} else if iface.Macvtap != nil {
-				if net.Multus == nil {
-					return fmt.Errorf("macvtap interface %s requires Multus meta-cni", iface.Name)
-				}
-
-				domainIface.Type = "ethernet"
-				if iface.BootOrder != nil {
-					domainIface.BootOrder = &api.BootOrder{Order: *iface.BootOrder}
-				} else {
-					domainIface.Rom = &api.Rom{Enabled: "no"}
-				}
-			}
-			domain.Spec.Devices.Interfaces = append(domain.Spec.Devices.Interfaces, domainIface)
-		}
-	}
+	domain.Spec.Devices.Interfaces = append(domain.Spec.Devices.Interfaces, domainInterfaces...)
+	domain.Spec.Devices.HostDevices = append(domain.Spec.Devices.HostDevices, c.SRIOVDevices...)
 
 	// Add Ignition Command Line if present
 	ignitiondata, _ := vmi.Annotations[v1.IgnitionAnnotation]
 	if ignitiondata != "" && strings.Contains(ignitiondata, "ignition") {
-		if domain.Spec.QEMUCmd == nil {
-			domain.Spec.QEMUCmd = &api.Commandline{}
-		}
-
-		if domain.Spec.QEMUCmd.QEMUArg == nil {
-			domain.Spec.QEMUCmd.QEMUArg = make([]api.Arg, 0)
-		}
+		initializeQEMUCmdAndQEMUArg(domain)
 		domain.Spec.QEMUCmd.QEMUArg = append(domain.Spec.QEMUCmd.QEMUArg, api.Arg{Value: "-fw_cfg"})
 		ignitionpath := fmt.Sprintf("%s/%s", ignition.GetDomainBasePath(c.VirtualMachine.Name, c.VirtualMachine.Namespace), ignition.IgnitionFile)
 		domain.Spec.QEMUCmd.QEMUArg = append(domain.Spec.QEMUCmd.QEMUArg, api.Arg{Value: fmt.Sprintf("name=opt/com.coreos/config,file=%s", ignitionpath)})
@@ -1604,6 +1645,17 @@ func Convert_v1_VirtualMachine_To_api_Domain(vmi *v1.VirtualMachineInstance, dom
 		if err := PlacePCIDevicesOnRootComplex(&domain.Spec); err != nil {
 			return err
 		}
+	}
+
+	if virtLauncherLogVerbosity, err := strconv.Atoi(os.Getenv(services.ENV_VAR_VIRT_LAUNCHER_LOG_VERBOSITY)); err == nil && (virtLauncherLogVerbosity > services.EXT_LOG_VERBOSITY_THRESHOLD) {
+
+		initializeQEMUCmdAndQEMUArg(domain)
+
+		domain.Spec.QEMUCmd.QEMUArg = append(domain.Spec.QEMUCmd.QEMUArg,
+			api.Arg{Value: "-chardev"},
+			api.Arg{Value: fmt.Sprintf("file,id=firmwarelog,path=%s", QEMUSeaBiosDebugPipe)},
+			api.Arg{Value: "-device"},
+			api.Arg{Value: "isa-debugcon,iobase=0x402,chardev=firmwarelog"})
 	}
 
 	return nil
@@ -1620,8 +1672,18 @@ func CheckEFI_OVMFRoms(vmi *v1.VirtualMachineInstance, c *ConverterContext) (err
 					return fmt.Errorf("EFI OVMF roms missing for secure boot")
 				}
 			} else {
-				_, err1 := os.Stat(filepath.Join(c.OVMFPath, EFICode))
-				_, err2 := os.Stat(filepath.Join(c.OVMFPath, EFIVars))
+				// the EFICode and EFIVars have different path and name on Arm64
+				efiCode := ""
+				efiVars := ""
+				if isARM64(c.Architecture) {
+					efiCode = EFICodeAARCH64
+					efiVars = EFIVarsAARCH64
+				} else {
+					efiCode = EFICode
+					efiVars = EFIVars
+				}
+				_, err1 := os.Stat(filepath.Join(c.OVMFPath, efiCode))
+				_, err2 := os.Stat(filepath.Join(c.OVMFPath, efiVars))
 				if os.IsNotExist(err1) || os.IsNotExist(err2) {
 					log.Log.Reason(err).Error("EFI OVMF roms missing for insecure boot")
 					return fmt.Errorf("EFI OVMF roms missing for insecure boot")
@@ -1690,18 +1752,7 @@ func calculateRequestedVCPUs(cpuTopology *api.CPUTopology) uint32 {
 	return cpuTopology.Cores * cpuTopology.Sockets * cpuTopology.Threads
 }
 
-func CalculateNetworkQueues(vmi *v1.VirtualMachineInstance) uint32 {
-	cpuTopology := getCPUTopology(vmi)
-	queueNumber := calculateRequestedVCPUs(cpuTopology)
-
-	if queueNumber > multiQueueMaxQueues {
-		log.Log.V(3).Infof("Capped the number of queues to be the current maximum of tap device queues: %d", multiQueueMaxQueues)
-		queueNumber = multiQueueMaxQueues
-	}
-	return queueNumber
-}
-
-func formatDomainCPUTune(vmi *v1.VirtualMachineInstance, domain *api.Domain, c *ConverterContext) error {
+func formatDomainCPUTune(domain *api.Domain, c *ConverterContext) error {
 	if len(c.CPUSet) == 0 {
 		return fmt.Errorf("failed for get pods pinned cpus")
 	}
@@ -1768,142 +1819,12 @@ func formatDomainIOThreadPin(vmi *v1.VirtualMachineInstance, domain *api.Domain,
 	return nil
 }
 
-func validateNetworksTypes(networks []v1.Network) error {
-	for _, network := range networks {
-		switch {
-		case network.Pod != nil && network.Multus != nil:
-			return fmt.Errorf("network %s must have only one network type", network.Name)
-		case network.Pod == nil && network.Multus == nil:
-			return fmt.Errorf("network %s must have a network type", network.Name)
-		}
-	}
-	return nil
-}
-
-func indexNetworksByName(networks []v1.Network) map[string]*v1.Network {
-	netsByName := map[string]*v1.Network{}
-	for _, network := range networks {
-		netsByName[network.Name] = network.DeepCopy()
-	}
-	return netsByName
-}
-
-func createSRIOVHostDevice(hostPCIAddress string, guestPCIAddress string, bootOrder *uint) (*api.HostDevice, error) {
-	hostAddr, err := decoratePciAddressField(hostPCIAddress)
-	if err != nil {
-		return nil, err
-	}
-	hostDev := &api.HostDevice{
-		Source:  api.HostDeviceSource{Address: hostAddr},
-		Type:    "pci",
-		Managed: "no",
-	}
-
-	if guestPCIAddress != "" {
-		addr, err := decoratePciAddressField(guestPCIAddress)
-		if err != nil {
-			return nil, err
-		}
-		hostDev.Address = addr
-	}
-
-	if bootOrder != nil {
-		hostDev.BootOrder = &api.BootOrder{Order: *bootOrder}
-	}
-
-	return hostDev, nil
-}
-
-func createSlirpNetwork(iface v1.Interface, network v1.Network, domain *api.Domain) error {
-	qemuArg := api.Arg{Value: fmt.Sprintf("user,id=%s", iface.Name)}
-
-	err := configVMCIDR(&qemuArg, iface, network)
-	if err != nil {
-		return err
-	}
-
-	err = configDNSSearchName(&qemuArg)
-	if err != nil {
-		return err
-	}
-
-	err = configPortForward(&qemuArg, iface)
-	if err != nil {
-		return err
-	}
-
-	domain.Spec.QEMUCmd.QEMUArg = append(domain.Spec.QEMUCmd.QEMUArg, api.Arg{Value: "-netdev"})
-	domain.Spec.QEMUCmd.QEMUArg = append(domain.Spec.QEMUCmd.QEMUArg, qemuArg)
-
-	return nil
-}
-
-func configPortForward(qemuArg *api.Arg, iface v1.Interface) error {
-	if iface.Ports == nil {
-		return nil
-	}
-
-	// Can't be duplicated ports forward or the qemu process will crash
-	configuredPorts := make(map[string]struct{}, 0)
-	for _, forwardPort := range iface.Ports {
-
-		if forwardPort.Port == 0 {
-			return fmt.Errorf("Port must be configured")
-		}
-
-		if forwardPort.Protocol == "" {
-			forwardPort.Protocol = api.DefaultProtocol
-		}
-
-		portConfig := fmt.Sprintf("%s-%d", forwardPort.Protocol, forwardPort.Port)
-		if _, ok := configuredPorts[portConfig]; !ok {
-			qemuArg.Value += fmt.Sprintf(",hostfwd=%s::%d-:%d", strings.ToLower(forwardPort.Protocol), forwardPort.Port, forwardPort.Port)
-			configuredPorts[portConfig] = struct{}{}
-		}
-	}
-
-	return nil
-}
-
-func configVMCIDR(qemuArg *api.Arg, iface v1.Interface, network v1.Network) error {
-	vmNetworkCIDR := ""
-	if network.Pod.VMNetworkCIDR != "" {
-		_, _, err := net.ParseCIDR(network.Pod.VMNetworkCIDR)
-		if err != nil {
-			return fmt.Errorf("Failed parsing CIDR %s", network.Pod.VMNetworkCIDR)
-		}
-		vmNetworkCIDR = network.Pod.VMNetworkCIDR
-	} else {
-		vmNetworkCIDR = api.DefaultVMCIDR
-	}
-
-	// Insert configuration to qemu commandline
-	qemuArg.Value += fmt.Sprintf(",net=%s", vmNetworkCIDR)
-
-	return nil
-}
-
-func configDNSSearchName(qemuArg *api.Arg) error {
-	_, dnsDoms, err := GetResolvConfDetailsFromPod()
-	if err != nil {
-		return err
-	}
-
-	for _, dom := range dnsDoms {
-		qemuArg.Value += fmt.Sprintf(",dnssearch=%s", dom)
-	}
-	return nil
-}
-
-func SecretToLibvirtSecret(vmi *v1.VirtualMachineInstance, secretName string) string {
-	return fmt.Sprintf("%s-%s-%s---", secretName, vmi.Namespace, vmi.Name)
-}
-
 func QuantityToByte(quantity resource.Quantity) (api.Memory, error) {
 	memorySize, int := quantity.AsInt64()
 	if !int {
 		memorySize = quantity.Value() - 1
 	}
+
 	if memorySize < 0 {
 		return api.Memory{Unit: "b"}, fmt.Errorf("Memory size '%s' must be greater than or equal to 0", quantity.String())
 	}
@@ -1943,45 +1864,6 @@ func boolToString(value *bool, defaultPositive bool, positive string, negative s
 	return toString(*value)
 }
 
-// returns nameservers [][]byte, searchdomains []string, error
-func GetResolvConfDetailsFromPod() ([][]byte, []string, error) {
-	// #nosec No risk for path injection. resolvConf is static "/etc/resolve.conf"
-	b, err := ioutil.ReadFile(resolvConf)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	nameservers, err := dns.ParseNameservers(string(b))
-	if err != nil {
-		return nil, nil, err
-	}
-
-	searchDomains, err := dns.ParseSearchDomains(string(b))
-	if err != nil {
-		return nil, nil, err
-	}
-
-	log.Log.Reason(err).Infof("Found nameservers in %s: %s", resolvConf, bytes.Join(nameservers, []byte{' '}))
-	log.Log.Reason(err).Infof("Found search domains in %s: %s", resolvConf, strings.Join(searchDomains, " "))
-
-	return nameservers, searchDomains, err
-}
-
-func decoratePciAddressField(addressField string) (*api.Address, error) {
-	dbsfFields, err := hwutil.ParsePciAddress(addressField)
-	if err != nil {
-		return nil, err
-	}
-	decoratedAddrField := &api.Address{
-		Type:     "pci",
-		Domain:   "0x" + dbsfFields[0],
-		Bus:      "0x" + dbsfFields[1],
-		Slot:     "0x" + dbsfFields[2],
-		Function: "0x" + dbsfFields[3],
-	}
-	return decoratedAddrField, nil
-}
-
 func createHostDevicesFromAddress(devType HostDeviceType, deviceID string, name string) (api.HostDevice, error) {
 	switch devType {
 	case HostDevicePCI:
@@ -1993,7 +1875,7 @@ func createHostDevicesFromAddress(devType HostDeviceType, deviceID string, name 
 }
 
 func createHostDevicesFromPCIAddress(pciAddr string, name string) (api.HostDevice, error) {
-	address, err := decoratePciAddressField(pciAddr)
+	address, err := device.NewPciAddressField(pciAddr)
 	if err != nil {
 		return api.HostDevice{}, err
 	}
@@ -2005,7 +1887,7 @@ func createHostDevicesFromPCIAddress(pciAddr string, name string) (api.HostDevic
 		Type:    "pci",
 		Managed: "yes",
 	}
-	hostDev.Alias = &api.Alias{Name: name}
+	hostDev.Alias = api.NewUserDefinedAlias(name)
 
 	return hostDev, nil
 }
@@ -2023,7 +1905,7 @@ func createHostDevicesFromMdevUUID(mdevUUID string, name string) (api.HostDevice
 		Mode:  "subsystem",
 		Model: "vfio-pci",
 	}
-	hostDev.Alias = &api.Alias{Name: name}
+	hostDev.Alias = api.NewUserDefinedAlias(name)
 
 	return hostDev, nil
 }
@@ -2031,7 +1913,7 @@ func createHostDevicesFromMdevUUID(mdevUUID string, name string) (api.HostDevice
 func createHostDevicesFromPCIAddresses(pcis []string) ([]api.HostDevice, error) {
 	var hds []api.HostDevice
 	for _, pciAddr := range pcis {
-		address, err := decoratePciAddressField(pciAddr)
+		address, err := device.NewPciAddressField(pciAddr)
 		if err != nil {
 			return nil, err
 		}
@@ -2157,4 +2039,14 @@ func translateModel(ctx *ConverterContext, bus string) string {
 	default:
 		return bus
 	}
+}
+
+// GetVolumeNameByTarget returns the volume name associated to the device target in the domain (e.g vda)
+func GetVolumeNameByTarget(domain *api.Domain, target string) string {
+	for _, d := range domain.Spec.Devices.Disks {
+		if d.Target.Device == target {
+			return d.Alias.GetName()
+		}
+	}
+	return ""
 }

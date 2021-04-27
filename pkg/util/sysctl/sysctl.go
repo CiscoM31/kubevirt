@@ -21,11 +21,15 @@ import (
 	"path"
 	"strconv"
 	"strings"
+
+	"kubevirt.io/kubevirt/pkg/util"
 )
 
 const (
 	sysctlBase        = "/proc/sys"
 	NetIPv6Forwarding = "net/ipv6/conf/all/forwarding"
+	NetIPv4Forwarding = "net/ipv4/ip_forward"
+	Ipv4ArpIgnoreAll  = "net/ipv4/conf/all/arp_ignore"
 )
 
 // Interface is an injectable interface for running sysctl commands.
@@ -60,5 +64,5 @@ func (*procSysctl) GetSysctl(sysctl string) (int, error) {
 
 // SetSysctl modifies the specified sysctl flag to the new value
 func (*procSysctl) SetSysctl(sysctl string, newVal int) error {
-	return ioutil.WriteFile(path.Join(sysctlBase, sysctl), []byte(strconv.Itoa(newVal)), 0640)
+	return util.WriteFileWithNosec(path.Join(sysctlBase, sysctl), []byte(strconv.Itoa(newVal)))
 }

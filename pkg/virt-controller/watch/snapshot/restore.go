@@ -20,6 +20,7 @@
 package snapshot
 
 import (
+	"context"
 	"fmt"
 	"reflect"
 	"strings"
@@ -198,7 +199,7 @@ func (ctrl *VMRestoreController) doUpdateError(restore *snapshotv1.VirtualMachin
 
 func (ctrl *VMRestoreController) doUpdate(original, updated *snapshotv1.VirtualMachineRestore) error {
 	if !reflect.DeepEqual(original, updated) {
-		if _, err := ctrl.Client.VirtualMachineRestore(updated.Namespace).Update(updated); err != nil {
+		if _, err := ctrl.Client.VirtualMachineRestore(updated.Namespace).Update(context.Background(), updated, metav1.UpdateOptions{}); err != nil {
 			return err
 		}
 	}
@@ -395,7 +396,7 @@ func (t *vmRestoreTarget) Reconcile() (bool, error) {
 								updatePVC.Annotations[populatedForPVCAnnotation] = dvName
 								// datavolume will take ownership
 								updatePVC.OwnerReferences = nil
-								_, err = t.controller.Client.CoreV1().PersistentVolumeClaims(updatePVC.Namespace).Update(updatePVC)
+								_, err = t.controller.Client.CoreV1().PersistentVolumeClaims(updatePVC.Namespace).Update(context.Background(), updatePVC, metav1.UpdateOptions{})
 								if err != nil {
 									return false, err
 								}
@@ -454,6 +455,9 @@ func (t *vmRestoreTarget) Reconcile() (bool, error) {
 
 	newVM := t.vm.DeepCopy()
 	newVM.Spec = snapshotVM.Spec
+	// update Running state in case snapshot was on online VM
+	running := false
+	newVM.Spec.Running = &running
 	newVM.Spec.DataVolumeTemplates = newTemplates
 	newVM.Spec.Template.Spec.Volumes = newVolumes
 	if newVM.Annotations == nil {
@@ -493,7 +497,7 @@ func (t *vmRestoreTarget) Cleanup() error {
 
 		if exists {
 			err = t.controller.Client.CdiClient().CdiV1alpha1().DataVolumes(t.vmRestore.Namespace).
-				Delete(dvName, &metav1.DeleteOptions{})
+				Delete(context.Background(), dvName, metav1.DeleteOptions{})
 			if err != nil {
 				return err
 			}
@@ -636,7 +640,7 @@ func (ctrl *VMRestoreController) createRestorePVC(
 
 	target.Own(pvc)
 
-	_, err := ctrl.Client.CoreV1().PersistentVolumeClaims(vmRestore.Namespace).Create(pvc)
+	_, err := ctrl.Client.CoreV1().PersistentVolumeClaims(vmRestore.Namespace).Create(context.Background(), pvc, metav1.CreateOptions{})
 	if err != nil {
 		return err
 	}

@@ -20,6 +20,7 @@
 package api
 
 import (
+	"encoding/json"
 	"encoding/xml"
 	"fmt"
 
@@ -94,6 +95,7 @@ var exampleXML = `<domain type="kvm" xmlns:qemu="http://libvirt.org/schemas/doma
     <kvm>
       <hidden state="on"></hidden>
     </kvm>
+    <pvspinlock state="off"></pvspinlock>
   </features>
   <cpu mode="custom">
     <model>Conroe</model>
@@ -171,6 +173,86 @@ var exampleXMLppc64le = `<domain type="kvm" xmlns:qemu="http://libvirt.org/schem
     <kvm>
       <hidden state="on"></hidden>
     </kvm>
+    <pvspinlock state="off"></pvspinlock>
+  </features>
+  <cpu mode="custom">
+    <model>Conroe</model>
+    <feature name="pcid" policy="require"></feature>
+    <feature name="monitor" policy="disable"></feature>
+    <topology sockets="1" cores="2" threads="1"></topology>
+  </cpu>
+  <vcpu placement="static">2</vcpu>
+  <iothreads>2</iothreads>
+</domain>`
+
+// TODO: Make the XML fit for real arm64 configuration
+var exampleXMLarm64withNoneMemballoon string
+var exampleXMLarm64 = `<domain type="kvm" xmlns:qemu="http://libvirt.org/schemas/domain/qemu/1.0">
+  <name>mynamespace_testvmi</name>
+  <memory unit="MB">9</memory>
+  <os>
+    <type arch="aarch64" machine="virt">hvm</type>
+  </os>
+  <sysinfo type="smbios">
+    <system>
+      <entry name="uuid">e4686d2c-6e8d-4335-b8fd-81bee22f4814</entry>
+    </system>
+    <bios></bios>
+    <baseBoard></baseBoard>
+    <chassis></chassis>
+  </sysinfo>
+  <devices>
+    <controller type="raw" index="0" model="none"></controller>
+    <video>
+      <model type="vga" heads="1" vram="16384"></model>
+    </video>
+    %s
+    <disk device="disk" type="network">
+      <source protocol="iscsi" name="iqn.2013-07.com.example:iscsi-nopool/2">
+        <host name="example.com" port="3260"></host>
+      </source>
+      <target dev="vda"></target>
+      <driver name="qemu" type="raw"></driver>
+      <alias name="ua-mydisk"></alias>
+    </disk>
+    <disk device="disk" type="file">
+      <source file="/var/run/libvirt/cloud-init-dir/mynamespace/testvmi/noCloud.iso"></source>
+      <target dev="vdb"></target>
+      <driver name="qemu" type="raw"></driver>
+      <alias name="ua-mydisk1"></alias>
+    </disk>
+    <disk device="disk" type="block">
+      <source dev="/dev/testdev"></source>
+      <target dev="vdc"></target>
+      <driver name="qemu" type="raw"></driver>
+      <alias name="ua-mydisk2"></alias>
+    </disk>
+    <input type="tablet" bus="virtio">
+      <alias name="ua-tablet0"></alias>
+    </input>
+    <console type="pty"></console>
+    <watchdog model="i6300esb" action="poweroff">
+      <alias name="ua-mywatchdog"></alias>
+    </watchdog>
+    <rng model="virtio">
+      <backend model="random">/dev/urandom</backend>
+    </rng>
+  </devices>
+  <metadata>
+    <kubevirt xmlns="http://kubevirt.io">
+      <uid>f4686d2c-6e8d-4335-b8fd-81bee22f4814</uid>
+      <graceperiod>
+        <deletionGracePeriodSeconds>5</deletionGracePeriodSeconds>
+      </graceperiod>
+    </kubevirt>
+  </metadata>
+  <features>
+    <acpi></acpi>
+    <smm></smm>
+    <kvm>
+      <hidden state="on"></hidden>
+    </kvm>
+    <pvspinlock state="off"></pvspinlock>
   </features>
   <cpu mode="custom">
     <model>Conroe</model>
@@ -197,6 +279,13 @@ var _ = Describe("Schema", func() {
       <stats period="10"></stats>
     </memballoon>`)
 
+	exampleXMLarm64withNoneMemballoon = fmt.Sprintf(exampleXMLarm64,
+		`<memballoon model="none"></memballoon>`)
+	exampleXMLarm64 = fmt.Sprintf(exampleXMLarm64,
+		`<memballoon model="virtio">
+      <stats period="10"></stats>
+    </memballoon>`)
+
 	//The example domain should stay in sync to the xml above
 	var exampleDomain *Domain
 	var exampleDomainWithMemballonDevice *Domain
@@ -212,9 +301,7 @@ var _ = Describe("Schema", func() {
 					Name: "iqn.2013-07.com.example:iscsi-nopool/2",
 					Host: &DiskSourceHost{Name: "example.com", Port: "3260"}},
 				Target: DiskTarget{Device: "vda"},
-				Alias: &Alias{
-					Name: "mydisk",
-				},
+				Alias:  NewUserDefinedAlias("mydisk"),
 			},
 			{Type: "file",
 				Device: "disk",
@@ -224,9 +311,7 @@ var _ = Describe("Schema", func() {
 					File: "/var/run/libvirt/cloud-init-dir/mynamespace/testvmi/noCloud.iso",
 				},
 				Target: DiskTarget{Device: "vdb"},
-				Alias: &Alias{
-					Name: "mydisk1",
-				},
+				Alias:  NewUserDefinedAlias("mydisk1"),
 			},
 			{Type: "block",
 				Device: "disk",
@@ -236,19 +321,15 @@ var _ = Describe("Schema", func() {
 					Dev: "/dev/testdev",
 				},
 				Target: DiskTarget{Device: "vdc"},
-				Alias: &Alias{
-					Name: "mydisk2",
-				},
+				Alias:  NewUserDefinedAlias("mydisk2"),
 			},
 		}
 
 		exampleDomain.Spec.Devices.Inputs = []Input{
 			{
-				Type: "tablet",
-				Bus:  "virtio",
-				Alias: &Alias{
-					Name: "tablet0",
-				},
+				Type:  "tablet",
+				Bus:   "virtio",
+				Alias: NewUserDefinedAlias("tablet0"),
 			},
 		}
 
@@ -263,9 +344,7 @@ var _ = Describe("Schema", func() {
 		exampleDomain.Spec.Devices.Watchdog = &Watchdog{
 			Model:  "i6300esb",
 			Action: "poweroff",
-			Alias: &Alias{
-				Name: "mywatchdog",
-			},
+			Alias:  NewUserDefinedAlias("mywatchdog"),
 		}
 		exampleDomain.Spec.Devices.Rng = &Rng{
 			Model:   "virtio",
@@ -284,6 +363,7 @@ var _ = Describe("Schema", func() {
 			KVM: &FeatureKVM{
 				Hidden: &FeatureState{State: "on"},
 			},
+			PVSpinlock: &FeaturePVSpinlock{State: "off"},
 		}
 		exampleDomain.Spec.SysInfo = &SysInfo{
 			Type: "smbios",
@@ -357,12 +437,14 @@ var _ = Describe("Schema", func() {
 			unmarshalTest(arch, domainStr, exampleDomain)
 		},
 			table.Entry("for ppc64le", "ppc64le", exampleXMLppc64le),
+			table.Entry("for arm64", "arm64", exampleXMLarm64),
 			table.Entry("for amd64", "amd64", exampleXML),
 		)
 		table.DescribeTable("Marshal into xml", func(arch string, domainStr string) {
 			marshalTest(arch, domainStr, exampleDomain)
 		},
 			table.Entry("for ppc64le", "ppc64le", exampleXMLppc64le),
+			table.Entry("for arm64", "arm64", exampleXMLarm64),
 			table.Entry("for amd64", "amd64", exampleXML),
 		)
 
@@ -370,12 +452,14 @@ var _ = Describe("Schema", func() {
 			unmarshalTest(arch, domainStr, exampleDomainWithMemballonDevice)
 		},
 			table.Entry("for ppc64le and Memballoon device is specified", "ppc64le", exampleXMLppc64lewithNoneMemballoon),
+			table.Entry("for arm64 and Memballoon device is specified", "arm64", exampleXMLarm64withNoneMemballoon),
 			table.Entry("for amd64 and Memballoon device is specified", "amd64", exampleXMLwithNoneMemballoon),
 		)
 		table.DescribeTable("Marshal into xml", func(arch string, domainStr string) {
 			marshalTest(arch, domainStr, exampleDomainWithMemballonDevice)
 		},
 			table.Entry("for ppc64le and Memballoon device is specified", "ppc64le", exampleXMLppc64lewithNoneMemballoon),
+			table.Entry("for arm64 and Memballoon device is specified", "arm64", exampleXMLarm64withNoneMemballoon),
 			table.Entry("for amd64 and Memballoon device is specified", "amd64", exampleXMLwithNoneMemballoon),
 		)
 	})
@@ -389,21 +473,21 @@ var _ = Describe("Schema", func() {
 </cputune>`
 		var exampleCpuTune = CPUTune{
 			VCPUPin: []CPUTuneVCPUPin{
-				CPUTuneVCPUPin{
+				{
 					VCPU:   0,
 					CPUSet: "1",
 				},
-				CPUTuneVCPUPin{
+				{
 					VCPU:   1,
 					CPUSet: "5",
 				},
 			},
 			IOThreadPin: []CPUTuneIOThreadPin{
-				CPUTuneIOThreadPin{
+				{
 					IOThread: 0,
 					CPUSet:   "1",
 				},
-				CPUTuneIOThreadPin{
+				{
 					IOThread: 1,
 					CPUSet:   "5",
 				},
@@ -419,5 +503,61 @@ var _ = Describe("Schema", func() {
 			Expect(err).To(BeNil())
 			Expect(newCpuTune).To(Equal(exampleCpuTune))
 		})
+	})
+})
+
+var testAliasName = "alias0"
+var exampleXMLnonUserDefinedAlias = `<Alias name="alias0"></Alias>`
+var exampleXMLUserDefinedAlias = `<Alias name="ua-alias0"></Alias>`
+var exampleJSONnonUserDefinedAlias = `{"Name":"alias0","UserDefined":false}`
+var exampleJSONuserDefinedAlias = `{"Name":"alias0","UserDefined":true}`
+
+func newLibvirtManagedAlias(aliasName string) *Alias {
+	return &Alias{name: aliasName}
+}
+
+var _ = Describe("XML marshal of domain device", func() {
+	It("should not add user alias prefix to the name of a non-user-defined alias", func() {
+		alias := newLibvirtManagedAlias(testAliasName)
+		xmlBytes, err := xml.Marshal(alias)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(string(xmlBytes)).To(Equal(exampleXMLnonUserDefinedAlias))
+		newAlias := &Alias{}
+		Expect(xml.Unmarshal(xmlBytes, newAlias)).To(Succeed())
+		Expect(newAlias.GetName()).To(Equal(testAliasName))
+		Expect(newAlias.IsUserDefined()).To(BeFalse())
+	})
+	It("should add user alias prefix to the name of a user-defined alias", func() {
+		alias := NewUserDefinedAlias(testAliasName)
+		xmlBytes, err := xml.Marshal(alias)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(string(xmlBytes)).To(Equal(exampleXMLUserDefinedAlias))
+		newAlias := &Alias{}
+		Expect(xml.Unmarshal(xmlBytes, newAlias)).To(Succeed())
+		Expect(newAlias.GetName()).To(Equal(testAliasName))
+		Expect(newAlias.IsUserDefined()).To(BeTrue())
+	})
+})
+
+var _ = Describe("JSON marshal of the alias of a domain device", func() {
+	It("should deal with package-private struct members for non-user-defined alias", func() {
+		alias := newLibvirtManagedAlias(testAliasName)
+		jsonBytes, err := json.Marshal(alias)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(string(jsonBytes)).To(Equal(exampleJSONnonUserDefinedAlias))
+		newAlias := &Alias{}
+		Expect(json.Unmarshal(jsonBytes, newAlias)).To(Succeed())
+		Expect(newAlias.GetName()).To(Equal(testAliasName))
+		Expect(newAlias.IsUserDefined()).To(BeFalse())
+	})
+	It("should deal with package-private struct members for user-defined alias", func() {
+		alias := NewUserDefinedAlias(testAliasName)
+		jsonBytes, err := json.Marshal(alias)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(string(jsonBytes)).To(Equal(exampleJSONuserDefinedAlias))
+		newAlias := &Alias{}
+		Expect(json.Unmarshal(jsonBytes, newAlias)).To(Succeed())
+		Expect(newAlias.GetName()).To(Equal(testAliasName))
+		Expect(newAlias.IsUserDefined()).To(BeTrue())
 	})
 })

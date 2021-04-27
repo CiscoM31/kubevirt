@@ -42,7 +42,6 @@ import (
 	"k8s.io/apimachinery/pkg/util/rand"
 
 	virtv1 "kubevirt.io/client-go/api/v1"
-	"kubevirt.io/containerized-data-importer/pkg/apis/core/v1beta1"
 	hostdisk "kubevirt.io/kubevirt/pkg/host-disk"
 	. "kubevirt.io/kubevirt/tests/framework/matcher"
 
@@ -75,20 +74,22 @@ var _ = Describe("Storage", func() {
 
 	Describe("Starting a VirtualMachineInstance", func() {
 		var vmi *v1.VirtualMachineInstance
+		var targetImagePath string
 
 		BeforeEach(func() {
 			vmi = nil
+			targetImagePath = tests.HostPathAlpine
 		})
 
-		initNFS := func() *k8sv1.Pod {
+		initNFS := func(targetImage string) *k8sv1.Pod {
 			tests.SkipNFSTestIfRunnigOnKindInfra()
 
 			// Prepare a NFS backed PV
 			By("Starting an NFS POD")
-			nfsPod := storageframework.RenderNFSServer("nfsserver", tests.HostPathAlpine)
-			nfsPod, err = virtClient.CoreV1().Pods(tests.NamespaceTestDefault).Create(nfsPod)
+			nfsPod := storageframework.RenderNFSServer("nfsserver", targetImage)
+			nfsPod, err = virtClient.CoreV1().Pods(tests.NamespaceTestDefault).Create(context.Background(), nfsPod, metav1.CreateOptions{})
 			Expect(err).ToNot(HaveOccurred())
-			Eventually(ThisPod(nfsPod), 120).Should(BeInPhase(k8sv1.PodRunning))
+			Eventually(ThisPod(nfsPod), 180).Should(BeInPhase(k8sv1.PodRunning))
 			nfsPod, err = ThisPod(nfsPod)()
 			Expect(err).ToNot(HaveOccurred())
 			return nfsPod
@@ -106,13 +107,53 @@ var _ = Describe("Storage", func() {
 			return pvName
 		}
 
+		runHostPathJobAndExpectCompletion := func(pod *k8sv1.Pod) {
+			pod, err = virtClient.CoreV1().Pods(tests.NamespaceTestDefault).Create(context.Background(), pod, metav1.CreateOptions{})
+			Expect(err).ToNot(HaveOccurred())
+			Eventually(ThisPod(pod), 120).Should(BeInPhase(k8sv1.PodSucceeded))
+			_, err = ThisPod(pod)()
+			Expect(err).ToNot(HaveOccurred())
+		}
+
+		copyAlpineWithNonQEMUPermissions := func() string {
+
+			dstPath := tests.HostPathAlpine + "-nopriv"
+
+			hostPathType := k8sv1.HostPathDirectoryOrCreate
+
+			args := []string{fmt.Sprintf(`mkdir -p %[1]s-nopriv && cp %[1]s/disk.img %[1]s-nopriv/ && chmod 644 %[1]s-nopriv/disk.img`, tests.HostPathAlpine)}
+
+			By("creating an image with without qemu permissions")
+			pod := tests.RenderHostPathPod("tmp-image-create-job", tests.HostPathBase, hostPathType, k8sv1.MountPropagationNone, []string{"/bin/bash", "-c"}, args)
+
+			runHostPathJobAndExpectCompletion(pod)
+			return dstPath
+		}
+
+		deleteAlpineWithNonQEMUPermissions := func() {
+
+			dst := tests.HostPathAlpine + "-nopriv"
+
+			hostPathType := k8sv1.HostPathDirectoryOrCreate
+
+			args := []string{fmt.Sprintf(`rm -rf %s`, dst)}
+
+			pod := tests.RenderHostPathPod("remove-tmp-image-job", tests.HostPathBase, hostPathType, k8sv1.MountPropagationNone, []string{"/bin/bash", "-c"}, args)
+
+			runHostPathJobAndExpectCompletion(pod)
+		}
+
 		Context("[rfe_id:3106][crit:medium][vendor:cnv-qe@redhat.com][level:component]with Alpine PVC", func() {
 
 			Context("should be successfully", func() {
 				var pvName string
 				var nfsPod *k8sv1.Pod
-
-				table.DescribeTable("started", func(newVMI VMICreationFunc, storageEngine string, family k8sv1.IPFamily) {
+				AfterEach(func() {
+					if targetImagePath != tests.HostPathAlpine {
+						deleteAlpineWithNonQEMUPermissions()
+					}
+				})
+				table.DescribeTable("started", func(newVMI VMICreationFunc, storageEngine string, family k8sv1.IPFamily, imageOwnedByQEMU bool) {
 					tests.SkipPVCTestIfRunnigOnKindInfra()
 					if family == k8sv1.IPv6Protocol {
 						libnet.SkipWhenNotDualStackCluster(virtClient)
@@ -121,7 +162,11 @@ var _ = Describe("Storage", func() {
 					var ignoreWarnings bool
 					// Start the VirtualMachineInstance with the PVC attached
 					if storageEngine == "nfs" {
-						nfsPod = initNFS()
+						targetImage := targetImagePath
+						if !imageOwnedByQEMU {
+							targetImage = copyAlpineWithNonQEMUPermissions()
+						}
+						nfsPod = initNFS(targetImage)
 						pvName = createNFSPvAndPvc(family, nfsPod)
 						ignoreWarnings = true
 					} else {
@@ -129,15 +174,17 @@ var _ = Describe("Storage", func() {
 					}
 					vmi = newVMI(pvName)
 
-					tests.RunVMIAndExpectLaunchWithIgnoreWarningArg(vmi, 120, ignoreWarnings)
+					tests.RunVMIAndExpectLaunchWithIgnoreWarningArg(vmi, 180, ignoreWarnings)
 
 					By("Checking that the VirtualMachineInstance console has expected output")
 					Expect(console.LoginToAlpine(vmi)).To(Succeed())
 				},
-					table.Entry("[test_id:3130]with Disk PVC", tests.NewRandomVMIWithPVC, "", nil),
-					table.Entry("[test_id:3131]with CDRom PVC", tests.NewRandomVMIWithCDRom, "", nil),
-					table.Entry("[test_id:4618]with NFS Disk PVC using ipv4 address of the NFS pod", tests.NewRandomVMIWithPVC, "nfs", k8sv1.IPv4Protocol),
-					table.Entry("with NFS Disk PVC using ipv6 address of the NFS pod", tests.NewRandomVMIWithPVC, "nfs", k8sv1.IPv6Protocol),
+					table.Entry("[test_id:3130]with Disk PVC", tests.NewRandomVMIWithPVC, "", nil, true),
+					table.Entry("[test_id:3131]with CDRom PVC", tests.NewRandomVMIWithCDRom, "", nil, true),
+					table.Entry("[test_id:4618]with NFS Disk PVC using ipv4 address of the NFS pod", tests.NewRandomVMIWithPVC, "nfs", k8sv1.IPv4Protocol, true),
+					// Skipping the following 2 tests until https://github.com/kubevirt/kubevirt/issues/4829 is fixed
+					table.PEntry("with NFS Disk PVC using ipv6 address of the NFS pod", tests.NewRandomVMIWithPVC, "nfs", k8sv1.IPv6Protocol, true),
+					table.PEntry("with NFS Disk PVC using ipv4 address of the NFS pod not owned by qemu", tests.NewRandomVMIWithPVC, "nfs", k8sv1.IPv4Protocol, false),
 				)
 			})
 
@@ -173,7 +220,7 @@ var _ = Describe("Storage", func() {
 			It("[test_id:3134]should create a writeable emptyDisk with the right capacity", func() {
 
 				// Start the VirtualMachineInstance with the empty disk attached
-				vmi = tests.NewRandomVMIWithEphemeralDiskAndUserdata(cd.ContainerDiskFor(cd.ContainerDiskCirros), "echo hi!")
+				vmi = tests.NewRandomVMIWithEphemeralDiskAndUserdataHighMemory(cd.ContainerDiskFor(cd.ContainerDiskCirros), "echo hi!")
 				vmi.Spec.Domain.Devices.Disks = append(vmi.Spec.Domain.Devices.Disks, v1.Disk{
 					Name: "emptydisk1",
 					DiskDevice: v1.DiskDevice{
@@ -246,6 +293,60 @@ var _ = Describe("Storage", func() {
 			})
 
 		})
+		Context("VirtIO-FS with an empty PVC", func() {
+
+			var pvc = "empty-pvc1"
+
+			BeforeEach(func() {
+				tests.CreateHostPathPv(pvc, filepath.Join(tests.HostPathBase, pvc))
+				tests.CreateHostPathPVC(pvc, "1G")
+			}, 120)
+
+			AfterEach(func() {
+				tests.DeletePVC(pvc)
+				tests.DeletePV(pvc)
+			}, 120)
+
+			It("should be successfully started and virtiofs could be accessed", func() {
+				tests.SkipPVCTestIfRunnigOnKindInfra()
+
+				pvcName := fmt.Sprintf("disk-%s", pvc)
+				vmi := tests.NewRandomVMIWithPVCFS(pvcName)
+				vmi.Spec.Domain.Resources.Requests[k8sv1.ResourceMemory] = resource.MustParse("512Mi")
+				vmi.Spec.Domain.Devices.Rng = &v1.Rng{}
+
+				// add userdata for guest agent and mount virtio-fs
+				fs := vmi.Spec.Domain.Devices.Filesystems[0]
+				virtiofsMountPath := fmt.Sprintf("/mnt/virtiof_%s", fs.Name)
+				virtiofsTestFile := fmt.Sprintf("%s/virtiofs_test", virtiofsMountPath)
+				mountVirtiofsCommands := fmt.Sprintf(`
+                                   mkdir %s
+                                   mount -t virtiofs %s %s
+                                   touch %s
+                           `, virtiofsMountPath, fs.Name, virtiofsMountPath, virtiofsTestFile)
+				userData := fmt.Sprintf("%s\n%s", tests.GetFedoraToolsGuestAgentUserData(), mountVirtiofsCommands)
+				tests.AddUserData(vmi, "cloud-init", userData)
+
+				vmi = tests.RunVMIAndExpectLaunchIgnoreWarnings(vmi, 300)
+
+				// Wait for cloud init to finish and start the agent inside the vmi.
+				tests.WaitAgentConnected(virtClient, vmi)
+
+				By("Checking that the VirtualMachineInstance console has expected output")
+				Expect(libnet.WithIPv6(console.LoginToFedora)(vmi)).To(Succeed(), "Should be able to login to the Fedora VM")
+
+				virtioFsFileTestCmd := fmt.Sprintf("test -f /run/kubevirt-private/vmi-disks/%s/virtiofs_test && echo exist", fs.Name)
+				pod := tests.GetRunningPodByVirtualMachineInstance(vmi, tests.NamespaceTestDefault)
+				podVirtioFsFileExist, err := tests.ExecuteCommandOnPod(
+					virtClient,
+					pod,
+					"compute",
+					[]string{"/usr/bin/bash", "-c", virtioFsFileTestCmd},
+				)
+				Expect(err).ToNot(HaveOccurred())
+				Expect(strings.Trim(podVirtioFsFileExist, "\n")).To(Equal("exist"))
+			})
+		})
 		Context("Run a VMI with VirtIO-FS and a datavolume", func() {
 			var dataVolume *cdiv1.DataVolume
 			BeforeEach(func() {
@@ -254,14 +355,21 @@ var _ = Describe("Storage", func() {
 				}
 				dataVolume = tests.NewRandomDataVolumeWithHttpImport(tests.GetUrl(tests.AlpineHttpUrl), tests.NamespaceTestDefault, k8sv1.ReadWriteOnce)
 			})
+			AfterEach(func() {
+				err = virtClient.CdiClient().CdiV1alpha1().DataVolumes(dataVolume.Namespace).Delete(context.Background(), dataVolume.Name, metav1.DeleteOptions{})
+				Expect(err).ToNot(HaveOccurred())
+			})
 
 			It("should be successfully started and virtiofs could be accessed", func() {
 				tests.SkipPVCTestIfRunnigOnKindInfra()
 
 				vmi := tests.NewRandomVMIWithFSFromDataVolume(dataVolume.Name)
-				_, err := virtClient.CdiClient().CdiV1alpha1().DataVolumes(dataVolume.Namespace).Create(dataVolume)
-				Expect(err).To(BeNil())
-				Eventually(ThisDV(dataVolume), 160, 1).Should(Or(BeInPhase(cdiv1.Succeeded), BeInPhase(v1beta1.WaitForFirstConsumer)), "Timed out waiting for DataVolume to complete")
+				_, err := virtClient.CdiClient().CdiV1alpha1().DataVolumes(dataVolume.Namespace).Create(context.Background(), dataVolume, metav1.CreateOptions{})
+				Expect(err).ToNot(HaveOccurred())
+				By("Waiting until the DataVolume is ready")
+				if tests.HasBindingModeWaitForFirstConsumer() {
+					tests.WaitForDataVolumePhaseWFFC(dataVolume.Namespace, dataVolume.Name, 30)
+				}
 				vmi.Spec.Domain.Resources.Requests[k8sv1.ResourceMemory] = resource.MustParse("512Mi")
 
 				vmi.Spec.Domain.Devices.Rng = &v1.Rng{}
@@ -275,10 +383,12 @@ var _ = Describe("Storage", func() {
                                        mount -t virtiofs %s %s
                                        touch %s
                                `, virtiofsMountPath, fs.Name, virtiofsMountPath, virtiofsTestFile)
-				userData := fmt.Sprintf("%s\n%s", tests.GetGuestAgentUserData(), mountVirtiofsCommands)
+				userData := fmt.Sprintf("%s\n%s", tests.GetFedoraToolsGuestAgentUserData(), mountVirtiofsCommands)
 				tests.AddUserData(vmi, "cloud-init", userData)
 
-				vmi = tests.RunVMIAndExpectLaunchIgnoreWarnings(vmi, 300)
+				// with WFFC the run actually starts the import and then runs VM, so the timeout has to include both
+				// import and start
+				vmi = tests.RunVMIAndExpectLaunchWithDataVolume(vmi, dataVolume, 500)
 
 				// Wait for cloud init to finish and start the agent inside the vmi.
 				tests.WaitAgentConnected(virtClient, vmi)
@@ -303,6 +413,10 @@ var _ = Describe("Storage", func() {
 				)
 				Expect(err).ToNot(HaveOccurred())
 				Expect(strings.Trim(podVirtioFsFileExist, "\n")).To(Equal("exist"))
+				err = virtClient.VirtualMachineInstance(vmi.Namespace).Delete(vmi.Name, &metav1.DeleteOptions{})
+				Expect(err).ToNot(HaveOccurred())
+				tests.WaitForVirtualMachineToDisappearWithTimeout(vmi, 120)
+
 			})
 		})
 		Context("[rfe_id:3106][crit:medium][vendor:cnv-qe@redhat.com][level:component]With ephemeral alpine PVC", func() {
@@ -347,7 +461,7 @@ var _ = Describe("Storage", func() {
 					var ignoreWarnings bool
 					// Start the VirtualMachineInstance with the PVC attached
 					if storageEngine == "nfs" {
-						nfsPod = initNFS()
+						nfsPod = initNFS(tests.HostPathAlpine)
 						pvName = createNFSPvAndPvc(family, nfsPod)
 						ignoreWarnings = true
 					} else {
@@ -361,7 +475,7 @@ var _ = Describe("Storage", func() {
 				},
 					table.Entry("[test_id:3136]with Ephemeral PVC", tests.NewRandomVMIWithEphemeralPVC, "", nil),
 					table.Entry("[test_id:4619]with Ephemeral PVC from NFS using ipv4 address of the NFS pod", tests.NewRandomVMIWithEphemeralPVC, "nfs", k8sv1.IPv4Protocol),
-					table.Entry("with Ephemeral PVC from NFS using ipv6 address of the NFS pod", tests.NewRandomVMIWithEphemeralPVC, "nfs", k8sv1.IPv6Protocol),
+					table.Entry("[QUARANTINE][owner:@sig-storage]with Ephemeral PVC from NFS using ipv6 address of the NFS pod", tests.NewRandomVMIWithEphemeralPVC, "nfs", k8sv1.IPv6Protocol),
 				)
 			})
 
@@ -402,9 +516,9 @@ var _ = Describe("Storage", func() {
 
 				By("Starting the VirtualMachineInstance again")
 				if isRunOnKindInfra {
-					createdVMI = tests.RunVMIAndExpectLaunchIgnoreWarnings(vmi, 90)
+					tests.RunVMIAndExpectLaunchIgnoreWarnings(vmi, 90)
 				} else {
-					createdVMI = tests.RunVMIAndExpectLaunch(vmi, 90)
+					tests.RunVMIAndExpectLaunch(vmi, 90)
 				}
 
 				By("Making sure that the previously written file is not present")
@@ -583,10 +697,10 @@ var _ = Describe("Storage", func() {
 						diskPath = filepath.Join(hostDiskDir, diskName)
 						// create a disk image before test
 						job := tests.CreateHostDiskImage(diskPath)
-						job, err = virtClient.CoreV1().Pods(tests.NamespaceTestDefault).Create(job)
+						job, err = virtClient.CoreV1().Pods(tests.NamespaceTestDefault).Create(context.Background(), job, metav1.CreateOptions{})
 						Expect(err).ToNot(HaveOccurred())
 						getStatus := func() k8sv1.PodPhase {
-							pod, err := virtClient.CoreV1().Pods(tests.NamespaceTestDefault).Get(job.Name, metav1.GetOptions{})
+							pod, err := virtClient.CoreV1().Pods(tests.NamespaceTestDefault).Get(context.Background(), job.Name, metav1.GetOptions{})
 							Expect(err).ToNot(HaveOccurred())
 							if pod.Spec.NodeName != "" && nodeName == "" {
 								nodeName = pod.Spec.NodeName
@@ -700,12 +814,12 @@ var _ = Describe("Storage", func() {
 							},
 						},
 					}
-					pod, err = virtClient.CoreV1().Pods(tests.NamespaceTestDefault).Create(pod)
+					pod, err = virtClient.CoreV1().Pods(tests.NamespaceTestDefault).Create(context.Background(), pod, metav1.CreateOptions{})
 					Expect(err).NotTo(HaveOccurred())
 
 					By("Waiting for hostPath pod to prepare the mounted directory")
 					Eventually(func() k8sv1.ConditionStatus {
-						p, err := virtClient.CoreV1().Pods(tests.NamespaceTestDefault).Get(pod.Name, metav1.GetOptions{})
+						p, err := virtClient.CoreV1().Pods(tests.NamespaceTestDefault).Get(context.Background(), pod.Name, metav1.GetOptions{})
 						Expect(err).ToNot(HaveOccurred())
 						for _, c := range p.Status.Conditions {
 							if c.Type == k8sv1.PodReady {
@@ -761,7 +875,8 @@ var _ = Describe("Storage", func() {
 
 					By("Checking events")
 					objectEventWatcher := tests.NewObjectEventWatcher(vmi).SinceWatchedObjectResourceVersion().Timeout(time.Duration(30) * time.Second)
-					objectEventWatcher.FailOnWarnings()
+					wp := tests.WarningsPolicy{FailOnWarnings: true}
+					objectEventWatcher.SetWarningsPolicy(wp)
 					ctx, cancel := context.WithCancel(context.Background())
 					defer cancel()
 					objectEventWatcher.WaitFor(ctx, tests.EventType(hostdisk.EventTypeToleratedSmallPV), hostdisk.EventReasonToleratedSmallPV)
@@ -776,7 +891,7 @@ var _ = Describe("Storage", func() {
 			})
 
 			// Not a candidate for NFS because local volumes are used in test
-			It("[test_id:1015] should be successfully started", func() {
+			It("[owner:@sig-storage][test_id:1015] should be successfully started", func() {
 				tests.SkipPVCTestIfRunnigOnKindInfra()
 				// Start the VirtualMachineInstance with the PVC attached
 				vmi = tests.NewRandomVMIWithPVC(tests.BlockDiskForTest)

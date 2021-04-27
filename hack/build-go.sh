@@ -37,29 +37,40 @@ else
     args=$@
 fi
 
+PLATFORM=$(uname -m)
+case ${PLATFORM} in
+x86_64* | i?86_64* | amd64*)
+    ARCH="amd64"
+    ;;
+ppc64le)
+    ARCH="ppc64le"
+    ;;
+aarch64* | arm64*)
+    ARCH="arm64"
+    ;;
+*)
+    echo "invalid Arch, only support x86_64, ppc64le, aarch64"
+    exit 1
+    ;;
+esac
+
 # forward all commands to all packages if no specific one was requested
 # TODO finetune this a little bit more
 if [ $# -eq 0 ]; then
     if [ "${target}" = "test" ]; then
         (
-            cd cmd/container-disk-v2alpha
-            go ${target} -v main_test.go container_disk_v2alpha_suite_test.go
+            go ${target} -v ./cmd/...
         )
         (
-            cd ${KUBEVIRT_DIR}/pkg
-            go ${target} -v -race ./...
+            go ${target} -v -race ./pkg/...
         )
     else
         (
-            cd ${KUBEVIRT_DIR}/pkg
-            go $target -tags selinux ./...
-
-            cd ${KUBEVIRT_DIR}/staging/src/kubevirt.io
-            GO111MODULE=off go $target ./...
+            go $target -tags selinux ./pkg/...
+            GO111MODULE=off go $target ./staging/src/kubevirt.io/...
         )
         (
-            cd ${KUBEVIRT_DIR}/tests
-            go $target ./...
+            go $target ./tests/...
         )
     fi
 fi
@@ -92,8 +103,7 @@ fi
 for arg in $args; do
     if [ "${target}" = "test" ]; then
         (
-            cd $arg
-            go ${target} -v ./...
+            go ${target} -v ./$arg/...
         )
     elif [ "${target}" = "install" ]; then
         eval "$(go env)"
@@ -101,22 +111,23 @@ for arg in $args; do
         ARCH_BASENAME=${BIN_NAME}-${KUBEVIRT_VERSION}
         mkdir -p ${CMD_OUT_DIR}/${BIN_NAME}
         (
-            cd $arg
-            go vet ./...
+            go vet ./$arg/...
 
-            # always build and link the linux/amd64 binary
-            LINUX_NAME=${ARCH_BASENAME}-linux-amd64
+            cd $arg
+
+            # always build and link the binary based on CPU Architecture
+            LINUX_NAME=${ARCH_BASENAME}-linux-${ARCH}
 
             echo "building dynamic binary $BIN_NAME"
-            GOOS=linux GOARCH=amd64 go_build -tags selinux -i -o ${CMD_OUT_DIR}/${BIN_NAME}/${LINUX_NAME} -ldflags "$(kubevirt::version::ldflags)" $(pkg_dir linux amd64)
+            GOOS=linux GOARCH=${ARCH} go_build -tags selinux -i -o ${CMD_OUT_DIR}/${BIN_NAME}/${LINUX_NAME} -ldflags "$(kubevirt::version::ldflags)" $(pkg_dir linux ${ARCH})
 
             (cd ${CMD_OUT_DIR}/${BIN_NAME} && ln -sf ${LINUX_NAME} ${BIN_NAME})
 
             kubevirt::version::get_version_vars
             echo "$KUBEVIRT_GIT_VERSION" >${CMD_OUT_DIR}/${BIN_NAME}/.version
 
-            # build virtctl also for darwin and windows
-            if [ "${BIN_NAME}" = "virtctl" ]; then
+            # build virtctl also for darwin and windows on amd64
+            if [ "${BIN_NAME}" = "virtctl" -a "${ARCH}" = "amd64" ]; then
                 GOOS=darwin GOARCH=amd64 go_build -i -o ${CMD_OUT_DIR}/${BIN_NAME}/${ARCH_BASENAME}-darwin-amd64 -ldflags "$(kubevirt::version::ldflags)" $(pkg_dir darwin amd64)
                 GOOS=windows GOARCH=amd64 go_build -i -o ${CMD_OUT_DIR}/${BIN_NAME}/${ARCH_BASENAME}-windows-amd64.exe -ldflags "$(kubevirt::version::ldflags)" $(pkg_dir windows amd64)
                 # Create symlinks to the latest binary of each architecture

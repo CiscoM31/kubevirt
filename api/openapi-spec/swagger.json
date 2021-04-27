@@ -6312,6 +6312,16 @@
     "put": {
      "description": "Add a volume and disk to a running Virtual Machine Instance",
      "operationId": "v1vmi-addvolume",
+     "parameters": [
+      {
+       "name": "body",
+       "in": "body",
+       "required": true,
+       "schema": {
+        "$ref": "#/definitions/v1.AddVolumeOptions"
+       }
+      }
+     ],
      "responses": {
       "200": {
        "description": "OK",
@@ -6493,6 +6503,16 @@
     "put": {
      "description": "Removes a volume and disk from a running Virtual Machine Instance",
      "operationId": "v1vmi-removevolume",
+     "parameters": [
+      {
+       "name": "body",
+       "in": "body",
+       "required": true,
+       "schema": {
+        "$ref": "#/definitions/v1.RemoveVolumeOptions"
+       }
+      }
+     ],
      "responses": {
       "200": {
        "description": "OK",
@@ -6662,6 +6682,16 @@
     "put": {
      "description": "Add a volume and disk to a running Virtual Machine.",
      "operationId": "v1vm-addvolume",
+     "parameters": [
+      {
+       "name": "body",
+       "in": "body",
+       "required": true,
+       "schema": {
+        "$ref": "#/definitions/v1.AddVolumeOptions"
+       }
+      }
+     ],
      "responses": {
       "200": {
        "description": "OK",
@@ -6750,6 +6780,16 @@
     "put": {
      "description": "Removes a volume and disk from a running Virtual Machine.",
      "operationId": "v1vm-removevolume",
+     "parameters": [
+      {
+       "name": "body",
+       "in": "body",
+       "required": true,
+       "schema": {
+        "$ref": "#/definitions/v1.RemoveVolumeOptions"
+       }
+      }
+     ],
      "responses": {
       "200": {
        "description": "OK",
@@ -7062,6 +7102,16 @@
     "put": {
      "description": "Add a volume and disk to a running Virtual Machine Instance",
      "operationId": "v1alpha3vmi-addvolume",
+     "parameters": [
+      {
+       "name": "body",
+       "in": "body",
+       "required": true,
+       "schema": {
+        "$ref": "#/definitions/v1.AddVolumeOptions"
+       }
+      }
+     ],
      "responses": {
       "200": {
        "description": "OK",
@@ -7243,6 +7293,16 @@
     "put": {
      "description": "Removes a volume and disk from a running Virtual Machine Instance",
      "operationId": "v1alpha3vmi-removevolume",
+     "parameters": [
+      {
+       "name": "body",
+       "in": "body",
+       "required": true,
+       "schema": {
+        "$ref": "#/definitions/v1.RemoveVolumeOptions"
+       }
+      }
+     ],
      "responses": {
       "200": {
        "description": "OK",
@@ -7412,6 +7472,16 @@
     "put": {
      "description": "Add a volume and disk to a running Virtual Machine.",
      "operationId": "v1alpha3vm-addvolume",
+     "parameters": [
+      {
+       "name": "body",
+       "in": "body",
+       "required": true,
+       "schema": {
+        "$ref": "#/definitions/v1.AddVolumeOptions"
+       }
+      }
+     ],
      "responses": {
       "200": {
        "description": "OK",
@@ -7500,6 +7570,16 @@
     "put": {
      "description": "Removes a volume and disk from a running Virtual Machine.",
      "operationId": "v1alpha3vm-removevolume",
+     "parameters": [
+      {
+       "name": "body",
+       "in": "body",
+       "required": true,
+       "schema": {
+        "$ref": "#/definitions/v1.RemoveVolumeOptions"
+       }
+      }
+     ],
      "responses": {
       "200": {
        "description": "OK",
@@ -7782,6 +7862,45 @@
    }
   },
   "definitions": {
+   "github.com.openshift.api.operator.v1.GenerationStatus": {
+    "description": "GenerationStatus keeps track of the generation for a given resource so that decisions about forced updates can be made.",
+    "type": "object",
+    "required": [
+     "group",
+     "resource",
+     "namespace",
+     "name",
+     "lastGeneration",
+     "hash"
+    ],
+    "properties": {
+     "group": {
+      "description": "group is the group of the thing you're tracking",
+      "type": "string"
+     },
+     "hash": {
+      "description": "hash is an optional field set for resources without generation that are content sensitive like secrets and configmaps",
+      "type": "string"
+     },
+     "lastGeneration": {
+      "description": "lastGeneration is the last generation of the workload controller involved",
+      "type": "integer",
+      "format": "int64"
+     },
+     "name": {
+      "description": "name is the name of the thing you're tracking",
+      "type": "string"
+     },
+     "namespace": {
+      "description": "namespace is where the thing you're tracking is",
+      "type": "string"
+     },
+     "resource": {
+      "description": "resource is the resource type of the thing you're tracking",
+      "type": "string"
+     }
+    }
+   },
    "k8s.io.api.core.v1.Affinity": {
     "description": "Affinity is a group of affinity scheduling rules.",
     "type": "object",
@@ -7812,7 +7931,7 @@
       "$ref": "#/definitions/k8s.io.api.core.v1.ObjectFieldSelector"
      },
      "mode": {
-      "description": "Optional: mode bits to use on this file, must be a value between 0 and 0777. If not specified, the volume defaultMode will be used. This might be in conflict with other options that affect the file mode, like fsGroup, and the result can be other mode bits set.",
+      "description": "Optional: mode bits used to set permissions on this file, must be an octal value between 0000 and 0777 or a decimal value between 0 and 511. YAML accepts both octal and decimal values, JSON requires decimal values for mode bits. If not specified, the volume defaultMode will be used. This might be in conflict with other options that affect the file mode, like fsGroup, and the result can be other mode bits set.",
       "type": "integer",
       "format": "int32"
      },
@@ -7996,7 +8115,7 @@
       }
      },
      "dataSource": {
-      "description": "This field requires the VolumeSnapshotDataSource alpha feature gate to be enabled and currently VolumeSnapshot is the only supported data source. If the provisioner can support VolumeSnapshot data source, it will create a new volume and data will be restored to the volume at the same time. If the provisioner does not support VolumeSnapshot data source, volume will not be created and the failure will be reported as an event. In the future, we plan to support more data source types and the behavior of the provisioner may change.",
+      "description": "This field can be used to specify either: * An existing VolumeSnapshot object (snapshot.storage.k8s.io/VolumeSnapshot) * An existing PVC (PersistentVolumeClaim) * An existing custom resource that implements data population (Alpha) In order to use custom resource types that implement data population, the AnyVolumeDataSource feature gate must be enabled. If the provisioner or an external controller can support the specified data source, it will create a new volume based on the contents of the specified data source.",
       "$ref": "#/definitions/k8s.io.api.core.v1.TypedLocalObjectReference"
      },
      "resources": {
@@ -8012,7 +8131,7 @@
       "type": "string"
      },
      "volumeMode": {
-      "description": "volumeMode defines what type of volume is required by the claim. Value of Filesystem is implied when not included in claim spec. This is a beta feature.",
+      "description": "volumeMode defines what type of volume is required by the claim. Value of Filesystem is implied when not included in claim spec.",
       "type": "string"
      },
      "volumeName": {
@@ -8645,7 +8764,7 @@
       "$ref": "#/definitions/k8s.io.apimachinery.pkg.apis.meta.v1.Time"
      },
      "finalizers": {
-      "description": "Must be empty before the object is deleted from the registry. Each entry is an identifier for the responsible component that will remove the entry from the list. If the deletionTimestamp of the object is non-nil, entries in this list can only be removed.",
+      "description": "Must be empty before the object is deleted from the registry. Each entry is an identifier for the responsible component that will remove the entry from the list. If the deletionTimestamp of the object is non-nil, entries in this list can only be removed. Finalizers may be processed and removed in any order.  Order is NOT enforced because it introduces significant risk of stuck finalizers. finalizers is a shared field, any actor with permission can reorder it. If the finalizer list is processed in order, then this can lead to a situation in which the component responsible for the first finalizer in the list is waiting for a signal (field value, external system, or other) produced by a component responsible for a finalizer later in the list, resulting in a deadlock. Without enforced ordering finalizers are free to order amongst themselves and are not vulnerable to ordering changes in the list.",
       "type": "array",
       "items": {
        "type": "string"
@@ -8680,7 +8799,7 @@
       "type": "string"
      },
      "namespace": {
-      "description": "Namespace defines the space within each name must be unique. An empty namespace is equivalent to the \"default\" namespace, but \"default\" is the canonical representation. Not all objects are required to be scoped to a namespace - the value of this field for those objects will be empty.\n\nMust be a DNS_LABEL. Cannot be updated. More info: http://kubernetes.io/docs/user-guide/namespaces",
+      "description": "Namespace defines the space within which each name must be unique. An empty namespace is equivalent to the \"default\" namespace, but \"default\" is the canonical representation. Not all objects are required to be scoped to a namespace - the value of this field for those objects will be empty.\n\nMust be a DNS_LABEL. Cannot be updated. More info: http://kubernetes.io/docs/user-guide/namespaces",
       "type": "string"
      },
      "ownerReferences": {
@@ -8975,6 +9094,18 @@
      }
     }
    },
+   "v1.BlockSize": {
+    "description": "BlockSize provides the option to change the block size presented to the VM for a disk. Only one of its members may be specified.",
+    "type": "object",
+    "properties": {
+     "custom": {
+      "$ref": "#/definitions/v1.CustomBlockSize"
+     },
+     "matchVolume": {
+      "$ref": "#/definitions/v1.FeatureState"
+     }
+    }
+   },
    "v1.Bootloader": {
     "description": "Represents the firmware blob used to assist in the domain creation process. Used for setting the QEMU BIOS file path for the libvirt domain.",
     "type": "object",
@@ -9060,6 +9191,20 @@
      "policy": {
       "description": "Policy is the CPU feature attribute which can have the following attributes: force    - The virtual CPU will claim the feature is supported regardless of it being supported by host CPU. require  - Guest creation will fail unless the feature is supported by the host CPU or the hypervisor is able to emulate it. optional - The feature will be supported by virtual CPU if and only if it is supported by host CPU. disable  - The feature will not be supported by virtual CPU. forbid   - Guest creation will fail if the feature is supported by host CPU. Defaults to require",
       "type": "string"
+     }
+    }
+   },
+   "v1.CertConfig": {
+    "description": "CertConfig contains the tunables for TLS certificates",
+    "type": "object",
+    "properties": {
+     "duration": {
+      "description": "The requested 'duration' (i.e. lifetime) of the Certificate.",
+      "$ref": "#/definitions/k8s.io.apimachinery.pkg.apis.meta.v1.Duration"
+     },
+     "renewBefore": {
+      "description": "The amount of time before the currently issued certificate's \"notAfter\" time that we will begin to attempt to renew the certificate.",
+      "$ref": "#/definitions/k8s.io.apimachinery.pkg.apis.meta.v1.Duration"
      }
     }
    },
@@ -9228,6 +9373,24 @@
      }
     }
    },
+   "v1.CustomBlockSize": {
+    "description": "CustomBlockSize represents the desired logical and physical block size for a VM disk.",
+    "type": "object",
+    "required": [
+     "logical",
+     "physical"
+    ],
+    "properties": {
+     "logical": {
+      "type": "integer",
+      "format": "int32"
+     },
+     "physical": {
+      "type": "integer",
+      "format": "int32"
+     }
+    }
+   },
    "v1.CustomizeComponents": {
     "type": "object",
     "properties": {
@@ -9242,6 +9405,12 @@
    },
    "v1.CustomizeComponentsPatch": {
     "type": "object",
+    "required": [
+     "resourceName",
+     "resourceType",
+     "patch",
+     "type"
+    ],
     "properties": {
      "patch": {
       "type": "string"
@@ -9403,7 +9572,7 @@
       "type": "boolean"
      },
      "blockMultiQueue": {
-      "description": "Whether or not to enable virtio multi-queue for block devices",
+      "description": "Whether or not to enable virtio multi-queue for block devices. Defaults to false.",
       "type": "boolean"
      },
      "disableHotplug": {
@@ -9479,13 +9648,17 @@
      "name"
     ],
     "properties": {
+     "blockSize": {
+      "description": "If specified, the virtual disk will be presented with the given block sizes.",
+      "$ref": "#/definitions/v1.BlockSize"
+     },
      "bootOrder": {
       "description": "BootOrder is an integer value \u003e 0, used to determine ordering of boot devices. Lower values take precedence. Each disk or interface that has a boot order must have a unique value. Disks without a boot order are not tried if a disk with a boot order exists.",
       "type": "integer",
       "format": "int32"
      },
      "cache": {
-      "description": "Cache specifies which kvm disk cache mode should be used.",
+      "description": "Cache specifies which kvm disk cache mode should be used. Supported values are: CacheNone, CacheWriteThrough.",
       "type": "string"
      },
      "cdrom": {
@@ -9695,7 +9868,7 @@
      },
      "synictimer": {
       "description": "SyNICTimer enables Synthetic Interrupt Controller Timers, reducing CPU load. Defaults to the machine type setting.",
-      "$ref": "#/definitions/v1.FeatureState"
+      "$ref": "#/definitions/v1.SyNICTimer"
      },
      "tlbflush": {
       "description": "TLBFlush improves performances in overcommited environments. Requires vpindex. Defaults to the machine type setting.",
@@ -9780,6 +9953,10 @@
       "description": "Configure how KVM presence is exposed to the guest.",
       "$ref": "#/definitions/v1.FeatureKVM"
      },
+     "pvspinlock": {
+      "description": "Notify the guest that the host supports paravirtual spinlocks. For older kernels this feature should be explicitly disabled.",
+      "$ref": "#/definitions/v1.FeatureState"
+     },
      "smm": {
       "description": "SMM enables/disables System Management Mode. TSEG not yet implemented.",
       "$ref": "#/definitions/v1.FeatureState"
@@ -9848,6 +10025,21 @@
      },
      "name": {
       "description": "Name of the GPU device as exposed by a device plugin",
+      "type": "string"
+     }
+    }
+   },
+   "v1.GuestAgentCommandInfo": {
+    "description": "List of commands that QEMU guest agent supports",
+    "type": "object",
+    "required": [
+     "name"
+    ],
+    "properties": {
+     "enabled": {
+      "type": "boolean"
+     },
+     "name": {
       "type": "string"
      }
     }
@@ -10168,8 +10360,17 @@
      "migrations": {
       "$ref": "#/definitions/v1.MigrationConfiguration"
      },
+     "minCPUModel": {
+      "type": "string"
+     },
      "network": {
       "$ref": "#/definitions/v1.NetworkConfiguration"
+     },
+     "obsoleteCPUModels": {
+      "type": "object",
+      "additionalProperties": {
+       "type": "boolean"
+      }
      },
      "ovmfPath": {
       "type": "string"
@@ -10184,6 +10385,7 @@
       "$ref": "#/definitions/v1.SMBiosConfiguration"
      },
      "supportedGuestAgentVersions": {
+      "description": "deprecated",
       "type": "array",
       "items": {
        "type": "string"
@@ -10220,14 +10422,25 @@
    "v1.KubeVirtSelfSignConfiguration": {
     "type": "object",
     "properties": {
+     "ca": {
+      "description": "CA configuration CA certs are kept in the CA bundle as long as they are valid",
+      "$ref": "#/definitions/v1.CertConfig"
+     },
      "caOverlapInterval": {
+      "description": "Deprecated. Use CA.Duration and CA.RenewBefore instead",
       "$ref": "#/definitions/k8s.io.apimachinery.pkg.apis.meta.v1.Duration"
      },
      "caRotateInterval": {
+      "description": "Deprecated. Use CA.Duration instead",
       "$ref": "#/definitions/k8s.io.apimachinery.pkg.apis.meta.v1.Duration"
      },
      "certRotateInterval": {
+      "description": "Deprecated. Use Server.Duration instead",
       "$ref": "#/definitions/k8s.io.apimachinery.pkg.apis.meta.v1.Duration"
+     },
+     "server": {
+      "description": "Server configuration Certs are rotated and discarded",
+      "$ref": "#/definitions/v1.CertConfig"
      }
     }
    },
@@ -10280,6 +10493,10 @@
       "description": "Specifies if kubevirt can be deleted if workloads are still present. This is mainly a precaution to avoid accidental data loss",
       "type": "string"
      },
+     "workloadUpdateStrategy": {
+      "description": "WorkloadUpdateStrategy defines at the cluster level how to handle automated workload updates",
+      "$ref": "#/definitions/v1.KubeVirtWorkloadUpdateStrategy"
+     },
      "workloads": {
       "description": "selectors and tolerations that should apply to KubeVirt workloads",
       "$ref": "#/definitions/v1.ComponentConfig"
@@ -10297,6 +10514,13 @@
        "$ref": "#/definitions/v1.KubeVirtCondition"
       }
      },
+     "generations": {
+      "type": "array",
+      "items": {
+       "$ref": "#/definitions/github.com.openshift.api.operator.v1.GenerationStatus"
+      },
+      "x-kubernetes-list-type": "atomic"
+     },
      "observedDeploymentConfig": {
       "type": "string"
      },
@@ -10312,6 +10536,10 @@
      "operatorVersion": {
       "type": "string"
      },
+     "outdatedVirtualMachineInstanceWorkloads": {
+      "type": "integer",
+      "format": "int32"
+     },
      "phase": {
       "type": "string"
      },
@@ -10326,6 +10554,29 @@
      },
      "targetKubeVirtVersion": {
       "type": "string"
+     }
+    }
+   },
+   "v1.KubeVirtWorkloadUpdateStrategy": {
+    "description": "KubeVirtWorkloadUpdateStrategy defines options related to updating a KubeVirt install",
+    "type": "object",
+    "properties": {
+     "batchEvictionInterval": {
+      "description": "BatchEvictionInterval Represents the interval to wait before issuing the next batch of shutdowns\n\nDefaults to 1 minute",
+      "$ref": "#/definitions/k8s.io.apimachinery.pkg.apis.meta.v1.Duration"
+     },
+     "batchEvictionSize": {
+      "description": "BatchEvictionSize Represents the number of VMIs that can be forced updated per the BatchShutdownInteral interval\n\nDefaults to 10",
+      "type": "integer",
+      "format": "int32"
+     },
+     "workloadUpdateMethods": {
+      "description": "WorkloadUpdateMethods defines the methods that can be used to disrupt workloads during automated workload updates. When multiple methods are present, the least disruptive method takes precedence over more disruptive methods. For example if both LiveMigrate and Shutdown methods are listed, only VMs which are not live migratable will be restarted/shutdown\n\nAn empty list defaults to no automated workload updating",
+      "type": "array",
+      "items": {
+       "type": "string"
+      },
+      "x-kubernetes-list-type": "atomic"
      }
     }
    },
@@ -10589,6 +10840,10 @@
     "description": "Represents the stock pod network interface.",
     "type": "object",
     "properties": {
+     "vmIPv6NetworkCIDR": {
+      "description": "IPv6 CIDR for the vm network. Defaults to fd10:0:2::/120 if not specified.",
+      "type": "string"
+     },
      "vmNetworkCIDR": {
       "description": "CIDR for vm network. Default 10.0.2.0/24 if not specified.",
       "type": "string"
@@ -10832,6 +11087,31 @@
      "serviceAccountName": {
       "description": "Name of the service account in the pod's namespace to use. More info: https://kubernetes.io/docs/tasks/configure-pod-container/configure-service-account/",
       "type": "string"
+     }
+    }
+   },
+   "v1.SyNICTimer": {
+    "type": "object",
+    "properties": {
+     "direct": {
+      "$ref": "#/definitions/v1.FeatureState"
+     },
+     "enabled": {
+      "type": "boolean"
+     }
+    }
+   },
+   "v1.SysprepSource": {
+    "description": "Represents a Sysprep volume source.",
+    "type": "object",
+    "properties": {
+     "configMap": {
+      "description": "ConfigMap references a ConfigMap that contains Sysprep answer file named autounattend.xml that should be attached as disk of CDROM type.",
+      "$ref": "#/definitions/k8s.io.api.core.v1.LocalObjectReference"
+     },
+     "secret": {
+      "description": "Secret references a k8s Secret that contains Sysprep answer file named autounattend.xml that should be attached as disk of CDROM type.",
+      "$ref": "#/definitions/k8s.io.api.core.v1.LocalObjectReference"
      }
     }
    },
@@ -11120,6 +11400,14 @@
      "os": {
       "description": "OS contains the guest operating system information",
       "$ref": "#/definitions/v1.VirtualMachineInstanceGuestOSInfo"
+     },
+     "supportedCommands": {
+      "description": "Return command list the guest agent supports",
+      "type": "array",
+      "items": {
+       "$ref": "#/definitions/v1.GuestAgentCommandInfo"
+      },
+      "x-kubernetes-list-type": "atomic"
      },
      "timezone": {
       "description": "Timezone is guest os current timezone",
@@ -11446,6 +11734,7 @@
     }
    },
    "v1.VirtualMachineInstancePreset": {
+    "description": "VirtualMachineInstancePreset defines a VMI spec.domain to be applied to all VMIs that match the provided label selector More info: https://kubevirt.io/user-guide/virtual_machines/presets/#overrides",
     "type": "object",
     "properties": {
      "apiVersion": {
@@ -11774,6 +12063,10 @@
        "$ref": "#/definitions/v1.VirtualMachineInstanceNetworkInterface"
       }
      },
+     "launcherContainerImageVersion": {
+      "description": "LauncherContainerImageVersion indicates what container image is currently active for the vmi.",
+      "type": "string"
+     },
      "migrationMethod": {
       "description": "Represents the method using which the vmi can be migrated: live migration or block migration",
       "type": "string"
@@ -12016,6 +12309,10 @@
      "serviceAccount": {
       "description": "ServiceAccountVolumeSource represents a reference to a service account. There can only be one volume of this type! More info: https://kubernetes.io/docs/tasks/configure-pod-container/configure-service-account/",
       "$ref": "#/definitions/v1.ServiceAccountVolumeSource"
+     },
+     "sysprep": {
+      "description": "Represents a Sysprep volume source.",
+      "$ref": "#/definitions/v1.SysprepSource"
      }
     }
    },
@@ -12128,6 +12425,24 @@
    "v1alpha1.DataVolumeBlankImage": {
     "description": "DataVolumeBlankImage provides the parameters to create a new raw blank image for the PVC",
     "type": "object"
+   },
+   "v1alpha1.DataVolumeCheckpoint": {
+    "description": "DataVolumeCheckpoint defines a stage in a warm migration.",
+    "type": "object",
+    "required": [
+     "previous",
+     "current"
+    ],
+    "properties": {
+     "current": {
+      "description": "Current is the identifier of the snapshot created for this checkpoint.",
+      "type": "string"
+     },
+     "previous": {
+      "description": "Previous is the identifier of the snapshot from the previous checkpoint.",
+      "type": "string"
+     }
+    }
    },
    "v1alpha1.DataVolumeSource": {
     "description": "DataVolumeSource represents the source for our Data Volume, this can be HTTP, Imageio, S3, Registry or an existing PVC",
@@ -12252,6 +12567,10 @@
      "url"
     ],
     "properties": {
+     "certConfigMap": {
+      "description": "CertConfigMap is a configmap reference, containing a Certificate Authority(CA) public key, and a base64 encoded pem certificate",
+      "type": "string"
+     },
      "secretRef": {
       "description": "SecretRef provides the secret reference needed to access the S3 source",
       "type": "string"
@@ -12300,9 +12619,24 @@
      "pvc"
     ],
     "properties": {
+     "checkpoints": {
+      "description": "Checkpoints is a list of DataVolumeCheckpoints, representing stages in a multistage import.",
+      "type": "array",
+      "items": {
+       "$ref": "#/definitions/v1alpha1.DataVolumeCheckpoint"
+      }
+     },
      "contentType": {
       "description": "DataVolumeContentType options: \"kubevirt\", \"archive\"",
       "type": "string"
+     },
+     "finalCheckpoint": {
+      "description": "FinalCheckpoint indicates whether the current DataVolumeCheckpoint is the final checkpoint.",
+      "type": "boolean"
+     },
+     "preallocation": {
+      "description": "Preallocation controls whether storage for DataVolumes should be allocated in advance.",
+      "type": "boolean"
      },
      "pvc": {
       "description": "PVC is the PVC specification",
@@ -12629,6 +12963,13 @@
      },
      "error": {
       "$ref": "#/definitions/v1alpha1.Error"
+     },
+     "indications": {
+      "type": "array",
+      "items": {
+       "type": "string"
+      },
+      "x-kubernetes-list-type": "set"
      },
      "readyToUse": {
       "type": "boolean"

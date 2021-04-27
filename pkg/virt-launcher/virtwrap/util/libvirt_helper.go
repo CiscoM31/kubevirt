@@ -18,6 +18,8 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	libvirt "libvirt.org/libvirt-go"
 
+	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/converter"
+
 	v1 "kubevirt.io/client-go/api/v1"
 	"kubevirt.io/client-go/log"
 	"kubevirt.io/kubevirt/pkg/hooks"
@@ -25,6 +27,8 @@ import (
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/api"
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/cli"
 )
+
+const QEMUSeaBiosDebugPipe = converter.QEMUSeaBiosDebugPipe
 
 var LifeCycleTranslationMap = map[libvirt.DomainState]api.LifeCycle{
 	libvirt.DOMAIN_NOSTATE:     api.NoState,
@@ -126,7 +130,13 @@ func GetDomainSpecWithRuntimeInfo(dom cli.VirDomain) (*api.DomainSpec, error) {
 		return nil, err
 	}
 
-	metadataXML, err := dom.GetMetadata(libvirt.DOMAIN_METADATA_ELEMENT, "http://kubevirt.io", libvirt.DOMAIN_AFFECT_CONFIG)
+	// use different flag with GetMetadata for transient domains
+	domainModificationImpactFlag, err := getDomainModificationImpactFlag(dom)
+	if err != nil {
+		return activeSpec, err
+	}
+
+	metadataXML, err := dom.GetMetadata(libvirt.DOMAIN_METADATA_ELEMENT, "http://kubevirt.io", domainModificationImpactFlag)
 	if err != nil {
 		log.Log.Reason(err).Error("failed to get domain metadata")
 		return activeSpec, err
@@ -245,71 +255,119 @@ func StartLibvirt(stopChan chan struct{}) {
 	}()
 }
 
-func StartVirtlog(stopChan chan struct{}, domainName string) {
-	go func() {
-		for {
-			var args []string
-			args = append(args, "-f")
-			args = append(args, "/etc/libvirt/virtlogd.conf")
-			// #nosec No risk for attacket injection. Args  are predefined strings
-			cmd := exec.Command("/usr/sbin/virtlogd", args...)
+func startVirtlogdLogging(stopChan chan struct{}, domainName string) {
+	for {
+		cmd := exec.Command("/usr/sbin/virtlogd", "-f", "/etc/libvirt/virtlogd.conf")
 
-			exitChan := make(chan struct{})
+		exitChan := make(chan struct{})
 
-			err := cmd.Start()
+		err := cmd.Start()
+		if err != nil {
+			log.Log.Reason(err).Error("failed to start virtlogd")
+			panic(err)
+		}
+
+		go func() {
+			logfile := fmt.Sprintf("/var/log/libvirt/qemu/%s.log", domainName)
+
+			// It can take a few seconds to the log file to be created
+			for {
+				_, err = os.Stat(logfile)
+				if !os.IsNotExist(err) {
+					break
+				}
+				time.Sleep(time.Second)
+			}
+			// #nosec No risk for path injection. logfile has a static basedir
+			file, err := os.Open(logfile)
 			if err != nil {
-				log.Log.Reason(err).Error("failed to start virtlogd")
-				panic(err)
+				errMsg := fmt.Sprintf("failed to open logfile in path: \"%s\"", logfile)
+				log.Log.Reason(err).Error(errMsg)
+				return
+			}
+			defer util.CloseIOAndCheckErr(file, nil)
+
+			scanner := bufio.NewScanner(file)
+			scanner.Buffer(make([]byte, 1024), 512*1024)
+			for scanner.Scan() {
+				log.LogQemuLogLine(log.Log, scanner.Text())
 			}
 
-			go func() {
-				logfile := fmt.Sprintf("/var/log/libvirt/qemu/%s.log", domainName)
+			if err := scanner.Err(); err != nil {
+				log.Log.Reason(err).Error("failed to read virtlogd logs")
+			}
+		}()
 
-				// It can take a few seconds to the log file to be created
-				for {
-					_, err = os.Stat(logfile)
-					if !os.IsNotExist(err) {
-						break
-					}
-					time.Sleep(time.Second)
-				}
-				// #nosec No risk for path injection. logfile has a static basedir
-				file, err := os.Open(logfile)
-				if err != nil {
-					log.Log.Reason(err).Error("failed to catch virtlogd logs")
-					return
-				}
-				defer util.CloseIOAndCheckErr(file, nil)
+		go func() {
+			defer close(exitChan)
+			_ = cmd.Wait()
+		}()
 
-				scanner := bufio.NewScanner(file)
-				scanner.Buffer(make([]byte, 1024), 512*1024)
-				for scanner.Scan() {
-					log.LogQemuLogLine(log.Log, scanner.Text())
-				}
+		select {
+		case <-stopChan:
+			_ = cmd.Process.Kill()
+			return
+		case <-exitChan:
+			log.Log.Errorf("virtlogd exited, restarting")
+		}
 
-				if err := scanner.Err(); err != nil {
-					log.Log.Reason(err).Error("failed to read virtlogd logs")
-				}
-			}()
+		// this sleep is to avoid consumming all resources in the
+		// event of a virtlogd crash loop.
+		time.Sleep(time.Second)
+	}
+}
 
-			go func() {
-				defer close(exitChan)
-				cmd.Wait()
-			}()
+func startQEMUSeaBiosLogging(stopChan chan struct{}) {
+	const QEMUSeaBiosDebugPipeMode uint32 = 0666
+	const logLinePrefix = "[SeaBios]:"
+
+	err := syscall.Mkfifo(QEMUSeaBiosDebugPipe, QEMUSeaBiosDebugPipeMode)
+	if err != nil {
+		log.Log.Reason(err).Error(fmt.Sprintf("%s failed creating a pipe for sea bios debug logs", logLinePrefix))
+		return
+	}
+
+	// Chmod is needed since umask is 0018. Therefore Mkfifo does not actually create a pipe with proper permissions.
+	err = syscall.Chmod(QEMUSeaBiosDebugPipe, QEMUSeaBiosDebugPipeMode)
+	if err != nil {
+		log.Log.Reason(err).Error(fmt.Sprintf("%s failed executing chmod on pipe for sea bios debug logs.", logLinePrefix))
+		return
+	}
+
+	QEMUPipe, err := os.OpenFile(QEMUSeaBiosDebugPipe, os.O_RDONLY, 0600)
+
+	if err != nil {
+		log.Log.Reason(err).Error(fmt.Sprintf("%s failed to open %s", logLinePrefix, QEMUSeaBiosDebugPipe))
+		return
+	}
+	defer QEMUPipe.Close()
+
+	scanner := bufio.NewScanner(QEMUPipe)
+	for {
+		for scanner.Scan() {
+			logLine := fmt.Sprintf("%s %s", logLinePrefix, scanner.Text())
+
+			log.LogQemuLogLine(log.Log, logLine)
 
 			select {
 			case <-stopChan:
-				cmd.Process.Kill()
 				return
-			case <-exitChan:
-				log.Log.Errorf("virtlogd exited, restarting")
+			default:
 			}
-
-			// this sleep is to avoid consumming all resources in the
-			// event of a virtlogd crash loop.
-			time.Sleep(time.Second)
 		}
-	}()
+
+		if err := scanner.Err(); err != nil {
+			log.Log.Reason(err).Error(fmt.Sprintf("%s reader failed with an error", logLinePrefix))
+			return
+		}
+
+		log.Log.Errorf(fmt.Sprintf("%s exited, restarting", logLinePrefix))
+	}
+}
+
+func StartVirtlog(stopChan chan struct{}, domainName string) {
+	go startVirtlogdLogging(stopChan, domainName)
+	go startQEMUSeaBiosLogging(stopChan)
 }
 
 // returns the namespace and name that is encoded in the
@@ -375,6 +433,7 @@ func SetupLibvirt() (err error) {
 		if err != nil {
 			return err
 		}
+		// #nosec G302: Poor file permissions used with chmod. Safe to use the common permission setting for the specific system file
 		err = os.Chmod("/dev/kvm", 0660)
 		if err != nil {
 			return err
@@ -383,7 +442,7 @@ func SetupLibvirt() (err error) {
 		return err
 	}
 
-	qemuConf, err := os.OpenFile("/etc/libvirt/qemu.conf", os.O_APPEND|os.O_WRONLY, 0644)
+	qemuConf, err := os.OpenFile("/etc/libvirt/qemu.conf", os.O_APPEND|os.O_WRONLY, 0600)
 	if err != nil {
 		return err
 	}
@@ -403,7 +462,7 @@ func SetupLibvirt() (err error) {
 	}
 
 	// Let libvirt log to stderr
-	libvirtConf, err := os.OpenFile("/etc/libvirt/libvirtd.conf", os.O_APPEND|os.O_WRONLY, 0644)
+	libvirtConf, err := util.OpenFileWithNosec("/etc/libvirt/libvirtd.conf", os.O_APPEND|os.O_WRONLY)
 	if err != nil {
 		return err
 	}
@@ -413,14 +472,14 @@ func SetupLibvirt() (err error) {
 		return err
 	}
 
-	if _, ok := os.LookupEnv("LIBVIRT_DEBUG_LOGS"); ok {
+	if envVarValue, ok := os.LookupEnv("LIBVIRT_DEBUG_LOGS"); ok && (envVarValue == "1") {
 		// see https://libvirt.org/kbase/debuglogs.html for details
 		_, err = libvirtConf.WriteString("log_filters=\"3:remote 4:event 3:util.json 3:util.object 3:util.dbus 3:util.netlink 3:node_device 3:rpc 3:access 1:*\"\n")
 		if err != nil {
 			return err
 		}
 	}
-	if _, ok := os.LookupEnv("VIRTIOFSD_DEBUG_LOGS"); ok {
+	if envVarValue, ok := os.LookupEnv("VIRTIOFSD_DEBUG_LOGS"); ok && (envVarValue == "1") {
 		_, err = qemuConf.WriteString("virtiofsd_debug = 1\n")
 		if err != nil {
 			return err
@@ -428,4 +487,18 @@ func SetupLibvirt() (err error) {
 	}
 
 	return nil
+}
+
+func getDomainModificationImpactFlag(dom cli.VirDomain) (libvirt.DomainModificationImpact, error) {
+	isDomainPersistent, err := dom.IsPersistent()
+	if err != nil {
+		log.Log.Reason(err).Error("failed to query a domain")
+		return libvirt.DOMAIN_AFFECT_CONFIG, err
+	}
+	if !isDomainPersistent {
+		log.Log.V(3).Info("domain is transient")
+		return libvirt.DOMAIN_AFFECT_LIVE, nil
+	}
+	log.Log.V(3).Info("domain is persistent")
+	return libvirt.DOMAIN_AFFECT_CONFIG, nil
 }

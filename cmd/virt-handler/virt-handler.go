@@ -20,6 +20,7 @@
 package main
 
 import (
+	"context"
 	"crypto/tls"
 	"fmt"
 	"io"
@@ -28,6 +29,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"syscall"
 	"time"
 
@@ -35,9 +37,8 @@ import (
 	"github.com/golang/glog"
 	flag "github.com/spf13/pflag"
 	k8sv1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/fields"
-	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
+	utilwait "k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/kubernetes/scheme"
 	k8coresv1 "k8s.io/client-go/kubernetes/typed/core/v1"
 	"k8s.io/client-go/tools/cache"
@@ -45,6 +46,8 @@ import (
 	"k8s.io/client-go/util/certificate"
 
 	"kubevirt.io/kubevirt/pkg/healthz"
+
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	v1 "kubevirt.io/client-go/api/v1"
 	"kubevirt.io/client-go/kubecli"
@@ -64,8 +67,13 @@ import (
 	virtconfig "kubevirt.io/kubevirt/pkg/virt-config"
 	virthandler "kubevirt.io/kubevirt/pkg/virt-handler"
 	virtcache "kubevirt.io/kubevirt/pkg/virt-handler/cache"
+	"kubevirt.io/kubevirt/pkg/virt-handler/cgroup"
 	cmdclient "kubevirt.io/kubevirt/pkg/virt-handler/cmd-client"
+	devicemanager "kubevirt.io/kubevirt/pkg/virt-handler/device-manager"
 	"kubevirt.io/kubevirt/pkg/virt-handler/isolation"
+	migrationproxy "kubevirt.io/kubevirt/pkg/virt-handler/migration-proxy"
+	nodelabeller "kubevirt.io/kubevirt/pkg/virt-handler/node-labeller"
+	nodelabellerutil "kubevirt.io/kubevirt/pkg/virt-handler/node-labeller/util"
 	"kubevirt.io/kubevirt/pkg/virt-handler/rest"
 	"kubevirt.io/kubevirt/pkg/virt-handler/selinux"
 	virt_api "kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/api"
@@ -95,6 +103,9 @@ const (
 	// Default period for resyncing virt-launcher domain cache
 	defaultDomainResyncPeriodSeconds = 300
 
+	// Default seconds to wait for migration connections to terminate before shutting down
+	defaultGracefulShutdownSeconds = 300
+
 	// Default ConfigMap name of CA
 	defaultCAConfigMapName = "kubevirt-ca"
 
@@ -117,6 +128,7 @@ type virtHandlerApp struct {
 	MaxDevices                int
 	MaxRequestsInFlight       int
 	domainResyncPeriodSeconds int
+	gracefulShutdownSeconds   int
 
 	caConfigMapName    string
 	clientCertFilePath string
@@ -147,7 +159,7 @@ func (app *virtHandlerApp) prepareCertManager() (err error) {
 
 func (app *virtHandlerApp) markNodeAsUnschedulable(logger *log.FilteredLogger) {
 	data := []byte(fmt.Sprintf(`{"metadata": { "labels": {"%s": "false"}}}`, v1.NodeSchedulable))
-	_, err := app.virtCli.CoreV1().Nodes().Patch(app.HostOverride, types.StrategicMergePatchType, data)
+	_, err := app.virtCli.CoreV1().Nodes().Patch(context.Background(), app.HostOverride, types.StrategicMergePatchType, data, metav1.PatchOptions{})
 	if err != nil {
 		logger.V(1).Level(log.ERROR).Log("Unable to mark node as unschedulable", err.Error())
 	}
@@ -190,6 +202,11 @@ func (app *virtHandlerApp) Run() {
 
 	app.markNodeAsUnschedulable(logger)
 
+	app.namespace, err = clientutil.GetNamespace()
+	if err != nil {
+		glog.Fatalf("Error searching for namespace: %v", err)
+	}
+
 	go func() {
 		sigint := make(chan os.Signal, 1)
 
@@ -206,33 +223,14 @@ func (app *virtHandlerApp) Run() {
 	// Scheme is used to create an ObjectReference from an Object (e.g. VirtualMachineInstance) during Event creation
 	recorder := broadcaster.NewRecorder(scheme.Scheme, k8sv1.EventSource{Component: "virt-handler", Host: app.HostOverride})
 
-	vmiSourceLabel, err := labels.Parse(fmt.Sprintf(v1.NodeNameLabel+" in (%s)", app.HostOverride))
-	if err != nil {
-		panic(err)
-	}
-	vmiTargetLabel, err := labels.Parse(fmt.Sprintf(v1.MigrationTargetNodeNameLabel+" in (%s)", app.HostOverride))
-	if err != nil {
-		panic(err)
-	}
-
 	// Wire VirtualMachineInstance controller
+	factory := controller.NewKubeInformerFactory(app.virtCli.RestClient(), app.virtCli, nil, app.namespace)
 
-	vmSourceSharedInformer := cache.NewSharedIndexInformer(
-		controller.NewListWatchFromClient(app.virtCli.RestClient(), "virtualmachineinstances", k8sv1.NamespaceAll, fields.Everything(), vmiSourceLabel),
-		&v1.VirtualMachineInstance{},
-		0,
-		cache.Indexers{},
-	)
-
-	vmTargetSharedInformer := cache.NewSharedIndexInformer(
-		controller.NewListWatchFromClient(app.virtCli.RestClient(), "virtualmachineinstances", k8sv1.NamespaceAll, fields.Everything(), vmiTargetLabel),
-		&v1.VirtualMachineInstance{},
-		0,
-		cache.Indexers{},
-	)
+	vmiSourceInformer := factory.VMISourceHost(app.HostOverride)
+	vmiTargetInformer := factory.VMITargetHost(app.HostOverride)
 
 	// Wire Domain controller
-	domainSharedInformer, err := virtcache.NewSharedInformer(app.VirtShareDir, int(app.WatchdogTimeoutDuration.Seconds()), recorder, vmSourceSharedInformer.GetStore(), time.Duration(app.domainResyncPeriodSeconds)*time.Second)
+	domainSharedInformer, err := virtcache.NewSharedInformer(app.VirtShareDir, int(app.WatchdogTimeoutDuration.Seconds()), recorder, vmiSourceInformer.GetStore(), time.Duration(app.domainResyncPeriodSeconds)*time.Second)
 	if err != nil {
 		panic(err)
 	}
@@ -257,12 +255,6 @@ func (app *virtHandlerApp) Run() {
 		panic(err)
 	}
 
-	// Directory to store notwork information related to VMIs
-	err = os.MkdirAll(util.NetworkInfoDir, 0755)
-	if err != nil {
-		panic(err)
-	}
-
 	cmdclient.SetPodsBaseDir("/pods")
 	cmdclient.SetLegacyBaseDir(app.VirtShareDir)
 	containerdisk.SetKubeletPodsDirectory(app.KubeletPodsDir)
@@ -271,16 +263,9 @@ func (app *virtHandlerApp) Run() {
 		panic(err)
 	}
 
-	app.namespace, err = clientutil.GetNamespace()
-	if err != nil {
-		glog.Fatalf("Error searching for namespace: %v", err)
-	}
-
 	if err := app.prepareCertManager(); err != nil {
 		glog.Fatalf("Error preparing the certificate manager: %v", err)
 	}
-
-	factory := controller.NewKubeInformerFactory(app.virtCli.RestClient(), app.virtCli, nil, app.namespace)
 
 	if err := app.setupTLS(factory); err != nil {
 		glog.Fatalf("Error constructing migration tls config: %v", err)
@@ -294,11 +279,12 @@ func (app *virtHandlerApp) Run() {
 		0,
 		cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc})
 
-	podIsolationDetector := isolation.NewSocketBasedIsolationDetector(app.VirtShareDir)
-	vmiInformer := factory.VMI()
+	podIsolationDetector := isolation.NewSocketBasedIsolationDetector(app.VirtShareDir, cgroup.NewParser())
 	app.clusterConfig = virtconfig.NewClusterConfig(factory.ConfigMap(), factory.CRD(), factory.KubeVirt(), app.namespace)
 	// set log verbosity
 	app.clusterConfig.SetConfigModifiedCallback(app.shouldChangeLogVerbosity)
+
+	migrationProxy := migrationproxy.NewMigrationProxyManager(app.serverTLSConfig, app.clientTLSConfig)
 
 	vmController := virthandler.NewController(
 		recorder,
@@ -307,16 +293,15 @@ func (app *virtHandlerApp) Run() {
 		app.PodIpAddress,
 		app.VirtShareDir,
 		app.VirtPrivateDir,
-		vmSourceSharedInformer,
-		vmTargetSharedInformer,
+		vmiSourceInformer,
+		vmiTargetInformer,
 		domainSharedInformer,
 		gracefulShutdownInformer,
 		int(app.WatchdogTimeoutDuration.Seconds()),
 		app.MaxDevices,
 		app.clusterConfig,
-		app.serverTLSConfig,
-		app.clientTLSConfig,
 		podIsolationDetector,
+		migrationProxy,
 	)
 
 	promErrCh := make(chan error)
@@ -324,15 +309,15 @@ func (app *virtHandlerApp) Run() {
 
 	consoleHandler := rest.NewConsoleHandler(
 		podIsolationDetector,
-		vmiInformer,
+		vmiSourceInformer,
 	)
 
 	lifecycleHandler := rest.NewLifecycleHandler(
-		vmiInformer,
+		vmiSourceInformer,
 		app.VirtShareDir,
 	)
 
-	promvm.SetupCollector(app.virtCli, app.VirtShareDir, app.HostOverride, app.MaxRequestsInFlight)
+	promvm.SetupCollector(app.virtCli, app.VirtShareDir, app.HostOverride, app.MaxRequestsInFlight, vmiSourceInformer)
 
 	go app.clientcertmanager.Start()
 	go app.servercertmanager.Start()
@@ -340,7 +325,10 @@ func (app *virtHandlerApp) Run() {
 	// Bootstrapping. From here on the startup order matters
 	stop := make(chan struct{})
 	defer close(stop)
+
 	factory.Start(stop)
+	go gracefulShutdownInformer.Run(stop)
+	go domainSharedInformer.Run(stop)
 
 	se, exists, err := selinux.NewSELinux()
 	if err == nil && exists {
@@ -362,15 +350,74 @@ func (app *virtHandlerApp) Run() {
 		panic(fmt.Errorf("failed to detect the presence of selinux: %v", err))
 	}
 
-	cache.WaitForCacheSync(stop, factory.ConfigMap().HasSynced, vmiInformer.HasSynced, factory.CRD().HasSynced)
+	cache.WaitForCacheSync(stop, factory.ConfigMap().HasSynced, vmiSourceInformer.HasSynced, factory.CRD().HasSynced)
 
 	go vmController.Run(10, stop)
+
+	// Currently nodeLabeller only support x86_64
+	arch := virtconfig.NewDefaultArch(runtime.GOARCH)
+	if !arch.IsARM64() && !arch.IsPPC64() {
+		deviceController := &devicemanager.DeviceController{}
+		if deviceController.NodeHasDevice(nodelabellerutil.KVMPath) {
+			nodeLabellerController, err := nodelabeller.NewNodeLabeller(app.clusterConfig, app.virtCli, app.HostOverride, app.namespace)
+			if err != nil {
+				panic(err)
+			}
+
+			go nodeLabellerController.Run(10, stop)
+		} else {
+			logger.V(1).Level(log.INFO).Log("node-labeller is disabled, cannot work without KVM device.")
+		}
+	}
+
+	doneCh := make(chan string)
+	defer close(doneCh)
 
 	errCh := make(chan error)
 	go app.runServer(errCh, consoleHandler, lifecycleHandler)
 
-	// wait for one of the servers to exit
-	fmt.Println(<-errCh)
+	c := make(chan os.Signal, 1)
+	signal.Notify(c, os.Interrupt,
+		syscall.SIGHUP,
+		syscall.SIGINT,
+		syscall.SIGTERM,
+		syscall.SIGQUIT,
+	)
+	// start graceful shutdown handler
+	go func() {
+		connectionInterval := 10 * time.Second
+		connectionTimeout := time.Duration(app.gracefulShutdownSeconds) * time.Second
+
+		s := <-c
+		log.Log.Infof("Received signal %s, initiating graceful shutdown", s.String())
+
+		// This triggers the migration proxy to no longer accept new connections
+		migrationProxy.InitiateGracefulShutdown()
+
+		err := utilwait.PollImmediate(connectionInterval, connectionTimeout, func() (done bool, err error) {
+			count := migrationProxy.OpenListenerCount()
+			if count > 0 {
+				log.Log.Infof("waiting for %d migration listeners to terminate", count)
+				return false, nil
+			}
+			return true, nil
+		})
+
+		if err != nil {
+			errCh <- fmt.Errorf("Timed out waiting for migration listeners to terminate: %v", err)
+		} else {
+			doneCh <- "migration proxy cleanly shutdown"
+		}
+	}()
+
+	// wait exit condition
+	select {
+	case err := <-errCh:
+		log.Log.Reason(err).Errorf("exiting due to error")
+		panic(err)
+	case doneMsg := <-doneCh:
+		log.Log.Infof("cleanly exiting with reason: %s", doneMsg)
+	}
 }
 
 // Update virt-handler log verbosity on relevant config changes
@@ -477,6 +524,8 @@ func (app *virtHandlerApp) AddFlags() {
 	flag.IntVar(&app.domainResyncPeriodSeconds, "domain-resync-period-seconds", defaultDomainResyncPeriodSeconds,
 		"Recurring period for resyncing all known virt-launcher domains.")
 
+	flag.IntVar(&app.gracefulShutdownSeconds, "graceful-shutdown-seconds", defaultGracefulShutdownSeconds,
+		"The number of seconds to wait for existing migration connections to close before shutting down virt-handler.")
 }
 
 func (app *virtHandlerApp) setupTLS(factory controller.KubeInformerFactory) error {

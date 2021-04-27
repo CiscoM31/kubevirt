@@ -37,7 +37,6 @@ var (
 	productionLabel         = map[string]string{"type": "production"}
 	testLabel               = map[string]string{"type": "testing"}
 	productionLabelSelector = labels.Set{"type": "production"}.AsSelector()
-	testLabelSelector       = labels.Set{"type": "testing"}.AsSelector()
 	controllerUID           = "123"
 )
 
@@ -317,7 +316,7 @@ type FakeVirtualMachineControl struct {
 
 var _ VirtualMachineControlInterface = &FakeVirtualMachineControl{}
 
-func (f *FakeVirtualMachineControl) PatchVirtualMachine(namespace, name string, data []byte) error {
+func (f *FakeVirtualMachineControl) PatchVirtualMachine(_, _ string, data []byte) error {
 	f.Lock()
 	defer f.Unlock()
 	f.Patches = append(f.Patches, data)
@@ -326,7 +325,7 @@ func (f *FakeVirtualMachineControl) PatchVirtualMachine(namespace, name string, 
 	}
 	return nil
 }
-func (f *FakeVirtualMachineControl) PatchDataVolume(namespace, name string, data []byte) error {
+func (f *FakeVirtualMachineControl) PatchDataVolume(_, _ string, data []byte) error {
 	f.Lock()
 	defer f.Unlock()
 	f.Patches = append(f.Patches, data)

@@ -20,7 +20,7 @@ import (
 
 const (
 	fakeName       = "example.org/deadbeef"
-	fakeID         = "DEAD:BEEF"
+	fakeID         = "dead:beef"
 	fakeDriver     = "vfio-pci"
 	fakeAddress    = "0000:00:00.0"
 	fakeIommuGroup = "0"
@@ -128,7 +128,7 @@ pciHostDevices:
 		fakeClusterConfig, _, _, kvInformer := testutils.NewFakeClusterConfigUsingKV(kv)
 
 		By("creating an empty device controller")
-		deviceController := NewDeviceController("master", 10, fakeClusterConfig)
+		deviceController := NewDeviceController("master", 10, "rw", fakeClusterConfig)
 		deviceController.devicePlugins = make(map[string]ControlledDevice)
 
 		By("adding a host device to the cluster config")

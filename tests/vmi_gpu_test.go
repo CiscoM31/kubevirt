@@ -1,6 +1,7 @@
 package tests_test
 
 import (
+	"context"
 	"encoding/xml"
 	"fmt"
 	"strings"
@@ -51,7 +52,7 @@ func checkGPUDevice(vmi *v1.VirtualMachineInstance, gpuName string) {
 	Expect(err).ToNot(HaveOccurred(), "GPU device %q was not found in the VMI %s within the given timeout", gpuName, vmi.Name)
 }
 
-var _ = Describe("[Serial]GPU", func() {
+var _ = Describe("[Serial][sig-compute]GPU", func() {
 	var err error
 	var virtClient kubecli.KubevirtClient
 
@@ -65,7 +66,7 @@ var _ = Describe("[Serial]GPU", func() {
 			gpuName := "random.com/gpu"
 			randomVMI := tests.NewRandomVMIWithEphemeralDisk(cd.ContainerDiskFor(cd.ContainerDiskCirros))
 			gpus := []v1.GPU{
-				v1.GPU{
+				{
 					Name:       "gpu1",
 					DeviceName: gpuName,
 				},
@@ -82,7 +83,8 @@ var _ = Describe("[Serial]GPU", func() {
 		})
 
 		It("[test_id:4608]Should create a valid VMI and appropriate libvirt domain", func() {
-			nodesList, err := virtClient.CoreV1().Nodes().List(metav1.ListOptions{})
+			nodesList, err := virtClient.CoreV1().Nodes().List(context.Background(), metav1.ListOptions{})
+			Expect(err).ToNot(HaveOccurred())
 			var gpuName = ""
 			for _, item := range nodesList.Items {
 				resourceList := item.Status.Allocatable
@@ -98,7 +100,7 @@ var _ = Describe("[Serial]GPU", func() {
 			Expect(gpuName).ToNot(Equal(""))
 			randomVMI := tests.NewRandomVMIWithEphemeralDisk(cd.ContainerDiskFor(cd.ContainerDiskCirros))
 			gpus := []v1.GPU{
-				v1.GPU{
+				{
 					Name:       "gpu1",
 					DeviceName: gpuName,
 				},

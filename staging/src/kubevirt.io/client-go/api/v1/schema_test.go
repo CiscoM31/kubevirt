@@ -121,7 +121,10 @@ var exampleJSONFmt = `{
             "enabled": false
           },
           "synictimer": {
-            "enabled": true
+            "enabled": true,
+            "direct": {
+              "enabled": true
+            }
           },
           "reset": {
             "enabled": false
@@ -145,6 +148,9 @@ var exampleJSONFmt = `{
         },
         "kvm": {
           "hidden": true
+        },
+        "pvspinlock": {
+          "enabled": false
         }
       },
       "devices": {
@@ -345,10 +351,11 @@ var _ = Describe("Schema", func() {
 			},
 		}
 		exampleVMI.Spec.Domain.Features = &Features{
-			ACPI: FeatureState{Enabled: _false},
-			SMM:  &FeatureState{Enabled: _true},
-			APIC: &FeatureAPIC{Enabled: _true},
-			KVM:  &FeatureKVM{Hidden: true},
+			ACPI:       FeatureState{Enabled: _false},
+			SMM:        &FeatureState{Enabled: _true},
+			APIC:       &FeatureAPIC{Enabled: _true},
+			KVM:        &FeatureKVM{Hidden: true},
+			Pvspinlock: &FeatureState{Enabled: _false},
 			Hyperv: &FeatureHyperv{
 				Relaxed:         &FeatureState{Enabled: _true},
 				VAPIC:           &FeatureState{Enabled: _false},
@@ -356,7 +363,7 @@ var _ = Describe("Schema", func() {
 				VPIndex:         &FeatureState{Enabled: _false},
 				Runtime:         &FeatureState{Enabled: _true},
 				SyNIC:           &FeatureState{Enabled: _false},
-				SyNICTimer:      &FeatureState{Enabled: _true},
+				SyNICTimer:      &SyNICTimer{Enabled: _true, Direct: &FeatureState{Enabled: _true}},
 				Reset:           &FeatureState{Enabled: _false},
 				VendorID:        &FeatureVendorID{Enabled: _true, VendorID: "vendor"},
 				Frequencies:     &FeatureState{Enabled: _false},

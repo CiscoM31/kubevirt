@@ -7,7 +7,7 @@ import (
 	v1 "kubevirt.io/client-go/api/v1"
 )
 
-func ListUnfinishedMigrations(informer cache.SharedIndexInformer) ([]*v1.VirtualMachineInstanceMigration, error) {
+func ListUnfinishedMigrations(informer cache.SharedIndexInformer) []*v1.VirtualMachineInstanceMigration {
 	objs := informer.GetStore().List()
 	migrations := []*v1.VirtualMachineInstanceMigration{}
 	for _, obj := range objs {
@@ -16,7 +16,7 @@ func ListUnfinishedMigrations(informer cache.SharedIndexInformer) ([]*v1.Virtual
 			migrations = append(migrations, migration)
 		}
 	}
-	return migrations, nil
+	return migrations
 }
 
 func FilterRunningMigrations(migrations []v1.VirtualMachineInstanceMigration) []v1.VirtualMachineInstanceMigration {
@@ -47,4 +47,13 @@ func IsMigrating(vmi *v1.VirtualMachineInstance) bool {
 		}
 	}
 	return running
+}
+
+func MigrationFailed(vmi *v1.VirtualMachineInstance) bool {
+
+	if vmi.Status.MigrationState != nil && vmi.Status.MigrationState.Failed {
+		return true
+	}
+
+	return false
 }

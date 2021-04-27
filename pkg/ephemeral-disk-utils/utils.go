@@ -23,12 +23,7 @@ import (
 	"fmt"
 	"os"
 	"os/user"
-	"path/filepath"
 	"strconv"
-	"strings"
-
-	v1 "kubevirt.io/client-go/api/v1"
-	"kubevirt.io/client-go/log"
 )
 
 // TODO this should be part of structs, instead of a global
@@ -66,13 +61,13 @@ func (om *OwnershipManager) SetFileOwnership(file string) error {
 	return os.Chown(file, uid, gid)
 }
 
-func RemoveFile(path string) error {
-	err := os.RemoveAll(path)
-	if err != nil && os.IsNotExist(err) {
-		return nil
-	} else if err != nil {
-		log.Log.Reason(err).Errorf("failed to remove %s", path)
-		return err
+func RemoveFilesIfExist(paths ...string) error {
+	var err error
+	for _, path := range paths {
+		err = os.Remove(path)
+		if err != nil && !os.IsNotExist(err) {
+			return err
+		}
 	}
 	return nil
 }
@@ -86,47 +81,6 @@ func FileExists(path string) (bool, error) {
 		err = nil
 	}
 	return exists, err
-}
-
-// Lists all vmis ephemeral disk has local data for
-func ListVmWithEphemeralDisk(localPath string) ([]*v1.VirtualMachineInstance, error) {
-	var keys []*v1.VirtualMachineInstance
-
-	exists, err := FileExists(localPath)
-	if err != nil {
-		return nil, err
-	}
-	if exists == false {
-		return nil, nil
-	}
-
-	err = filepath.Walk(localPath, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-		if info.IsDir() == false {
-			return nil
-		}
-
-		relativePath := strings.TrimPrefix(path, localPath+"/")
-		if relativePath == "" {
-			return nil
-		}
-		dirs := strings.Split(relativePath, "/")
-		if len(dirs) != 2 {
-			return nil
-		}
-
-		namespace := dirs[0]
-		domain := dirs[1]
-		if namespace == "" || domain == "" {
-			return nil
-		}
-		keys = append(keys, v1.NewVMIReferenceFromNameWithNS(dirs[0], dirs[1]))
-		return nil
-	})
-
-	return keys, err
 }
 
 type OwnershipManagerInterface interface {

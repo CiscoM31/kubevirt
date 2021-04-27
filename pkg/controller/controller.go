@@ -20,6 +20,7 @@
 package controller
 
 import (
+	"context"
 	"fmt"
 	"runtime/debug"
 
@@ -52,7 +53,7 @@ func NewListWatchFromClient(c cache.Getter, resource string, namespace string, f
 			Namespace(namespace).
 			Resource(resource).
 			VersionedParams(&options, metav1.ParameterCodec).
-			Do().
+			Do(context.Background()).
 			Get()
 	}
 	watchFunc := func(options metav1.ListOptions) (watch.Interface, error) {
@@ -63,7 +64,7 @@ func NewListWatchFromClient(c cache.Getter, resource string, namespace string, f
 			Namespace(namespace).
 			Resource(resource).
 			VersionedParams(&options, metav1.ParameterCodec).
-			Watch()
+			Watch(context.Background())
 	}
 	return &cache.ListWatch{ListFunc: listFunc, WatchFunc: watchFunc}
 }
@@ -97,21 +98,6 @@ func NewResourceEventHandlerFuncsForWorkqueue(queue workqueue.RateLimitingInterf
 	}
 }
 
-func NewResourceEventHandlerFuncsForFunc(f func(interface{})) cache.ResourceEventHandlerFuncs {
-	return cache.ResourceEventHandlerFuncs{
-		AddFunc: func(obj interface{}) {
-			f(obj)
-		},
-		UpdateFunc: func(old interface{}, new interface{}) {
-			f(new)
-
-		},
-		DeleteFunc: func(obj interface{}) {
-			f(obj)
-		},
-	}
-}
-
 func MigrationKey(migration *v1.VirtualMachineInstanceMigration) string {
 	return fmt.Sprintf("%v/%v", migration.ObjectMeta.Namespace, migration.ObjectMeta.Name)
 }
@@ -132,14 +118,6 @@ func VirtualMachineKeys(vmis []*v1.VirtualMachineInstance) []string {
 	keys := []string{}
 	for _, vmi := range vmis {
 		keys = append(keys, VirtualMachineKey(vmi))
-	}
-	return keys
-}
-
-func PodKeys(pods []*k8sv1.Pod) []string {
-	keys := []string{}
-	for _, pod := range pods {
-		keys = append(keys, PodKey(pod))
 	}
 	return keys
 }
@@ -248,4 +226,66 @@ func ApplyVolumeRequestOnVMISpec(vmiSpec *v1.VirtualMachineInstanceSpec, request
 	}
 
 	return vmiSpec
+}
+
+func CurrentVMIPod(vmi *v1.VirtualMachineInstance, podInformer cache.SharedIndexInformer) (*k8sv1.Pod, error) {
+
+	// current pod is the most recent pod created on the current VMI node
+	// OR the most recent pod created if no VMI node is set.
+
+	// Get all pods from the namespace
+	objs, err := podInformer.GetIndexer().ByIndex(cache.NamespaceIndex, vmi.Namespace)
+	if err != nil {
+		return nil, err
+	}
+	pods := []*k8sv1.Pod{}
+	for _, obj := range objs {
+		pod := obj.(*k8sv1.Pod)
+		pods = append(pods, pod)
+	}
+
+	var curPod *k8sv1.Pod = nil
+	for _, pod := range pods {
+		if !IsControlledBy(pod, vmi) {
+			continue
+		}
+
+		if vmi.Status.NodeName != "" &&
+			vmi.Status.NodeName != pod.Spec.NodeName {
+			// This pod isn't scheduled to the current node.
+			// This can occur during the initial migration phases when
+			// a new target node is being prepared for the VMI.
+			continue
+		}
+
+		if curPod == nil || curPod.CreationTimestamp.Before(&pod.CreationTimestamp) {
+			curPod = pod
+		}
+	}
+
+	return curPod, nil
+}
+
+func VMIActivePodsCount(vmi *v1.VirtualMachineInstance, vmiPodInformer cache.SharedIndexInformer) int {
+
+	objs, err := vmiPodInformer.GetIndexer().ByIndex(cache.NamespaceIndex, vmi.Namespace)
+	if err != nil {
+		return 0
+	}
+
+	running := 0
+	for _, obj := range objs {
+		pod := obj.(*k8sv1.Pod)
+
+		if pod.Status.Phase == k8sv1.PodSucceeded || pod.Status.Phase == k8sv1.PodFailed {
+			// not interested in terminated pods
+			continue
+		} else if !IsControlledBy(pod, vmi) {
+			// not interested pods not associated with the vmi
+			continue
+		}
+		running++
+	}
+
+	return running
 }

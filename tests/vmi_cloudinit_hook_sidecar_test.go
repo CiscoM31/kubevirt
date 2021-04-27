@@ -20,6 +20,7 @@
 package tests_test
 
 import (
+	"context"
 	"fmt"
 	"time"
 
@@ -39,7 +40,7 @@ import (
 
 const cloudinitHookSidecarImage = "example-cloudinit-hook-sidecar"
 
-var _ = Describe("CloudInitHookSidecars", func() {
+var _ = Describe("[sig-compute]CloudInitHookSidecars", func() {
 
 	var err error
 	var virtClient kubecli.KubevirtClient
@@ -57,7 +58,7 @@ var _ = Describe("CloudInitHookSidecars", func() {
 				TailLines: &tailLines,
 				Container: "hook-sidecar-0",
 			}).
-			DoRaw()
+			DoRaw(context.Background())
 		Expect(err).To(BeNil())
 
 		return string(logsRaw)

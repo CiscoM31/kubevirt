@@ -1,6 +1,7 @@
 package tests
 
 import (
+	"context"
 	"fmt"
 
 	. "github.com/onsi/ginkgo"
@@ -14,23 +15,23 @@ import (
 
 func NewHTTPServerPod(port int) *corev1.Pod {
 	serverCommand := fmt.Sprintf("nc -klp %d --sh-exec 'echo -e \"HTTP/1.1 200 OK\\nContent-Length: 12\\n\\nHello World!\"'", port)
-	return RenderPod("http-hello-world-server", []string{"/bin/bash"}, []string{"-c", serverCommand})
+	return RenderPrivilegedPod("http-hello-world-server", []string{"/bin/bash"}, []string{"-c", serverCommand})
 }
 
 func NewTCPServerPod(port int) *corev1.Pod {
 	serverCommand := fmt.Sprintf("nc -klp %d --sh-exec 'echo \"Hello World!\"'", port)
-	return RenderPod("tcp-hello-world-server", []string{"/bin/bash"}, []string{"-c", serverCommand})
+	return RenderPrivilegedPod("tcp-hello-world-server", []string{"/bin/bash"}, []string{"-c", serverCommand})
 }
 
 func CreatePodAndWaitUntil(pod *corev1.Pod, phaseToWait corev1.PodPhase) *corev1.Pod {
 	virtClient, err := kubecli.GetKubevirtClient()
 	PanicOnError(err)
 
-	pod, err = virtClient.CoreV1().Pods(NamespaceTestDefault).Create(pod)
+	pod, err = virtClient.CoreV1().Pods(NamespaceTestDefault).Create(context.Background(), pod, metav1.CreateOptions{})
 	Expect(err).ToNot(HaveOccurred(), "should succeed creating pod")
 
 	getStatus := func() corev1.PodPhase {
-		pod, err = virtClient.CoreV1().Pods(NamespaceTestDefault).Get(pod.Name, metav1.GetOptions{})
+		pod, err = virtClient.CoreV1().Pods(NamespaceTestDefault).Get(context.Background(), pod.Name, metav1.GetOptions{})
 		Expect(err).ToNot(HaveOccurred())
 		return pod.Status.Phase
 	}

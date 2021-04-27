@@ -20,6 +20,7 @@
 package virt_api
 
 import (
+	"context"
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
@@ -56,7 +57,7 @@ import (
 	mutating_webhook "kubevirt.io/kubevirt/pkg/virt-api/webhooks/mutating-webhook"
 	validating_webhook "kubevirt.io/kubevirt/pkg/virt-api/webhooks/validating-webhook"
 	virtconfig "kubevirt.io/kubevirt/pkg/virt-config"
-	"kubevirt.io/kubevirt/pkg/virt-operator/creation/components"
+	"kubevirt.io/kubevirt/pkg/virt-operator/resource/generate/components"
 )
 
 const (
@@ -73,6 +74,9 @@ const (
 	defaultTlsKeyFilePath      = "/etc/virt-api/certificates/tls.key"
 	defaultHandlerCertFilePath = "/etc/virt-handler/clientcertificates/tls.crt"
 	defaultHandlerKeyFilePath  = "/etc/virt-handler/clientcertificates/tls.key"
+
+	httpStatusNotFoundMessage   = "Not Found"
+	httpStatusBadRequestMessage = "Bad Request"
 )
 
 type VirtApi interface {
@@ -200,8 +204,8 @@ func (app *virtAPIApp) composeSubresources() {
 			Operation(version.Version+"Restart").
 			Doc("Restart a VirtualMachine object.").
 			Returns(http.StatusOK, "OK", "").
-			Returns(http.StatusNotFound, "Not Found", "").
-			Returns(http.StatusBadRequest, "Bad Request", "")
+			Returns(http.StatusNotFound, httpStatusNotFoundMessage, "").
+			Returns(http.StatusBadRequest, httpStatusBadRequestMessage, "")
 		restartRouteBuilder.ParameterNamed("body").Required(false)
 		subws.Route(restartRouteBuilder)
 
@@ -211,8 +215,8 @@ func (app *virtAPIApp) composeSubresources() {
 			Operation(version.Version+"Migrate").
 			Doc("Migrate a running VirtualMachine to another node.").
 			Returns(http.StatusOK, "OK", "").
-			Returns(http.StatusNotFound, "Not Found", "").
-			Returns(http.StatusBadRequest, "Bad Request", ""))
+			Returns(http.StatusNotFound, httpStatusNotFoundMessage, "").
+			Returns(http.StatusBadRequest, httpStatusBadRequestMessage, ""))
 
 		subws.Route(subws.PUT(rest.ResourcePath(subresourcesvmGVR)+rest.SubResourcePath("start")).
 			To(subresourceApp.StartVMRequestHandler).
@@ -220,8 +224,8 @@ func (app *virtAPIApp) composeSubresources() {
 			Operation(version.Version+"Start").
 			Doc("Start a VirtualMachine object.").
 			Returns(http.StatusOK, "OK", "").
-			Returns(http.StatusNotFound, "Not Found", "").
-			Returns(http.StatusBadRequest, "Bad Request", ""))
+			Returns(http.StatusNotFound, httpStatusNotFoundMessage, "").
+			Returns(http.StatusBadRequest, httpStatusBadRequestMessage, ""))
 
 		subws.Route(subws.PUT(rest.ResourcePath(subresourcesvmGVR)+rest.SubResourcePath("stop")).
 			To(subresourceApp.StopVMRequestHandler).
@@ -229,8 +233,8 @@ func (app *virtAPIApp) composeSubresources() {
 			Operation(version.Version+"Stop").
 			Doc("Stop a VirtualMachine object.").
 			Returns(http.StatusOK, "OK", "").
-			Returns(http.StatusNotFound, "Not Found", "").
-			Returns(http.StatusBadRequest, "Bad Request", ""))
+			Returns(http.StatusNotFound, httpStatusNotFoundMessage, "").
+			Returns(http.StatusBadRequest, httpStatusBadRequestMessage, ""))
 
 		subws.Route(subws.PUT(rest.ResourcePath(subresourcesvmiGVR)+rest.SubResourcePath("pause")).
 			To(subresourceApp.PauseVMIRequestHandler).
@@ -238,8 +242,8 @@ func (app *virtAPIApp) composeSubresources() {
 			Operation(version.Version+"Pause").
 			Doc("Pause a VirtualMachineInstance object.").
 			Returns(http.StatusOK, "OK", "").
-			Returns(http.StatusNotFound, "Not Found", "").
-			Returns(http.StatusBadRequest, "Bad Request", ""))
+			Returns(http.StatusNotFound, httpStatusNotFoundMessage, "").
+			Returns(http.StatusBadRequest, httpStatusBadRequestMessage, ""))
 
 		subws.Route(subws.PUT(rest.ResourcePath(subresourcesvmiGVR)+rest.SubResourcePath("unpause")).
 			To(subresourceApp.UnpauseVMIRequestHandler). // handles VMIs as well
@@ -247,8 +251,8 @@ func (app *virtAPIApp) composeSubresources() {
 			Operation(version.Version+"Unpause").
 			Doc("Unpause a VirtualMachineInstance object.").
 			Returns(http.StatusOK, "OK", "").
-			Returns(http.StatusNotFound, "Not Found", "").
-			Returns(http.StatusBadRequest, "Bad Request", ""))
+			Returns(http.StatusNotFound, httpStatusNotFoundMessage, "").
+			Returns(http.StatusBadRequest, httpStatusBadRequestMessage, ""))
 
 		subws.Route(subws.GET(rest.ResourcePath(subresourcesvmiGVR) + rest.SubResourcePath("console")).
 			To(subresourceApp.ConsoleRequestHandler).
@@ -298,8 +302,8 @@ func (app *virtAPIApp) composeSubresources() {
 			Doc("Rename a stopped VirtualMachine object.").
 			Returns(http.StatusOK, "OK", "").
 			Returns(http.StatusAccepted, "Accepted", "").
-			Returns(http.StatusNotFound, "Not Found", "").
-			Returns(http.StatusBadRequest, "Bad Request", ""))
+			Returns(http.StatusNotFound, httpStatusNotFoundMessage, "").
+			Returns(http.StatusBadRequest, httpStatusBadRequestMessage, ""))
 
 		subws.Route(subws.GET(rest.ResourcePath(subresourcesvmiGVR)+rest.SubResourcePath("userlist")).
 			To(subresourceApp.UserList).
@@ -321,35 +325,39 @@ func (app *virtAPIApp) composeSubresources() {
 
 		subws.Route(subws.PUT(rest.ResourcePath(subresourcesvmiGVR)+rest.SubResourcePath("addvolume")).
 			To(subresourceApp.VMIAddVolumeRequestHandler).
+			Reads(v1.AddVolumeOptions{}).
 			Param(rest.NamespaceParam(subws)).Param(rest.NameParam(subws)).
 			Operation(version.Version+"vmi-addvolume").
 			Doc("Add a volume and disk to a running Virtual Machine Instance").
 			Returns(http.StatusOK, "OK", "").
-			Returns(http.StatusBadRequest, "Bad Request", ""))
+			Returns(http.StatusBadRequest, httpStatusBadRequestMessage, ""))
 
 		subws.Route(subws.PUT(rest.ResourcePath(subresourcesvmiGVR)+rest.SubResourcePath("removevolume")).
 			To(subresourceApp.VMIRemoveVolumeRequestHandler).
+			Reads(v1.RemoveVolumeOptions{}).
 			Param(rest.NamespaceParam(subws)).Param(rest.NameParam(subws)).
 			Operation(version.Version+"vmi-removevolume").
 			Doc("Removes a volume and disk from a running Virtual Machine Instance").
 			Returns(http.StatusOK, "OK", "").
-			Returns(http.StatusBadRequest, "Bad Request", ""))
+			Returns(http.StatusBadRequest, httpStatusBadRequestMessage, ""))
 
 		subws.Route(subws.PUT(rest.ResourcePath(subresourcesvmGVR)+rest.SubResourcePath("addvolume")).
 			To(subresourceApp.VMAddVolumeRequestHandler).
+			Reads(v1.AddVolumeOptions{}).
 			Param(rest.NamespaceParam(subws)).Param(rest.NameParam(subws)).
 			Operation(version.Version+"vm-addvolume").
 			Doc("Add a volume and disk to a running Virtual Machine.").
 			Returns(http.StatusOK, "OK", "").
-			Returns(http.StatusBadRequest, "Bad Request", ""))
+			Returns(http.StatusBadRequest, httpStatusBadRequestMessage, ""))
 
 		subws.Route(subws.PUT(rest.ResourcePath(subresourcesvmGVR)+rest.SubResourcePath("removevolume")).
 			To(subresourceApp.VMRemoveVolumeRequestHandler).
+			Reads(v1.RemoveVolumeOptions{}).
 			Param(rest.NamespaceParam(subws)).Param(rest.NameParam(subws)).
 			Operation(version.Version+"vm-removevolume").
 			Doc("Removes a volume and disk from a running Virtual Machine.").
 			Returns(http.StatusOK, "OK", "").
-			Returns(http.StatusBadRequest, "Bad Request", ""))
+			Returns(http.StatusBadRequest, httpStatusBadRequestMessage, ""))
 
 		// Return empty api resource list.
 		// K8s expects to be able to retrieve a resource list for each aggregated
@@ -428,7 +436,7 @@ func (app *virtAPIApp) composeSubresources() {
 			Operation(version.Version+"getAPISubResources").
 			Doc("Get a KubeVirt API resources").
 			Returns(http.StatusOK, "OK", metav1.APIResourceList{}).
-			Returns(http.StatusNotFound, "Not Found", ""))
+			Returns(http.StatusNotFound, httpStatusNotFoundMessage, ""))
 
 		restful.Add(subws)
 
@@ -455,7 +463,7 @@ func (app *virtAPIApp) composeSubresources() {
 		Operation("getRootPaths").
 		Doc("Get KubeVirt API root paths").
 		Returns(http.StatusOK, "OK", metav1.RootPaths{}).
-		Returns(http.StatusNotFound, "Not Found", ""))
+		Returns(http.StatusNotFound, httpStatusNotFoundMessage, ""))
 	ws.Route(ws.GET("/healthz").To(healthz.KubeConnectionHealthzFuncFactory(app.clusterConfig)).Doc("Health endpoint"))
 
 	for _, version := range v1.SubresourceGroupVersions {
@@ -468,7 +476,7 @@ func (app *virtAPIApp) composeSubresources() {
 			Operation(version.Version+"GetSubAPIGroup").
 			Doc("Get a KubeVirt API Group").
 			Returns(http.StatusOK, "OK", metav1.APIGroup{}).
-			Returns(http.StatusNotFound, "Not Found", ""))
+			Returns(http.StatusNotFound, httpStatusNotFoundMessage, ""))
 	}
 
 	// K8s needs the ability to query the list of API groups this endpoint supports
@@ -483,7 +491,7 @@ func (app *virtAPIApp) composeSubresources() {
 		Operation("getAPIGroupList").
 		Doc("Get a KubeVirt API GroupList").
 		Returns(http.StatusOK, "OK", metav1.APIGroupList{}).
-		Returns(http.StatusNotFound, "Not Found", ""))
+		Returns(http.StatusNotFound, httpStatusNotFoundMessage, ""))
 
 	once := sync.Once{}
 	var openapispec *spec.Swagger
@@ -550,7 +558,7 @@ func deserializeStrings(in string) ([]string, error) {
 }
 
 func (app *virtAPIApp) readRequestHeader() error {
-	authConfigMap, err := app.virtCli.CoreV1().ConfigMaps(metav1.NamespaceSystem).Get(util.ExtensionAPIServerAuthenticationConfigMap, metav1.GetOptions{})
+	authConfigMap, err := app.virtCli.CoreV1().ConfigMaps(metav1.NamespaceSystem).Get(context.Background(), util.ExtensionAPIServerAuthenticationConfigMap, metav1.GetOptions{})
 	if err != nil {
 		return err
 	}
@@ -616,7 +624,7 @@ func (app *virtAPIApp) registerValidatingWebhooks() {
 		validating_webhook.ServeVMIPreset(w, r)
 	})
 	http.HandleFunc(components.MigrationCreateValidatePath, func(w http.ResponseWriter, r *http.Request) {
-		validating_webhook.ServeMigrationCreate(w, r, app.clusterConfig)
+		validating_webhook.ServeMigrationCreate(w, r, app.clusterConfig, app.virtCli)
 	})
 	http.HandleFunc(components.MigrationUpdateValidatePath, func(w http.ResponseWriter, r *http.Request) {
 		validating_webhook.ServeMigrationUpdate(w, r)
@@ -765,7 +773,7 @@ func (app *virtAPIApp) Run() {
 
 // Update virt-api log verbosity on relevant config changes
 func (app *virtAPIApp) shouldChangeLogVerbosity() {
-	verbosity := app.clusterConfig.GetVirtHandlerVerbosity(app.host)
+	verbosity := app.clusterConfig.GetVirtAPIVerbosity(app.host)
 	log.Log.SetVerbosityLevel(int(verbosity))
 	log.Log.V(2).Infof("set log verbosity to %d", verbosity)
 }

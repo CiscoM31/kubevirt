@@ -31,6 +31,7 @@ import (
 	. "github.com/onsi/ginkgo"
 	"github.com/onsi/ginkgo/extensions/table"
 	. "github.com/onsi/gomega"
+	"github.com/prometheus/procfs"
 
 	"k8s.io/apimachinery/pkg/types"
 
@@ -42,6 +43,8 @@ import (
 
 var (
 	tempDir              string
+	orgIsoDetector       = isolationDetector
+	orgProcMounts        = procMounts
 	orgDeviceBasePath    = deviceBasePath
 	orgStatCommand       = statCommand
 	orgCgroupsBasePath   = cgroupsBasePath
@@ -107,20 +110,6 @@ var _ = Describe("HotplugVolume mount target records", func() {
 		}
 		err := m.setMountTargetRecord(vmi, record)
 		Expect(err).To(HaveOccurred())
-	})
-
-	It("setMountTargetRecord should not write record to file, if record already exists, and no changes", func() {
-		recordFile := filepath.Join(tempDir, string(vmi.UID))
-		info, err := os.Stat(recordFile)
-		Expect(err).ToNot(HaveOccurred())
-		expectedModTime := info.ModTime()
-		m.mountRecords[vmi.UID] = record
-		err = m.setMountTargetRecord(vmi, record)
-		Expect(err).ToNot(HaveOccurred())
-		resInfo, err := os.Stat(recordFile)
-		Expect(err).ToNot(HaveOccurred())
-		resModTime := resInfo.ModTime()
-		Expect(expectedModTime).To(Equal(resModTime))
 	})
 
 	It("getMountTargetRecord should get record from file if not in cache", func() {
@@ -294,7 +283,7 @@ var _ = Describe("HotplugVolume block devices", func() {
 
 	It("getSourceMajorMinor should return an error if no uid", func() {
 		vmi.UID = ""
-		_, _, _, err := m.getSourceMajorMinor(vmi, "fghij")
+		_, _, _, err := m.getSourceMajorMinor("fghij")
 		Expect(err).To(HaveOccurred())
 	})
 
@@ -304,7 +293,7 @@ var _ = Describe("HotplugVolume block devices", func() {
 		Expect(err).ToNot(HaveOccurred())
 		err = ioutil.WriteFile(deviceFile, []byte("test"), 0644)
 		Expect(err).ToNot(HaveOccurred())
-		major, minor, perm, err := m.getSourceMajorMinor(vmi, "fghij")
+		major, minor, perm, err := m.getSourceMajorMinor("fghij")
 		Expect(err).ToNot(HaveOccurred())
 		Expect(major).To(Equal(int64(6)))
 		Expect(minor).To(Equal(int64(6)))
@@ -315,7 +304,7 @@ var _ = Describe("HotplugVolume block devices", func() {
 		deviceFile := filepath.Join(tempDir, "fghij", "volumes", "file")
 		err = os.MkdirAll(filepath.Dir(deviceFile), 0755)
 		Expect(err).ToNot(HaveOccurred())
-		major, minor, perm, err := m.getSourceMajorMinor(vmi, "fghij")
+		major, minor, perm, err := m.getSourceMajorMinor("fghij")
 		Expect(err).To(HaveOccurred())
 		Expect(major).To(Equal(int64(-1)))
 		Expect(minor).To(Equal(int64(-1)))
@@ -603,6 +592,7 @@ var _ = Describe("HotplugVolume filesystem volumes", func() {
 		deviceBasePath = func(sourceUID types.UID) string {
 			return filepath.Join(tempDir, string(sourceUID), "volumes")
 		}
+
 	})
 
 	AfterEach(func() {
@@ -612,6 +602,8 @@ var _ = Describe("HotplugVolume filesystem volumes", func() {
 		mountCommand = orgMountCommand
 		unmountCommand = orgUnMountCommand
 		isMounted = orgIsMounted
+		procMounts = orgProcMounts
+		isolationDetector = orgIsoDetector
 	})
 
 	It("getSourcePodFile should find the disk.img file, if it exists", func() {
@@ -623,13 +615,13 @@ var _ = Describe("HotplugVolume filesystem volumes", func() {
 		diskFile := filepath.Join(path, "disk.img")
 		_, err := os.Create(diskFile)
 		Expect(err).ToNot(HaveOccurred())
-		file, err := m.getSourcePodFilePath("ghfjk")
+		file, err := m.getSourcePodFilePath("ghfjk", vmi, "")
 		Expect(err).ToNot(HaveOccurred())
 		Expect(file).To(Equal(path))
 	})
 
 	It("getSourcePodFile should return error if no UID", func() {
-		_, err := m.getSourcePodFilePath("")
+		_, err := m.getSourcePodFilePath("", vmi, "")
 		Expect(err).To(HaveOccurred())
 	})
 
@@ -640,8 +632,76 @@ var _ = Describe("HotplugVolume filesystem volumes", func() {
 			return path
 		}
 		Expect(err).ToNot(HaveOccurred())
-		_, err := m.getSourcePodFilePath("ghfjk")
+		_, err := m.getSourcePodFilePath("ghfjk", vmi, "")
 		Expect(err).To(HaveOccurred())
+	})
+
+	It("getSourcePodFile should return error if iso detection returns error", func() {
+		expectedPath := filepath.Join(tempDir, "ghfjk", "volumes")
+		err = os.MkdirAll(expectedPath, 0755)
+		sourcePodBasePath = func(podUID types.UID) string {
+			return expectedPath
+		}
+		isolationDetector = func(path string) isolation.PodIsolationDetector {
+			return &mockIsolationDetector{
+				pid: 40,
+			}
+		}
+
+		Expect(err).ToNot(HaveOccurred())
+		_, err := m.getSourcePodFilePath("ghfjk", vmi, "")
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("isolation error"))
+	})
+
+	It("getSourcePodFile should return error if proc mounts returns error", func() {
+		expectedPath := filepath.Join(tempDir, "ghfjk", "volumes")
+		err = os.MkdirAll(expectedPath, 0755)
+		sourcePodBasePath = func(podUID types.UID) string {
+			return expectedPath
+		}
+		isolationDetector = func(path string) isolation.PodIsolationDetector {
+			return &mockIsolationDetector{
+				pid: 1,
+			}
+		}
+		procMounts = func(pid int) ([]*procfs.MountInfo, error) {
+			Expect(pid).To(Equal(1))
+			res := make([]*procfs.MountInfo, 0)
+			return res, fmt.Errorf("mount detection error")
+		}
+
+		Expect(err).ToNot(HaveOccurred())
+		_, err := m.getSourcePodFilePath("ghfjk", vmi, "")
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("mount detection error"))
+	})
+
+	It("getSourcePodFile should return the mountinfo value", func() {
+		expectedPath := filepath.Join(tempDir, "ghfjk", "volumes")
+		err = os.MkdirAll(expectedPath, 0755)
+		sourcePodBasePath = func(podUID types.UID) string {
+			return expectedPath
+		}
+		isolationDetector = func(path string) isolation.PodIsolationDetector {
+			return &mockIsolationDetector{
+				pid: 1,
+			}
+		}
+		procMounts = func(pid int) ([]*procfs.MountInfo, error) {
+			Expect(pid).To(Equal(1))
+			res := make([]*procfs.MountInfo, 0)
+			res = append(res, &procfs.MountInfo{
+				Root:       "/test/result",
+				MountPoint: "/pvc",
+			})
+			return res, nil
+		}
+
+		Expect(err).ToNot(HaveOccurred())
+		res, err := m.getSourcePodFilePath("ghfjk", vmi, "")
+		Expect(err).ToNot(HaveOccurred())
+		Expect(res).To(Equal("/test/result"))
 	})
 
 	It("should properly mount and unmount filesystem", func() {
@@ -1018,18 +1078,21 @@ type mockIsolationDetector struct {
 	err        error
 }
 
-func (i *mockIsolationDetector) Detect(vm *v1.VirtualMachineInstance) (isolation.IsolationResult, error) {
+func (i *mockIsolationDetector) Detect(_ *v1.VirtualMachineInstance) (isolation.IsolationResult, error) {
 	return isolation.NewIsolationResult(i.pid, i.slice, i.controller), i.err
 }
 
-func (i *mockIsolationDetector) DetectForSocket(vm *v1.VirtualMachineInstance, socket string) (isolation.IsolationResult, error) {
-	return isolation.NewIsolationResult(1, tempDir, []string{}), nil
+func (i *mockIsolationDetector) DetectForSocket(_ *v1.VirtualMachineInstance, _ string) (isolation.IsolationResult, error) {
+	if i.pid == 1 {
+		return isolation.NewIsolationResult(i.pid, tempDir, []string{}), nil
+	}
+	return nil, fmt.Errorf("isolation error")
 }
 
-func (i *mockIsolationDetector) Whitelist(controller []string) isolation.PodIsolationDetector {
+func (i *mockIsolationDetector) Whitelist(_ []string) isolation.PodIsolationDetector {
 	return i
 }
 
-func (i *mockIsolationDetector) AdjustResources(vm *v1.VirtualMachineInstance) error {
+func (i *mockIsolationDetector) AdjustResources(_ *v1.VirtualMachineInstance) error {
 	return nil
 }

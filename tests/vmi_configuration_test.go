@@ -20,20 +20,22 @@
 package tests_test
 
 import (
+	"context"
 	"fmt"
 	"path/filepath"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	expect "github.com/google/goexpect"
 	. "github.com/onsi/ginkgo"
 	"github.com/onsi/ginkgo/extensions/table"
 	. "github.com/onsi/gomega"
 	. "github.com/onsi/gomega/gstruct"
+	"github.com/pborman/uuid"
+	k8sv1 "k8s.io/api/core/v1"
 	kubev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -57,10 +59,37 @@ import (
 
 type VMICreationFuncWithEFI func() *v1.VirtualMachineInstance
 
-var _ = Describe("Configurations", func() {
+var _ = Describe("[sig-compute]Configurations", func() {
 
 	var err error
 	var virtClient kubecli.KubevirtClient
+
+	const (
+		cgroupV1MemoryUsagePath = "/sys/fs/cgroup/memory/memory.usage_in_bytes"
+		cgroupV2MemoryUsagePath = "/sys/fs/cgroup/memory.current"
+	)
+
+	getPodMemoryUsage := func(pod *kubev1.Pod) (output string, err error) {
+		output, err = tests.ExecuteCommandOnPod(
+			virtClient,
+			pod,
+			"compute",
+			[]string{"cat", cgroupV2MemoryUsagePath},
+		)
+
+		if err == nil {
+			return
+		}
+
+		output, err = tests.ExecuteCommandOnPod(
+			virtClient,
+			pod,
+			"compute",
+			[]string{"cat", cgroupV1MemoryUsagePath},
+		)
+
+		return
+	}
 
 	BeforeEach(func() {
 		virtClient, err = kubecli.GetKubevirtClient()
@@ -524,7 +553,8 @@ var _ = Describe("Configurations", func() {
 			vmi, err = virtClient.VirtualMachineInstance(tests.NamespaceTestDefault).Create(vmi)
 			Expect(err).ToNot(HaveOccurred())
 
-			tests.WaitForVMIStartOrFailed(vmi, 180, true)
+			wp := tests.WarningsPolicy{FailOnWarnings: false}
+			tests.WaitForVMIStartOrFailed(vmi, 180, wp)
 			vmiMeta, err := virtClient.VirtualMachineInstance(vmi.Namespace).Get(vmi.Name, &metav1.GetOptions{})
 			ExpectWithOffset(1, err).ToNot(HaveOccurred())
 
@@ -552,8 +582,7 @@ var _ = Describe("Configurations", func() {
 		Context("[rfe_id:140][crit:medium][vendor:cnv-qe@redhat.com][level:component]with diverging guest memory from requested memory", func() {
 			It("[test_id:1669]should show the requested guest memory inside the VMI", func() {
 				vmi := tests.NewRandomVMIWithEphemeralDiskAndUserdata(cd.ContainerDiskFor(cd.ContainerDiskCirros), "#!/bin/bash\necho 'hello'\n")
-				vmi.Spec.Domain.Resources.Requests[kubev1.ResourceMemory] = resource.MustParse("64M")
-				guestMemory := resource.MustParse("128M")
+				guestMemory := resource.MustParse("256Mi")
 				vmi.Spec.Domain.Memory = &v1.Memory{
 					Guest: &guestMemory,
 				}
@@ -566,7 +595,7 @@ var _ = Describe("Configurations", func() {
 
 				Expect(console.SafeExpectBatch(vmi, []expect.Batcher{
 					&expect.BSnd{S: "free -m | grep Mem: | tr -s ' ' | cut -d' ' -f2\n"},
-					&expect.BExp{R: console.RetValue("104")},
+					&expect.BExp{R: console.RetValue("236")},
 				}, 10)).To(Succeed())
 
 			})
@@ -575,9 +604,8 @@ var _ = Describe("Configurations", func() {
 		Context("[rfe_id:140][crit:medium][vendor:cnv-qe@redhat.com][level:component]with diverging memory limit from memory request and no guest memory", func() {
 			It("[test_id:3115]should show the memory limit inside the VMI", func() {
 				vmi := tests.NewRandomVMIWithEphemeralDiskAndUserdata(cd.ContainerDiskFor(cd.ContainerDiskCirros), "#!/bin/bash\necho 'hello'\n")
-				vmi.Spec.Domain.Resources.Requests[kubev1.ResourceMemory] = resource.MustParse("64M")
 				vmi.Spec.Domain.Resources.Limits = kubev1.ResourceList{
-					kubev1.ResourceMemory: resource.MustParse("128M"),
+					kubev1.ResourceMemory: resource.MustParse("256Mi"),
 				}
 				vmi, err := virtClient.VirtualMachineInstance(tests.NamespaceTestDefault).Create(vmi)
 				Expect(err).ToNot(HaveOccurred())
@@ -587,7 +615,7 @@ var _ = Describe("Configurations", func() {
 
 				Expect(console.SafeExpectBatch(vmi, []expect.Batcher{
 					&expect.BSnd{S: "free -m | grep Mem: | tr -s ' ' | cut -d' ' -f2\n"},
-					&expect.BExp{R: console.RetValue("104")},
+					&expect.BExp{R: console.RetValue("236")},
 				}, 10)).To(Succeed())
 
 			})
@@ -597,7 +625,6 @@ var _ = Describe("Configurations", func() {
 			It("[test_id:755]should show the requested memory different than guest memory", func() {
 				vmi := tests.NewRandomVMIWithEphemeralDiskAndUserdata(cd.ContainerDiskFor(cd.ContainerDiskCirros), "#!/bin/bash\necho 'hello'\n")
 				guestMemory := resource.MustParse("256Mi")
-				vmi.Spec.Domain.Resources.Requests[kubev1.ResourceMemory] = resource.MustParse("64Mi")
 				vmi.Spec.Domain.Resources.OvercommitGuestOverhead = true
 				vmi.Spec.Domain.Memory = &v1.Memory{
 					Guest: &guestMemory,
@@ -612,19 +639,14 @@ var _ = Describe("Configurations", func() {
 				Expect(console.SafeExpectBatch(vmi, []expect.Batcher{
 					&expect.BSnd{S: "[ $(free -m | grep Mem: | tr -s ' ' | cut -d' ' -f2) -gt 200 ] && echo 'pass'\n"},
 					&expect.BExp{R: console.RetValue("pass")},
-					&expect.BSnd{S: "swapoff -a && dd if=/dev/zero of=/dev/shm/test bs=1k count=118k\n"},
+					&expect.BSnd{S: "swapoff -a && dd if=/dev/zero of=/dev/shm/test bs=1k count=100k\n"},
 					&expect.BExp{R: console.PromptExpression},
 					&expect.BSnd{S: "echo $?\n"},
 					&expect.BExp{R: console.RetValue("0")},
 				}, 15)).To(Succeed())
 
 				pod := tests.GetRunningPodByVirtualMachineInstance(vmi, tests.NamespaceTestDefault)
-				podMemoryUsage, err := tests.ExecuteCommandOnPod(
-					virtClient,
-					pod,
-					"compute",
-					[]string{"/usr/bin/bash", "-c", "cat /sys/fs/cgroup/memory/memory.usage_in_bytes"},
-				)
+				podMemoryUsage, err := getPodMemoryUsage(pod)
 				Expect(err).ToNot(HaveOccurred())
 				By("Converting pod memory usage")
 				m, err := strconv.Atoi(strings.Trim(podMemoryUsage, "\n"))
@@ -664,7 +686,7 @@ var _ = Describe("Configurations", func() {
 
 				// Check on the VM, if the Free memory is roughly what we expected
 				Expect(console.SafeExpectBatch(vmi, []expect.Batcher{
-					&expect.BSnd{S: "[ $(free -m | grep Mem: | tr -s ' ' | cut -d' ' -f2) -gt 95 ] && echo 'pass'\n"},
+					&expect.BSnd{S: "[ $(free -m | grep Mem: | tr -s ' ' | cut -d' ' -f2) -gt 90 ] && echo 'pass'\n"},
 					&expect.BExp{R: console.RetValue("pass")},
 				}, 15)).To(Succeed())
 			})
@@ -833,7 +855,7 @@ var _ = Describe("Configurations", func() {
 						},
 					},
 				}
-				_, err := virtClient.CoreV1().LimitRanges(tests.NamespaceTestDefault).Create(&limitRangeObj)
+				_, err := virtClient.CoreV1().LimitRanges(tests.NamespaceTestDefault).Create(context.Background(), &limitRangeObj, metav1.CreateOptions{})
 				Expect(err).ToNot(HaveOccurred())
 
 				By("Starting a VirtualMachineInstance")
@@ -870,7 +892,7 @@ var _ = Describe("Configurations", func() {
 						},
 					},
 				}
-				_, err := virtClient.CoreV1().LimitRanges(tests.NamespaceTestDefault).Create(&limitRangeObj)
+				_, err := virtClient.CoreV1().LimitRanges(tests.NamespaceTestDefault).Create(context.Background(), &limitRangeObj, metav1.CreateOptions{})
 				Expect(err).ToNot(HaveOccurred())
 
 				By("Starting a VirtualMachineInstance")
@@ -912,7 +934,7 @@ var _ = Describe("Configurations", func() {
 						},
 					},
 				}
-				_, err := virtClient.CoreV1().LimitRanges(tests.NamespaceTestDefault).Create(&limitRangeObj)
+				_, err := virtClient.CoreV1().LimitRanges(tests.NamespaceTestDefault).Create(context.Background(), &limitRangeObj, metav1.CreateOptions{})
 				Expect(err).ToNot(HaveOccurred())
 
 				vmi = tests.NewRandomVMIWithEphemeralDisk(cd.ContainerDiskFor(cd.ContainerDiskAlpine))
@@ -945,7 +967,7 @@ var _ = Describe("Configurations", func() {
 			verifyHugepagesConsumption := func() bool {
 				// TODO: we need to check hugepages state via node allocated resources, but currently it has the issue
 				// https://github.com/kubernetes/kubernetes/issues/64691
-				pods, err := virtClient.CoreV1().Pods(tests.NamespaceTestDefault).List(tests.UnfinishedVMIPodSelector(hugepagesVmi))
+				pods, err := virtClient.CoreV1().Pods(tests.NamespaceTestDefault).List(context.Background(), tests.UnfinishedVMIPodSelector(hugepagesVmi))
 				Expect(err).ToNot(HaveOccurred())
 				Expect(len(pods.Items)).To(Equal(1))
 
@@ -1004,7 +1026,7 @@ var _ = Describe("Configurations", func() {
 
 			table.DescribeTable("should consume hugepages ", func(hugepageSize string, memory string, guestMemory string) {
 				hugepageType := kubev1.ResourceName(kubev1.ResourceHugePagesPrefix + hugepageSize)
-				v, err := cluster.GetKubernetesVersion(virtClient)
+				v, err := cluster.GetKubernetesVersion()
 				Expect(err).ShouldNot(HaveOccurred())
 				if strings.Contains(v, "1.16") {
 					hugepagesVmi.Annotations = map[string]string{
@@ -1056,7 +1078,7 @@ var _ = Describe("Configurations", func() {
 
 			Context("with unsupported page size", func() {
 				It("[test_id:1673]should failed to schedule the pod", func() {
-					nodes, err := virtClient.CoreV1().Nodes().List(metav1.ListOptions{})
+					nodes, err := virtClient.CoreV1().Nodes().List(context.Background(), metav1.ListOptions{})
 					Expect(err).ToNot(HaveOccurred())
 
 					hugepageType2Mi := kubev1.ResourceName(kubev1.ResourceHugePagesPrefix + "2Mi")
@@ -1144,7 +1166,7 @@ var _ = Describe("Configurations", func() {
 
 			prepareAgentVM := func() *v1.VirtualMachineInstance {
 				// TODO: actually review this once the VM image is present
-				agentVMI := tests.NewRandomFedoraVMIWitGuestAgent()
+				agentVMI := tests.NewRandomFedoraVMIWithGuestAgent()
 
 				By("Starting a VirtualMachineInstance")
 				agentVMI, err = virtClient.VirtualMachineInstance(tests.NamespaceTestDefault).Create(agentVMI)
@@ -1215,7 +1237,7 @@ var _ = Describe("Configurations", func() {
 
 				By("Terminating guest agent and waiting for it to disappear.")
 				Expect(console.SafeExpectBatch(agentVMI, []expect.Batcher{
-					&expect.BSnd{S: "systemctl stop guestagent\n"},
+					&expect.BSnd{S: "systemctl stop qemu-guest-agent\n"},
 					&expect.BExp{R: console.PromptExpression},
 				}, 400)).To(Succeed())
 
@@ -1242,17 +1264,56 @@ var _ = Describe("Configurations", func() {
 				})
 
 				It("[test_id:5267]VMI condition should signal unsupported agent presence", func() {
-					agentVMI := prepareAgentVM()
-					getOptions := metav1.GetOptions{}
+					agentVMI := tests.NewRandomFedoraVMIWithBlacklistGuestAgent("guest-shutdown")
+					By("Starting a VirtualMachineInstance")
+					agentVMI, err = virtClient.VirtualMachineInstance(tests.NamespaceTestDefault).Create(agentVMI)
+					Expect(err).ToNot(HaveOccurred(), "Should create VMI successfully")
+					tests.WaitForSuccessfulVMIStart(agentVMI)
 
+					getOptions := metav1.GetOptions{}
 					freshVMI, err := virtClient.VirtualMachineInstance(tests.NamespaceTestDefault).Get(agentVMI.Name, &getOptions)
-					Expect(err).ToNot(HaveOccurred(), "Should get VMI ")
+					Expect(err).ToNot(HaveOccurred(), "Should get VMI")
 
 					Eventually(func() []v1.VirtualMachineInstanceCondition {
 						freshVMI, err = virtClient.VirtualMachineInstance(tests.NamespaceTestDefault).Get(agentVMI.Name, &getOptions)
-						Expect(err).ToNot(HaveOccurred(), "Should get VMI ")
+						Expect(err).ToNot(HaveOccurred(), "Should get VMI")
 						return freshVMI.Status.Conditions
 					}, 240*time.Second, 2).Should(
+						ContainElement(
+							MatchFields(
+								IgnoreExtras,
+								Fields{"Type": Equal(v1.VirtualMachineInstanceUnsupportedAgent)})),
+						"Should have unsupported agent connected condition")
+
+				})
+
+				It("VMI condition should not signal unsupported agent presence for optional commands", func() {
+					agentVMI := tests.NewRandomFedoraVMIWithBlacklistGuestAgent("guest-exec,guest-set-password")
+					By("Starting a VirtualMachineInstance")
+					agentVMI, err = virtClient.VirtualMachineInstance(tests.NamespaceTestDefault).Create(agentVMI)
+					Expect(err).ToNot(HaveOccurred(), "Should create VMI successfully")
+					tests.WaitForSuccessfulVMIStart(agentVMI)
+
+					getOptions := metav1.GetOptions{}
+					freshVMI, err := virtClient.VirtualMachineInstance(tests.NamespaceTestDefault).Get(agentVMI.Name, &getOptions)
+					Expect(err).ToNot(HaveOccurred(), "Should get VMI ")
+
+					By("VMI has the guest agent connected condition")
+					Eventually(func() []v1.VirtualMachineInstanceCondition {
+						freshVMI, err = virtClient.VirtualMachineInstance(tests.NamespaceTestDefault).Get(agentVMI.Name, &getOptions)
+						Expect(err).ToNot(HaveOccurred(), "Should get VMI")
+						return freshVMI.Status.Conditions
+					}, 240*time.Second, 2).Should(
+						ContainElement(
+							MatchFields(
+								IgnoreExtras,
+								Fields{"Type": Equal(v1.VirtualMachineInstanceAgentConnected)})),
+						"Should have agent connected condition")
+
+					By("fetching the VMI after agent has connected")
+					freshVMI, err = virtClient.VirtualMachineInstance(tests.NamespaceTestDefault).Get(agentVMI.Name, &getOptions)
+					Expect(err).ToNot(HaveOccurred(), "Should get VMI")
+					Expect(freshVMI.Status.Conditions).ToNot(
 						ContainElement(
 							MatchFields(
 								IgnoreExtras,
@@ -1310,7 +1371,7 @@ var _ = Describe("Configurations", func() {
 
 				By("Terminating guest agent and waiting for it to disappear.")
 				Expect(console.SafeExpectBatch(agentVMI, []expect.Batcher{
-					&expect.BSnd{S: "systemctl stop guestagent\n"},
+					&expect.BSnd{S: "systemctl stop qemu-guest-agent\n"},
 					&expect.BExp{R: console.PromptExpression},
 				}, 400)).To(Succeed())
 
@@ -1410,7 +1471,7 @@ var _ = Describe("Configurations", func() {
 
 		Context("with Clock and timezone", func() {
 
-			It("[test_id:5268]guest should see timezone", func() {
+			It("[QUARANTINE][sig-compute][test_id:5268]guest should see timezone", func() {
 				vmi := tests.NewRandomVMIWithEphemeralDiskAndUserdata(cd.ContainerDiskFor(cd.ContainerDiskCirros), "#!/bin/bash\necho 'hello'\n")
 				timezone := "America/New_York"
 				tz := v1.ClockOffsetTimezone(timezone)
@@ -1434,13 +1495,14 @@ var _ = Describe("Configurations", func() {
 				loc, err := time.LoadLocation(timezone)
 				Expect(err).ToNot(HaveOccurred())
 				now := time.Now().In(loc)
-				plusone := now.Add(time.Minute)
+				nowplus := now.Add(20 * time.Second)
+				nowminus := now.Add(-20 * time.Second)
 				By("Checking hardware clock time")
-				expected := fmt.Sprintf("(%02d:%02d:|%02d:%02d:)", now.Hour(), now.Minute(), plusone.Hour(), plusone.Minute())
+				expected := fmt.Sprintf("(%02d:%02d:|%02d:%02d:|%02d:%02d:)", nowminus.Hour(), nowminus.Minute(), now.Hour(), now.Minute(), nowplus.Hour(), nowplus.Minute())
 				Expect(console.SafeExpectBatch(vmi, []expect.Batcher{
 					&expect.BSnd{S: "sudo hwclock --localtime \n"},
 					&expect.BExp{R: expected},
-				}, 20)).To(Succeed())
+				}, 20)).To(Succeed(), "Expected the VM time to be within 20 seconds of "+now.String())
 
 			})
 		})
@@ -1448,84 +1510,48 @@ var _ = Describe("Configurations", func() {
 	})
 
 	Context("[rfe_id:140][crit:medium][vendor:cnv-qe@redhat.com][level:component]with CPU spec", func() {
-		libvirtCPUModelRegexp := regexp.MustCompile(`<model>(\w+)\-*\w*</model>`)
-		libvirtCPUVendorRegexp := regexp.MustCompile(`<vendor>(\w+)</vendor>`)
-		libvirtCPUFeatureRegexp := regexp.MustCompile(`<feature name='(\w+)'/>`)
-		cpuModelNameRegexp := regexp.MustCompile(`Model name:[\t ]*([\t \w\-@\.\(\)]+)`)
-
-		var libvirtCpuModel string
-		var libvirtCpuVendor string
-		var cpuModelName string
-		var cpuFeatures []string
 		var cpuVmi *v1.VirtualMachineInstance
-		var node string
+		var nodes *k8sv1.NodeList
+
+		parseCPUNiceName := func(name string) string {
+			updatedCPUName := strings.Replace(name, "\n", "", -1)
+			if strings.Contains(updatedCPUName, ":") {
+				updatedCPUName = strings.Split(name, ":")[1]
+
+			}
+			updatedCPUName = strings.Replace(updatedCPUName, " ", "", 1)
+			updatedCPUName = strings.Replace(updatedCPUName, "(", "", -1)
+			updatedCPUName = strings.Replace(updatedCPUName, ")", "", -1)
+
+			updatedCPUName = strings.Split(updatedCPUName, "-")[0]
+			updatedCPUName = strings.Split(updatedCPUName, "_")[0]
+
+			for i, char := range updatedCPUName {
+				if unicode.IsUpper(char) && i != 0 {
+					updatedCPUName = strings.Split(updatedCPUName, string(char))[0]
+				}
+			}
+			return updatedCPUName
+		}
 
 		// Collect capabilities once for all tests
 		tests.BeforeAll(func() {
-			vmi := tests.NewRandomVMIWithEphemeralDiskAndUserdata(cd.ContainerDiskFor(cd.ContainerDiskCirros), "#!/bin/bash\necho 'hello'\n")
-			_, err = virtClient.VirtualMachineInstance(tests.NamespaceTestDefault).Create(vmi)
-			Expect(err).ToNot(HaveOccurred())
-			node = tests.WaitForSuccessfulVMIStart(vmi)
-
-			virshCaps := tests.GetNodeLibvirtCapabilities(vmi)
-
-			model := libvirtCPUModelRegexp.FindStringSubmatch(virshCaps)
-			Expect(len(model)).To(Equal(2))
-			libvirtCpuModel = model[1]
-
-			vendor := libvirtCPUVendorRegexp.FindStringSubmatch(virshCaps)
-			Expect(len(vendor)).To(Equal(2))
-			libvirtCpuVendor = vendor[1]
-
-			cpuFeaturesList := libvirtCPUFeatureRegexp.FindAllStringSubmatch(virshCaps, -1)
-
-			for _, cpuFeature := range cpuFeaturesList {
-				cpuFeatures = append(cpuFeatures, cpuFeature[1])
-			}
-
-			cpuInfo := tests.GetNodeCPUInfo(vmi)
-			modelName := cpuModelNameRegexp.FindStringSubmatch(cpuInfo)
-			Expect(len(modelName)).To(Equal(2))
-			cpuModelName = modelName[1]
-
-			// Best to also delete the VMI, in the case that there is only one spot free for scheduling
-			err = virtClient.VirtualMachineInstance(tests.NamespaceTestDefault).Delete(vmi.Name, &metav1.DeleteOptions{})
-			Expect(err).ToNot(HaveOccurred())
-			Eventually(func() bool {
-				_, err = virtClient.VirtualMachineInstance(tests.NamespaceTestDefault).Get(vmi.Name, &metav1.GetOptions{})
-				if errors.IsNotFound(err) {
-					return true
-				}
-				return false
-			}, 60*time.Second, 1*time.Second).Should(BeTrue())
+			nodes = tests.GetAllSchedulableNodes(virtClient)
+			Expect(nodes.Items).ToNot(BeEmpty(), "There should be some compute node")
 		})
 
 		BeforeEach(func() {
 			cpuVmi = tests.NewRandomVMIWithEphemeralDiskAndUserdata(cd.ContainerDiskFor(cd.ContainerDiskCirros), "#!/bin/bash\necho 'hello'\n")
-			cpuVmi.Spec.Affinity = &kubev1.Affinity{
-				NodeAffinity: &kubev1.NodeAffinity{
-					RequiredDuringSchedulingIgnoredDuringExecution: &kubev1.NodeSelector{
-						NodeSelectorTerms: []kubev1.NodeSelectorTerm{
-							{
-								MatchExpressions: []kubev1.NodeSelectorRequirement{
-									{Key: "kubernetes.io/hostname", Operator: kubev1.NodeSelectorOpIn, Values: []string{node}},
-								},
-							},
-						},
-					},
-				},
-			}
 		})
 
 		Context("[rfe_id:140][crit:medium][vendor:cnv-qe@redhat.com][level:component]when CPU model defined", func() {
-			It("[test_id:1678]should report defined CPU model", func() {
-				vmiModel := "Conroe"
-				if libvirtCpuVendor == "AMD" {
-					vmiModel = "Opteron_G1"
-				}
+			It("[QUARANTINE][test_id:1678]should report defined CPU model", func() {
+				supportedCPUs := tests.GetSupportedCPUModels(*nodes)
+				Expect(len(supportedCPUs)).ToNot(Equal(0))
 				cpuVmi.Spec.Domain.CPU = &v1.CPU{
-					Model: vmiModel,
+					Model: supportedCPUs[0],
 				}
+				niceName := parseCPUNiceName(supportedCPUs[0])
 
 				By("Starting a VirtualMachineInstance")
 				cpuVmi, err = virtClient.VirtualMachineInstance(tests.NamespaceTestDefault).Create(cpuVmi)
@@ -1537,8 +1563,8 @@ var _ = Describe("Configurations", func() {
 
 				By("Checking the CPU model under the guest OS")
 				Expect(console.SafeExpectBatch(cpuVmi, []expect.Batcher{
-					&expect.BSnd{S: fmt.Sprintf("grep %s /proc/cpuinfo\n", vmiModel)},
-					&expect.BExp{R: "model name"},
+					&expect.BSnd{S: fmt.Sprintf("grep %s /proc/cpuinfo\n", niceName)},
+					&expect.BExp{R: fmt.Sprintf(".*model name.*%s.*", niceName)},
 				}, 10)).To(Succeed())
 			})
 		})
@@ -1554,13 +1580,18 @@ var _ = Describe("Configurations", func() {
 				Expect(err).ToNot(HaveOccurred())
 				tests.WaitForSuccessfulVMIStart(cpuVmi)
 
+				By("Checking the CPU model under the guest OS")
+				output := tests.RunCommandOnVmiPod(cpuVmi, []string{"grep", "-m1", "model name", "/proc/cpuinfo"})
+
+				niceName := parseCPUNiceName(output)
+
 				By("Expecting the VirtualMachineInstance console")
 				Expect(libnet.WithIPv6(console.LoginToCirros)(cpuVmi)).To(Succeed())
 
 				By("Checking the CPU model under the guest OS")
 				Expect(console.SafeExpectBatch(cpuVmi, []expect.Batcher{
-					&expect.BSnd{S: fmt.Sprintf("grep '%s' /proc/cpuinfo\n", cpuModelName)},
-					&expect.BExp{R: "model name"},
+					&expect.BSnd{S: fmt.Sprintf("grep '%s' /proc/cpuinfo\n", niceName)},
+					&expect.BExp{R: fmt.Sprintf(".*model name.*%s.*", niceName)},
 				}, 10)).To(Succeed())
 			})
 		})
@@ -1572,23 +1603,29 @@ var _ = Describe("Configurations", func() {
 				Expect(err).ToNot(HaveOccurred())
 				tests.WaitForSuccessfulVMIStart(cpuVmi)
 
+				output := tests.RunCommandOnVmiPod(cpuVmi, []string{"grep", "-m1", "model name", "/proc/cpuinfo"})
+
+				niceName := parseCPUNiceName(output)
+
 				By("Expecting the VirtualMachineInstance console")
 				Expect(libnet.WithIPv6(console.LoginToCirros)(cpuVmi)).To(Succeed())
 
 				By("Checking the CPU model under the guest OS")
 				console.SafeExpectBatch(cpuVmi, []expect.Batcher{
-					&expect.BSnd{S: fmt.Sprintf("grep '%s' /proc/cpuinfo\n", libvirtCpuModel)},
-					&expect.BExp{R: "model name"},
+					&expect.BSnd{S: fmt.Sprintf("grep '%s' /proc/cpuinfo\n", niceName)},
+					&expect.BExp{R: fmt.Sprintf(".*model name.*%s.*", niceName)},
 				}, 10)
 			})
 		})
 
 		Context("when CPU features defined", func() {
-			It("[test_id:3123]should start a Virtaul Machine with matching features", func() {
+			It("[test_id:3123]should start a Virtual Machine with matching features", func() {
+				supportedCPUFeatures := tests.GetSupportedCPUFeatures(*nodes)
+				Expect(len(supportedCPUFeatures)).ToNot(Equal(0))
 				cpuVmi.Spec.Domain.CPU = &v1.CPU{
 					Features: []v1.CPUFeature{
 						{
-							Name: cpuFeatures[0],
+							Name: supportedCPUFeatures[0],
 						},
 					},
 				}
@@ -1600,13 +1637,6 @@ var _ = Describe("Configurations", func() {
 
 				By("Expecting the VirtualMachineInstance console")
 				Expect(libnet.WithIPv6(console.LoginToCirros)(cpuVmi)).To(Succeed())
-
-				By("Checking the CPU features under the guest OS")
-				Expect(console.SafeExpectBatch(cpuVmi, []expect.Batcher{
-					&expect.BSnd{S: fmt.Sprintf("grep %s /proc/cpuinfo\n", cpuFeatures[0])},
-					&expect.BExp{R: "flags"},
-				}, 10)).To(Succeed())
-
 			})
 		})
 	})
@@ -1658,7 +1688,7 @@ var _ = Describe("Configurations", func() {
 	})
 
 	Context("with a custom scheduler", func() {
-		It("[test_id:4631]schould set the custom scheduler on the pod", func() {
+		It("[test_id:4631]should set the custom scheduler on the pod", func() {
 			vmi := tests.NewRandomVMI()
 			vmi.Spec.SchedulerName = "my-custom-scheduler"
 			runningVMI := tests.RunVMIAndExpectScheduling(vmi, 30)
@@ -1682,11 +1712,6 @@ var _ = Describe("Configurations", func() {
 
 		It("[test_id:3128]should set CPU request when it is not provided", func() {
 			vmi := tests.NewRandomVMI()
-			vmi.Spec.Domain.Resources = v1.ResourceRequirements{
-				Requests: kubev1.ResourceList{
-					kubev1.ResourceMemory: resource.MustParse("64M"),
-				},
-			}
 			runningVMI := tests.RunVMIAndExpectScheduling(vmi, 30)
 
 			readyPod := libvmi.GetPodByVirtualMachineInstance(runningVMI, tests.NamespaceTestDefault)
@@ -1704,11 +1729,6 @@ var _ = Describe("Configurations", func() {
 			tests.UpdateKubeVirtConfigValueAndWait(config)
 
 			vmi := tests.NewRandomVMI()
-			vmi.Spec.Domain.Resources = v1.ResourceRequirements{
-				Requests: kubev1.ResourceList{
-					kubev1.ResourceMemory: resource.MustParse("64M"),
-				},
-			}
 			runningVMI := tests.RunVMIAndExpectScheduling(vmi, 30)
 
 			readyPod := libvmi.GetPodByVirtualMachineInstance(runningVMI, tests.NamespaceTestDefault)
@@ -1738,7 +1758,6 @@ var _ = Describe("Configurations", func() {
 			tests.SkipPVCTestIfRunnigOnKindInfra()
 
 			vmi := tests.NewRandomVMI()
-			vmi.Spec.Domain.Resources.Requests[kubev1.ResourceMemory] = resource.MustParse("64M")
 
 			By("adding disks to a VMI")
 			tests.AddEphemeralDisk(vmi, "ephemeral-disk1", "virtio", cd.ContainerDiskFor(cd.ContainerDiskCirros))
@@ -1765,23 +1784,23 @@ var _ = Describe("Configurations", func() {
 			cacheWritethrough := string(v1.CacheWriteThrough)
 
 			By("checking if requested cache 'none' has been set")
-			Expect(disks[0].Alias.Name).To(Equal("ephemeral-disk1"))
+			Expect(disks[0].Alias.GetName()).To(Equal("ephemeral-disk1"))
 			Expect(disks[0].Driver.Cache).To(Equal(cacheNone))
 
 			By("checking if requested cache 'writethrough' has been set")
-			Expect(disks[1].Alias.Name).To(Equal("ephemeral-disk2"))
+			Expect(disks[1].Alias.GetName()).To(Equal("ephemeral-disk2"))
 			Expect(disks[1].Driver.Cache).To(Equal(cacheWritethrough))
 
 			By("checking if default cache 'none' has been set to ephemeral disk")
-			Expect(disks[2].Alias.Name).To(Equal("ephemeral-disk3"))
+			Expect(disks[2].Alias.GetName()).To(Equal("ephemeral-disk3"))
 			Expect(disks[2].Driver.Cache).To(Equal(cacheNone))
 
 			By("checking if default cache 'none' has been set to cloud-init disk")
-			Expect(disks[3].Alias.Name).To(Equal("cloud-init"))
+			Expect(disks[3].Alias.GetName()).To(Equal("cloud-init"))
 			Expect(disks[3].Driver.Cache).To(Equal(cacheNone))
 
 			By("checking if default cache 'writethrough' has been set to fs which does not support direct I/O")
-			Expect(disks[4].Alias.Name).To(Equal("hostdisk"))
+			Expect(disks[4].Alias.GetName()).To(Equal("hostdisk"))
 			Expect(disks[4].Driver.Cache).To(Equal(cacheWritethrough))
 		})
 
@@ -1789,7 +1808,6 @@ var _ = Describe("Configurations", func() {
 			tests.SkipPVCTestIfRunnigOnKindInfra()
 
 			vmi := tests.NewRandomVMI()
-			vmi.Spec.Domain.Resources.Requests[kubev1.ResourceMemory] = resource.MustParse("64M")
 
 			By("adding disks to a VMI")
 			// disk[0]:  File, sparsed, no user-input, cache=none
@@ -1819,16 +1837,16 @@ var _ = Describe("Configurations", func() {
 			ioThreads := string(v1.IOThreads)
 			ioNone := ""
 
-			By("checking if default io has not been seti for sparsed file")
-			Expect(disks[0].Alias.Name).To(Equal("ephemeral-disk1"))
+			By("checking if default io has not been set for sparsed file")
+			Expect(disks[0].Alias.GetName()).To(Equal("ephemeral-disk1"))
 			Expect(disks[0].Driver.IO).To(Equal(ioNone))
 
 			By("checking if default io mode has been set to 'native' for block device")
-			Expect(disks[1].Alias.Name).To(Equal("block-pvc"))
+			Expect(disks[1].Alias.GetName()).To(Equal("block-pvc"))
 			Expect(disks[1].Driver.IO).To(Equal(ioNative))
 
 			By("checking if default cache 'none' has been set to pvc disk")
-			Expect(disks[2].Alias.Name).To(Equal("hostpath-pvc"))
+			Expect(disks[2].Alias.GetName()).To(Equal("hostpath-pvc"))
 			// PVC is mounted as tmpfs on kind, which does not support direct I/O.
 			// As such, it behaves as plugging in a hostDisk - check disks[6].
 			if tests.IsRunningOnKindInfra() {
@@ -1840,9 +1858,127 @@ var _ = Describe("Configurations", func() {
 			}
 
 			By("checking if requested io mode 'threads' has been set")
-			Expect(disks[3].Alias.Name).To(Equal("ephemeral-disk2"))
+			Expect(disks[3].Alias.GetName()).To(Equal("ephemeral-disk2"))
 			Expect(disks[3].Driver.IO).To(Equal(ioThreads))
 
+		})
+	})
+
+	Context("Block size configuration set", func() {
+
+		It("Should set BlockIO when using custom block sizes", func() {
+			tests.SkipPVCTestIfRunnigOnKindInfra()
+
+			By("creating a block volume")
+			tests.CreateBlockVolumePvAndPvc("1Gi")
+
+			vmi := tests.NewRandomVMIWithPVC(tests.BlockDiskForTest)
+
+			By("setting the disk to use custom block sizes")
+			logicalSize := uint(16384)
+			physicalSize := uint(16384)
+			vmi.Spec.Domain.Devices.Disks[0].BlockSize = &v1.BlockSize{
+				Custom: &v1.CustomBlockSize{
+					Logical:  logicalSize,
+					Physical: physicalSize,
+				},
+			}
+
+			By("initializing the VM")
+			tests.RunVMIAndExpectLaunch(vmi, 60)
+			runningVMISpec, err := tests.GetRunningVMIDomainSpec(vmi)
+			Expect(err).ToNot(HaveOccurred())
+
+			By("checking if number of attached disks is equal to real disks number")
+			disks := runningVMISpec.Devices.Disks
+			Expect(len(vmi.Spec.Domain.Devices.Disks)).To(Equal(len(disks)))
+
+			By("checking if BlockIO is set to the custom block size")
+			Expect(disks[0].Alias.GetName()).To(Equal("disk0"))
+			Expect(disks[0].BlockIO).ToNot(BeNil())
+			Expect(disks[0].BlockIO.LogicalBlockSize).To(Equal(logicalSize))
+			Expect(disks[0].BlockIO.PhysicalBlockSize).To(Equal(physicalSize))
+		})
+
+		It("Should set BlockIO when set to match volume block sizes on block devices", func() {
+			tests.SkipPVCTestIfRunnigOnKindInfra()
+
+			By("creating a block volume")
+			tests.CreateBlockVolumePvAndPvc("1Gi")
+
+			vmi := tests.NewRandomVMIWithPVC(tests.BlockDiskForTest)
+
+			By("setting the disk to match the volume block sizes")
+			vmi.Spec.Domain.Devices.Disks[0].BlockSize = &v1.BlockSize{
+				MatchVolume: &v1.FeatureState{},
+			}
+
+			By("initializing the VM")
+			tests.RunVMIAndExpectLaunch(vmi, 60)
+			runningVMISpec, err := tests.GetRunningVMIDomainSpec(vmi)
+			Expect(err).ToNot(HaveOccurred())
+
+			By("checking if number of attached disks is equal to real disks number")
+			disks := runningVMISpec.Devices.Disks
+			Expect(len(vmi.Spec.Domain.Devices.Disks)).To(Equal(len(disks)))
+
+			By("checking if BlockIO is set for the disk")
+			Expect(disks[0].Alias.GetName()).To(Equal("disk0"))
+			Expect(disks[0].BlockIO).ToNot(BeNil())
+			// Block devices should be one of 512n, 512e or 4096n so accept 512 and 4096 values.
+			expectedDiskSizes := SatisfyAny(Equal(uint(512)), Equal(uint(4096)))
+			Expect(disks[0].BlockIO.LogicalBlockSize).To(expectedDiskSizes)
+			Expect(disks[0].BlockIO.PhysicalBlockSize).To(expectedDiskSizes)
+		})
+
+		It("Should set BlockIO when set to match volume block sizes on files", func() {
+			originalConfig := tests.GetCurrentKv(virtClient).Spec.Configuration
+			tests.EnableFeatureGate(virtconfig.HostDiskGate)
+			defer tests.UpdateKubeVirtConfigValueAndWait(originalConfig)
+
+			By("creating a disk image")
+			var nodeName string
+			tmpHostDiskDir := tests.RandTmpDir()
+			tmpHostDiskPath := filepath.Join(tmpHostDiskDir, fmt.Sprintf("disk-%s.img", uuid.NewRandom().String()))
+			job := tests.CreateHostDiskImage(tmpHostDiskPath)
+			job, err = virtClient.CoreV1().Pods(tests.NamespaceTestDefault).Create(context.Background(), job, metav1.CreateOptions{})
+			Expect(err).ToNot(HaveOccurred())
+			getStatus := func() k8sv1.PodPhase {
+				pod, err := virtClient.CoreV1().Pods(tests.NamespaceTestDefault).Get(context.Background(), job.Name, metav1.GetOptions{})
+				Expect(err).ToNot(HaveOccurred())
+				if pod.Spec.NodeName != "" && nodeName == "" {
+					nodeName = pod.Spec.NodeName
+				}
+				return pod.Status.Phase
+			}
+			Eventually(getStatus, 30, 1).Should(Equal(k8sv1.PodSucceeded))
+			defer tests.RemoveHostDiskImage(tmpHostDiskDir, nodeName)
+
+			vmi := tests.NewRandomVMIWithHostDisk(tmpHostDiskPath, v1.HostDiskExistsOrCreate, nodeName)
+
+			By("setting the disk to match the volume block sizes")
+			vmi.Spec.Domain.Devices.Disks[0].BlockSize = &v1.BlockSize{
+				MatchVolume: &v1.FeatureState{},
+			}
+
+			By("initializing the VM")
+			tests.RunVMIAndExpectLaunch(vmi, 60)
+			runningVMISpec, err := tests.GetRunningVMIDomainSpec(vmi)
+			Expect(err).ToNot(HaveOccurred())
+
+			By("checking if number of attached disks is equal to real disks number")
+			disks := runningVMISpec.Devices.Disks
+			Expect(len(vmi.Spec.Domain.Devices.Disks)).To(Equal(len(disks)))
+
+			By("checking if BlockIO is set for the disk")
+			Expect(disks[0].Alias.GetName()).To(Equal("host-disk"))
+			Expect(disks[0].BlockIO).ToNot(BeNil())
+			// The default for most filesystems nowadays is 4096 but it can be changed.
+			// As such, relying on a specific value is flakey.
+			// As long as we have a value, the exact value doesn't matter.
+			Expect(disks[0].BlockIO.LogicalBlockSize).ToNot(BeZero())
+			// A filesystem only has a a single size so logical == physical
+			Expect(disks[0].BlockIO.LogicalBlockSize).To(Equal(disks[0].BlockIO.PhysicalBlockSize))
 		})
 	})
 
@@ -1932,7 +2068,7 @@ var _ = Describe("Configurations", func() {
 		isNodeHasCPUManagerLabel := func(nodeName string) bool {
 			Expect(nodeName).ToNot(BeEmpty())
 
-			nodeObject, err := virtClient.CoreV1().Nodes().Get(nodeName, metav1.GetOptions{})
+			nodeObject, err := virtClient.CoreV1().Nodes().Get(context.Background(), nodeName, metav1.GetOptions{})
 			Expect(err).ToNot(HaveOccurred())
 			nodeHaveCpuManagerLabel := false
 			nodeLabels := nodeObject.GetLabels()
@@ -1947,7 +2083,7 @@ var _ = Describe("Configurations", func() {
 		}
 
 		BeforeEach(func() {
-			nodes, err = virtClient.CoreV1().Nodes().List(metav1.ListOptions{})
+			nodes, err = virtClient.CoreV1().Nodes().List(context.Background(), metav1.ListOptions{})
 			tests.PanicOnError(err)
 			if len(nodes.Items) == 1 {
 				Skip("Skip cpu pinning test that requires multiple nodes when only one node is present.")
@@ -1958,22 +2094,49 @@ var _ = Describe("Configurations", func() {
 		})
 
 		Context("[Serial]with cpu pinning enabled", func() {
+			const (
+				cgroupV1cpusetPath = "/sys/fs/cgroup/cpuset/cpuset.cpus"
+				cgroupV2cpusetPath = "/sys/fs/cgroup/cpuset.cpus.effective"
+			)
+
+			getPodCPUSet := func(pod *kubev1.Pod) (output string, err error) {
+				output, err = tests.ExecuteCommandOnPod(
+					virtClient,
+					pod,
+					"compute",
+					[]string{"cat", cgroupV2cpusetPath},
+				)
+
+				if err == nil {
+					return
+				}
+
+				output, err = tests.ExecuteCommandOnPod(
+					virtClient,
+					pod,
+					"compute",
+					[]string{"cat", cgroupV1cpusetPath},
+				)
+
+				return
+			}
+
 			It("[test_id:1684]should set the cpumanager label to false when it's not running", func() {
 
 				By("adding a cpumanger=true label to a node")
-				nodes, err := virtClient.CoreV1().Nodes().List(metav1.ListOptions{LabelSelector: v1.CPUManager + "=" + "false"})
+				nodes, err := virtClient.CoreV1().Nodes().List(context.Background(), metav1.ListOptions{LabelSelector: v1.CPUManager + "=" + "false"})
 				Expect(err).ToNot(HaveOccurred())
 				if len(nodes.Items) == 0 {
 					Skip("Skip CPU manager test on clusters where CPU manager is running on all worker/compute nodes")
 				}
 
 				node := &nodes.Items[0]
-				node, err = virtClient.CoreV1().Nodes().Patch(node.Name, types.StrategicMergePatchType, []byte(fmt.Sprintf(`{"metadata": { "labels": {"%s": "true"}}}`, v1.CPUManager)))
+				node, err = virtClient.CoreV1().Nodes().Patch(context.Background(), node.Name, types.StrategicMergePatchType, []byte(fmt.Sprintf(`{"metadata": { "labels": {"%s": "true"}}}`, v1.CPUManager)), metav1.PatchOptions{})
 				Expect(err).ToNot(HaveOccurred())
 
 				By("setting the cpumanager label back to false")
 				Eventually(func() string {
-					n, err := virtClient.CoreV1().Nodes().Get(node.Name, metav1.GetOptions{})
+					n, err := virtClient.CoreV1().Nodes().Get(context.Background(), node.Name, metav1.GetOptions{})
 					Expect(err).ToNot(HaveOccurred())
 					return n.Labels[v1.CPUManager]
 				}, 3*time.Minute, 2*time.Second).Should(Equal("false"))
@@ -1995,11 +2158,6 @@ var _ = Describe("Configurations", func() {
 				cpuVmi.Spec.Domain.CPU = &v1.CPU{
 					Cores:                 2,
 					DedicatedCPUPlacement: true,
-				}
-				cpuVmi.Spec.Domain.Resources = v1.ResourceRequirements{
-					Requests: kubev1.ResourceList{
-						kubev1.ResourceMemory: resource.MustParse("64M"),
-					},
 				}
 
 				By("Starting a VirtualMachineInstance")
@@ -2030,12 +2188,7 @@ var _ = Describe("Configurations", func() {
 					tests.PanicOnError(fmt.Errorf("could not find the compute container"))
 				}
 
-				output, err := tests.ExecuteCommandOnPod(
-					virtClient,
-					readyPod,
-					"compute",
-					[]string{"cat", hw_utils.CPUSET_PATH},
-				)
+				output, err := getPodCPUSet(readyPod)
 				log.Log.Infof("%v", output)
 				Expect(err).ToNot(HaveOccurred())
 				output = strings.TrimSuffix(output, "\n")
@@ -2100,12 +2253,7 @@ var _ = Describe("Configurations", func() {
 				}, 15)).To(Succeed())
 
 				pod := tests.GetRunningPodByVirtualMachineInstance(vmi, tests.NamespaceTestDefault)
-				podMemoryUsage, err := tests.ExecuteCommandOnPod(
-					virtClient,
-					pod,
-					"compute",
-					[]string{"/usr/bin/bash", "-c", "cat /sys/fs/cgroup/memory/memory.usage_in_bytes"},
-				)
+				podMemoryUsage, err := getPodMemoryUsage(pod)
 				Expect(err).ToNot(HaveOccurred())
 				By("Converting pod memory usage")
 				m, err := strconv.Atoi(strings.Trim(podMemoryUsage, "\n"))
@@ -2120,11 +2268,6 @@ var _ = Describe("Configurations", func() {
 					Cores:                 2,
 					DedicatedCPUPlacement: true,
 					IsolateEmulatorThread: true,
-				}
-				cpuVmi.Spec.Domain.Resources = v1.ResourceRequirements{
-					Requests: kubev1.ResourceList{
-						kubev1.ResourceMemory: resource.MustParse("64M"),
-					},
 				}
 
 				By("Starting a VirtualMachineInstance")
@@ -2155,12 +2298,7 @@ var _ = Describe("Configurations", func() {
 					tests.PanicOnError(fmt.Errorf("could not find the compute container"))
 				}
 
-				output, err := tests.ExecuteCommandOnPod(
-					virtClient,
-					readyPod,
-					"compute",
-					[]string{"cat", hw_utils.CPUSET_PATH},
-				)
+				output, err := getPodCPUSet(readyPod)
 				log.Log.Infof("%v", output)
 				Expect(err).ToNot(HaveOccurred())
 				output = strings.TrimSuffix(output, "\n")
@@ -2187,11 +2325,6 @@ var _ = Describe("Configurations", func() {
 					IsolateEmulatorThread: true,
 				}
 
-				cpuVmi.Spec.Domain.Resources = v1.ResourceRequirements{
-					Requests: kubev1.ResourceList{
-						kubev1.ResourceMemory: resource.MustParse("64M"),
-					},
-				}
 				By("Starting a VirtualMachineInstance")
 				_, err = virtClient.VirtualMachineInstance(tests.NamespaceTestDefault).Create(cpuVmi)
 				Expect(err).To(HaveOccurred())
@@ -2202,12 +2335,8 @@ var _ = Describe("Configurations", func() {
 				cpuVmi.Spec.Domain.CPU = &v1.CPU{
 					DedicatedCPUPlacement: true,
 				}
-				cpuVmi.Spec.Domain.Resources = v1.ResourceRequirements{
-					Requests: kubev1.ResourceList{
-						kubev1.ResourceCPU:    resource.MustParse("2"),
-						kubev1.ResourceMemory: resource.MustParse("64M"),
-					},
-				}
+				cpuVmi.Spec.Domain.Resources.Requests[k8sv1.ResourceCPU] = resource.MustParse("2")
+
 				By("Starting a VirtualMachineInstance")
 				cpuVmi, err = virtClient.VirtualMachineInstance(tests.NamespaceTestDefault).Create(cpuVmi)
 				Expect(err).ToNot(HaveOccurred())
@@ -2230,12 +2359,9 @@ var _ = Describe("Configurations", func() {
 					Cores:                 2,
 					DedicatedCPUPlacement: true,
 				}
-				cpuVmi.Spec.Domain.Resources = v1.ResourceRequirements{
-					Requests: kubev1.ResourceList{
-						kubev1.ResourceCPU:    resource.MustParse("3"),
-						kubev1.ResourceMemory: resource.MustParse("64M"),
-					},
-				}
+
+				cpuVmi.Spec.Domain.Resources.Requests[k8sv1.ResourceCPU] = resource.MustParse("3")
+
 				By("Starting a VirtualMachineInstance")
 				_, err = virtClient.VirtualMachineInstance(tests.NamespaceTestDefault).Create(cpuVmi)
 				Expect(err).To(HaveOccurred())
@@ -2245,12 +2371,9 @@ var _ = Describe("Configurations", func() {
 				cpuVmi.Spec.Domain.CPU = &v1.CPU{
 					DedicatedCPUPlacement: true,
 				}
-				cpuVmi.Spec.Domain.Resources = v1.ResourceRequirements{
-					Requests: kubev1.ResourceList{
-						kubev1.ResourceCPU:    resource.MustParse("300m"),
-						kubev1.ResourceMemory: resource.MustParse("64M"),
-					},
-				}
+
+				cpuVmi.Spec.Domain.Resources.Requests[k8sv1.ResourceCPU] = resource.MustParse("300m")
+
 				By("Starting a VirtualMachineInstance")
 				_, err = virtClient.VirtualMachineInstance(tests.NamespaceTestDefault).Create(cpuVmi)
 				Expect(err).To(HaveOccurred())
@@ -2260,11 +2383,8 @@ var _ = Describe("Configurations", func() {
 				cpuVmi.Spec.Domain.CPU = &v1.CPU{
 					DedicatedCPUPlacement: true,
 				}
+				cpuVmi.Spec.Domain.Resources.Requests[k8sv1.ResourceCPU] = resource.MustParse("2")
 				cpuVmi.Spec.Domain.Resources = v1.ResourceRequirements{
-					Requests: kubev1.ResourceList{
-						kubev1.ResourceCPU:    resource.MustParse("2"),
-						kubev1.ResourceMemory: resource.MustParse("64M"),
-					},
 					Limits: kubev1.ResourceList{
 						kubev1.ResourceCPU: resource.MustParse("4"),
 					},
@@ -2279,18 +2399,9 @@ var _ = Describe("Configurations", func() {
 				cpuVmi.Spec.Domain.CPU = &v1.CPU{
 					DedicatedCPUPlacement: true,
 				}
-				cpuVmi.Spec.Domain.Resources = v1.ResourceRequirements{
-					Requests: kubev1.ResourceList{
-						kubev1.ResourceCPU:    resource.MustParse("2"),
-						kubev1.ResourceMemory: resource.MustParse("64M"),
-					},
-				}
-				Vmi.Spec.Domain.Resources = v1.ResourceRequirements{
-					Requests: kubev1.ResourceList{
-						kubev1.ResourceCPU:    resource.MustParse("1"),
-						kubev1.ResourceMemory: resource.MustParse("64M"),
-					},
-				}
+
+				cpuVmi.Spec.Domain.Resources.Requests[k8sv1.ResourceCPU] = resource.MustParse("2")
+				Vmi.Spec.Domain.Resources.Requests[k8sv1.ResourceCPU] = resource.MustParse("1")
 				Vmi.Spec.NodeSelector = map[string]string{v1.CPUManager: "true"}
 
 				By("Starting a VirtualMachineInstance with dedicated cpus")
@@ -2421,7 +2532,7 @@ var _ = Describe("Configurations", func() {
 			Expect(console.SafeExpectBatch(vmi, []expect.Batcher{
 				&expect.BSnd{S: "[ $(sudo dmidecode -s chassis-asset-tag | tr -s ' ') = Test-123 ] && echo 'pass'\n"},
 				&expect.BExp{R: console.RetValue("pass")},
-			}, 1)).To(Succeed())
+			}, 10)).To(Succeed())
 		})
 	})
 
@@ -2587,7 +2698,7 @@ var _ = Describe("Configurations", func() {
 
 		BeforeEach(func() {
 			var bootOrder uint = 1
-			vmi = tests.NewRandomFedoraVMIWitGuestAgent()
+			vmi = tests.NewRandomFedoraVMIWithGuestAgent()
 			vmi.Spec.Domain.Resources.Requests[kubev1.ResourceMemory] = resource.MustParse("1024M")
 			vmi.Spec.Domain.Devices.Disks[0].BootOrder = &bootOrder
 		})
@@ -2646,11 +2757,11 @@ var _ = Describe("Configurations", func() {
 
 			By("Check virt-what-cpuid-helper does not match KVM")
 			Expect(console.ExpectBatch(vmi, []expect.Batcher{
-				&expect.BSnd{S: "virt-what-cpuid-helper > /dev/null 2>&1 && echo 'pass'\n"},
+				&expect.BSnd{S: "/usr/libexec/virt-what-cpuid-helper > /dev/null 2>&1 && echo 'pass'\n"},
 				&expect.BExp{R: console.RetValue("pass")},
-				&expect.BSnd{S: "$(sudo virt-what-cpuid-helper | grep -q KVMKVMKVM) || echo 'pass'\n"},
+				&expect.BSnd{S: "$(sudo /usr/libexec/virt-what-cpuid-helper | grep -q KVMKVMKVM) || echo 'pass'\n"},
 				&expect.BExp{R: console.RetValue("pass")},
-			}, 1*time.Second)).To(Succeed())
+			}, 2*time.Second)).To(Succeed())
 		})
 
 		It("[test_id:5272]test cpuid default", func() {
@@ -2664,9 +2775,9 @@ var _ = Describe("Configurations", func() {
 
 			By("Check virt-what-cpuid-helper matches KVM")
 			Expect(console.ExpectBatch(vmi, []expect.Batcher{
-				&expect.BSnd{S: "virt-what-cpuid-helper > /dev/null 2>&1 && echo 'pass'\n"},
+				&expect.BSnd{S: "/usr/libexec/virt-what-cpuid-helper > /dev/null 2>&1 && echo 'pass'\n"},
 				&expect.BExp{R: console.RetValue("pass")},
-				&expect.BSnd{S: "$(sudo virt-what-cpuid-helper | grep -q KVMKVMKVM) && echo 'pass'\n"},
+				&expect.BSnd{S: "$(sudo /usr/libexec/virt-what-cpuid-helper | grep -q KVMKVMKVM) && echo 'pass'\n"},
 				&expect.BExp{R: console.RetValue("pass")},
 			}, 1*time.Second)).To(Succeed())
 		})

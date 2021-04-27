@@ -20,6 +20,7 @@
 package imageupload
 
 import (
+	"context"
 	"crypto/tls"
 	"fmt"
 	"io/ioutil"
@@ -123,7 +124,7 @@ func NewImageUploadCommand(clientConfig clientcmd.ClientConfig) *cobra.Command {
 		Args:    cobra.MaximumNArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			v := command{clientConfig: clientConfig}
-			return v.run(cmd, args)
+			return v.run(args)
 		},
 	}
 	cmd.Flags().BoolVar(&insecure, "insecure", false, "Allow insecure server connections when using HTTPS.")
@@ -206,7 +207,7 @@ func parseArgs(args []string) error {
 	return nil
 }
 
-func (c *command) run(cmd *cobra.Command, args []string) error {
+func (c *command) run(args []string) error {
 	if err := parseArgs(args); err != nil {
 		return err
 	}
@@ -382,7 +383,7 @@ func uploadData(uploadProxyURL, token string, file *os.File, insecure bool) erro
 	reader := bar.NewProxyReader(file)
 
 	client := httpClientCreatorFunc(insecure)
-	req, _ := http.NewRequest("POST", url, reader)
+	req, _ := http.NewRequest("POST", url, ioutil.NopCloser(reader))
 
 	req.Header.Add("Authorization", "Bearer "+token)
 	req.Header.Add("Content-Type", "application/octet-stream")
@@ -421,7 +422,7 @@ func getUploadToken(client cdiClientset.Interface, namespace, name string) (stri
 		},
 	}
 
-	response, err := client.UploadV1alpha1().UploadTokenRequests(namespace).Create(request)
+	response, err := client.UploadV1alpha1().UploadTokenRequests(namespace).Create(context.Background(), request, metav1.CreateOptions{})
 	if err != nil {
 		return "", err
 	}
@@ -433,11 +434,12 @@ func waitDvUploadScheduled(client kubecli.KubevirtClient, namespace, name string
 	loggedStatus := false
 	//
 	err := wait.PollImmediate(interval, timeout, func() (bool, error) {
-		dv, err := client.CdiClient().CdiV1alpha1().DataVolumes(namespace).Get(name, metav1.GetOptions{})
+		dv, err := client.CdiClient().CdiV1alpha1().DataVolumes(namespace).Get(context.Background(), name, metav1.GetOptions{})
 
 		if err != nil {
 			// DataVolume controller may not have created the DV yet ? TODO:
 			if k8serrors.IsNotFound(err) {
+				fmt.Printf("DV %s not found... \n", name)
 				return false, nil
 			}
 
@@ -467,7 +469,7 @@ func waitUploadServerReady(client kubernetes.Interface, namespace, name string, 
 	loggedStatus := false
 
 	err := wait.PollImmediate(interval, timeout, func() (bool, error) {
-		pvc, err := client.CoreV1().PersistentVolumeClaims(namespace).Get(name, metav1.GetOptions{})
+		pvc, err := client.CoreV1().PersistentVolumeClaims(namespace).Get(context.Background(), name, metav1.GetOptions{})
 		if err != nil {
 			// DataVolume controller may not have created the PVC yet
 			if k8serrors.IsNotFound(err) {
@@ -498,7 +500,7 @@ func waitUploadServerReady(client kubernetes.Interface, namespace, name string, 
 
 func waitUploadProcessingComplete(client kubernetes.Interface, namespace, name string, interval, timeout time.Duration) error {
 	err := wait.PollImmediate(interval, timeout, func() (bool, error) {
-		pvc, err := client.CoreV1().PersistentVolumeClaims(namespace).Get(name, metav1.GetOptions{})
+		pvc, err := client.CoreV1().PersistentVolumeClaims(namespace).Get(context.Background(), name, metav1.GetOptions{})
 		if err != nil {
 			return false, err
 		}
@@ -535,7 +537,7 @@ func createUploadDataVolume(client kubecli.KubevirtClient, namespace, name, size
 		},
 	}
 
-	dv, err = client.CdiClient().CdiV1alpha1().DataVolumes(namespace).Create(dv)
+	dv, err = client.CdiClient().CdiV1alpha1().DataVolumes(namespace).Create(context.Background(), dv, metav1.CreateOptions{})
 	if err != nil {
 		return nil, err
 	}
@@ -560,7 +562,7 @@ func createUploadPVC(client kubernetes.Interface, namespace, name, size, storage
 		Spec: *pvcSpec,
 	}
 
-	pvc, err = client.CoreV1().PersistentVolumeClaims(namespace).Create(pvc)
+	pvc, err = client.CoreV1().PersistentVolumeClaims(namespace).Create(context.Background(), pvc, metav1.CreateOptions{})
 	if err != nil {
 		return nil, err
 	}
@@ -607,7 +609,7 @@ func ensurePVCSupportsUpload(client kubernetes.Interface, pvc *v1.PersistentVolu
 			pvc.SetAnnotations(make(map[string]string, 0))
 		}
 		pvc.Annotations[uploadRequestAnnotation] = ""
-		pvc, err = client.CoreV1().PersistentVolumeClaims(pvc.Namespace).Update(pvc)
+		pvc, err = client.CoreV1().PersistentVolumeClaims(pvc.Namespace).Update(context.Background(), pvc, metav1.UpdateOptions{})
 		if err != nil {
 			return nil, err
 		}
@@ -616,10 +618,21 @@ func ensurePVCSupportsUpload(client kubernetes.Interface, pvc *v1.PersistentVolu
 	return pvc, nil
 }
 
-func getAndValidateUploadPVC(client kubernetes.Interface, namespace, name string, shouldExist bool) (*v1.PersistentVolumeClaim, error) {
-	pvc, err := client.CoreV1().PersistentVolumeClaims(namespace).Get(name, metav1.GetOptions{})
+func getAndValidateUploadPVC(client kubecli.KubevirtClient, namespace, name string, shouldExist bool) (*v1.PersistentVolumeClaim, error) {
+	pvc, err := client.CoreV1().PersistentVolumeClaims(namespace).Get(context.Background(), name, metav1.GetOptions{})
 	if err != nil {
+		fmt.Printf("PVC %s/%s not found \n", namespace, name)
 		return nil, err
+	}
+
+	if !createPVC {
+		_, err = client.CdiClient().CdiV1alpha1().DataVolumes(namespace).Get(context.Background(), name, metav1.GetOptions{})
+		if err != nil {
+			if k8serrors.IsNotFound(err) {
+				return nil, fmt.Errorf("No DataVolume is associated with the existing PVC %s/%s", namespace, name)
+			}
+			return nil, err
+		}
 	}
 
 	// for PVCs that exist, we ony want to use them if
@@ -642,7 +655,7 @@ func getAndValidateUploadPVC(client kubernetes.Interface, namespace, name string
 }
 
 func getUploadProxyURL(client cdiClientset.Interface) (string, error) {
-	cdiConfig, err := client.CdiV1alpha1().CDIConfigs().Get(configName, metav1.GetOptions{})
+	cdiConfig, err := client.CdiV1alpha1().CDIConfigs().Get(context.Background(), configName, metav1.GetOptions{})
 	if err != nil {
 		return "", err
 	}

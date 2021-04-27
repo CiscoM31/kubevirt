@@ -33,24 +33,23 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/tools/cache"
+
+	testutils2 "kubevirt.io/client-go/testutils"
 
 	v1 "kubevirt.io/client-go/api/v1"
 	fakenetworkclient "kubevirt.io/client-go/generated/network-attachment-definition-client/clientset/versioned/fake"
 	"kubevirt.io/client-go/kubecli"
-	"kubevirt.io/client-go/log"
 	"kubevirt.io/kubevirt/pkg/hooks"
 	"kubevirt.io/kubevirt/pkg/testutils"
 	virtconfig "kubevirt.io/kubevirt/pkg/virt-config"
 )
 
-const namespaceKubevirt = "kubevirt"
-
+// TODO: The memory module is different in different cpu arch, apply multi-arch testing for memory contraint
 var _ = Describe("Template", func() {
 	var qemuGid int64 = 107
-
-	log.Log.SetIOWriter(GinkgoWriter)
 
 	pvcCache := cache.NewIndexer(cache.DeletionHandlingMetaNamespaceKeyFunc, nil)
 	var svc TemplateService
@@ -80,8 +79,8 @@ var _ = Describe("Template", func() {
 			virtClient,
 			config,
 			qemuGid,
+			runtime.GOARCH,
 		)
-
 		// Set up mock clients
 		networkClient := fakenetworkclient.NewSimpleClientset()
 		virtClient.EXPECT().NetworkClient().Return(networkClient).AnyTimes()
@@ -198,6 +197,12 @@ var _ = Describe("Template", func() {
 
 			It("should work", func() {
 				trueVar := true
+				ovmfPath := ""
+				if svc.IsARM64() {
+					ovmfPath = "/usr/share/AAVMF"
+				} else {
+					ovmfPath = "/usr/share/OVMF"
+				}
 				annotations := map[string]string{
 					hooks.HookSidecarListAnnotationName: `[{"image": "some-image:v1", "imagePullPolicy": "IfNotPresent"}]`,
 					"test":                              "shouldBeInPod",
@@ -254,7 +259,7 @@ var _ = Describe("Template", func() {
 					"--grace-period-seconds", "45",
 					"--hook-sidecars", "1",
 					"--less-pvc-space-toleration", "10",
-					"--ovmf-path", "/usr/share/OVMF"}))
+					"--ovmf-path", ovmfPath}))
 				Expect(pod.Spec.Containers[1].Name).To(Equal("hook-sidecar-0"))
 				Expect(pod.Spec.Containers[1].Image).To(Equal("some-image:v1"))
 				Expect(pod.Spec.Containers[1].ImagePullPolicy).To(Equal(kubev1.PullPolicy("IfNotPresent")))
@@ -263,6 +268,16 @@ var _ = Describe("Template", func() {
 				By("setting the right hostname")
 				Expect(pod.Spec.Hostname).To(Equal("testvmi"))
 				Expect(pod.Spec.Subdomain).To(BeEmpty())
+
+				hasPodNameEnvVar := false
+				for _, ev := range pod.Spec.Containers[0].Env {
+					if ev.Name == ENV_VAR_POD_NAME && ev.ValueFrom.FieldRef.FieldPath == "metadata.name" {
+						hasPodNameEnvVar = true
+						break
+					}
+				}
+				Expect(hasPodNameEnvVar).To(BeTrue())
+
 			})
 		})
 		Context("with SELinux types", func() {
@@ -355,22 +370,16 @@ var _ = Describe("Template", func() {
 				}
 			})
 		})
-		Context("with debug log annotation", func() {
-			It("should add the corresponding environment variable", func() {
+		table.DescribeTable("should check if proper environment variable is ",
+			func(debugLogsAnnotationValue string, exceptedValues []string) {
+
 				vmi := v1.VirtualMachineInstance{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "testvmi",
 						Namespace: "default",
 						UID:       "1234",
 						Labels: map[string]string{
-							debugLogs: "true",
-						},
-					},
-					Spec: v1.VirtualMachineInstanceSpec{
-						Domain: v1.DomainSpec{
-							Devices: v1.Devices{
-								DisableHotplug: true,
-							},
+							debugLogs: debugLogsAnnotationValue,
 						},
 					},
 				}
@@ -385,7 +394,38 @@ var _ = Describe("Template", func() {
 						break
 					}
 				}
-				Expect(debugLogsValue).To(Equal("1"))
+				Expect(exceptedValues).To(ContainElements(debugLogsValue))
+
+			},
+			table.Entry("defined when debug annotation is on", "true", []string{"1"}),
+			table.Entry("defined when debug annotation is on", "TRuE", []string{"1"}),
+			table.Entry("not defined when debug annotation is off", "false", []string{"0", ""}),
+		)
+
+		Context("without debug log annotation", func() {
+			It("should NOT add the corresponding environment variable", func() {
+				vmi := v1.VirtualMachineInstance{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "testvmi",
+						Namespace: "default",
+						UID:       "1234",
+						Labels: map[string]string{
+							debugLogs: "false",
+						},
+					},
+				}
+
+				pod, err := svc.RenderLaunchManifest(&vmi)
+				Expect(err).ToNot(HaveOccurred())
+				Expect(len(pod.Spec.Containers)).To(Equal(1))
+				debugLogsValue := ""
+				for _, ev := range pod.Spec.Containers[0].Env {
+					if ev.Name == ENV_VAR_LIBVIRT_DEBUG_LOGS {
+						debugLogsValue = ev.Value
+						break
+					}
+				}
+				Expect(debugLogsValue).To(Or(Equal(""), Equal("0")))
 			})
 		})
 
@@ -775,7 +815,7 @@ var _ = Describe("Template", func() {
 							Devices: v1.Devices{
 								DisableHotplug: true,
 								Interfaces: []v1.Interface{
-									v1.Interface{
+									{
 										Name: "test1",
 										InterfaceBindingMethod: v1.InterfaceBindingMethod{
 											SRIOV: &v1.InterfaceSRIOV{},
@@ -839,6 +879,12 @@ var _ = Describe("Template", func() {
 		})
 		Context("with node selectors", func() {
 			It("should add node selectors to template", func() {
+				ovmfPath := ""
+				if svc.IsARM64() {
+					ovmfPath = "/usr/share/AAVMF"
+				} else {
+					ovmfPath = "/usr/share/OVMF"
+				}
 
 				nodeSelector := map[string]string{
 					"kubernetes.io/hostname": "master",
@@ -878,7 +924,7 @@ var _ = Describe("Template", func() {
 					"--grace-period-seconds", "45",
 					"--hook-sidecars", "1",
 					"--less-pvc-space-toleration", "10",
-					"--ovmf-path", "/usr/share/OVMF"}))
+					"--ovmf-path", ovmfPath}))
 				Expect(pod.Spec.Containers[1].Name).To(Equal("hook-sidecar-0"))
 				Expect(pod.Spec.Containers[1].Image).To(Equal("some-image:v1"))
 				Expect(pod.Spec.Containers[1].ImagePullPolicy).To(Equal(kubev1.PullPolicy("IfNotPresent")))
@@ -986,6 +1032,7 @@ var _ = Describe("Template", func() {
 				Expect(err).ToNot(HaveOccurred())
 
 				Expect(pod.Spec.NodeSelector).To(Not(HaveKey(ContainSubstring(NFD_KVM_INFO_PREFIX))))
+				Expect(pod.Spec.NodeSelector).To(Not(HaveKey(ContainSubstring(v1.CPUModelVendorLabel))))
 			})
 
 			It("should not add node selector for hyperv nodes if VMI requests hyperv features, but feature gate is disabled", func() {
@@ -1009,6 +1056,9 @@ var _ = Describe("Template", func() {
 									Reenlightenment: &v1.FeatureState{
 										Enabled: &enabled,
 									},
+									EVMCS: &v1.FeatureState{
+										Enabled: &enabled,
+									},
 								},
 							},
 						},
@@ -1019,6 +1069,7 @@ var _ = Describe("Template", func() {
 				Expect(err).ToNot(HaveOccurred())
 
 				Expect(pod.Spec.NodeSelector).To(Not(HaveKey(ContainSubstring(NFD_KVM_INFO_PREFIX))))
+				Expect(pod.Spec.NodeSelector).To(Not(HaveKey(ContainSubstring(v1.CPUModelVendorLabel))))
 			})
 
 			It("should add node selector for hyperv nodes if VMI requests hyperv features which depend on host kernel", func() {
@@ -1041,13 +1092,16 @@ var _ = Describe("Template", func() {
 									SyNIC: &v1.FeatureState{
 										Enabled: &enabled,
 									},
-									SyNICTimer: &v1.FeatureState{
+									SyNICTimer: &v1.SyNICTimer{
 										Enabled: &enabled,
 									},
 									Frequencies: &v1.FeatureState{
 										Enabled: &enabled,
 									},
 									IPI: &v1.FeatureState{
+										Enabled: &enabled,
+									},
+									EVMCS: &v1.FeatureState{
 										Enabled: &enabled,
 									},
 								},
@@ -1063,6 +1117,7 @@ var _ = Describe("Template", func() {
 				Expect(pod.Spec.NodeSelector).Should(HaveKeyWithValue(NFD_KVM_INFO_PREFIX+"synictimer", "true"))
 				Expect(pod.Spec.NodeSelector).Should(HaveKeyWithValue(NFD_KVM_INFO_PREFIX+"frequencies", "true"))
 				Expect(pod.Spec.NodeSelector).Should(HaveKeyWithValue(NFD_KVM_INFO_PREFIX+"ipi", "true"))
+				Expect(pod.Spec.NodeSelector).Should(HaveKeyWithValue(v1.CPUModelVendorLabel+IntelVendorName, "true"))
 			})
 
 			It("should not add node selector for hyperv nodes if VMI requests hyperv features which do not depend on host kernel", func() {
@@ -1916,47 +1971,35 @@ var _ = Describe("Template", func() {
 		})
 
 		Context("with sriov interface", func() {
+			const capSysResource = kubev1.Capability(CAP_SYS_RESOURCE)
+
 			It("should not run privileged", func() {
 				// For Power we are currently running in privileged mode or libvirt will fail to lock memory
-				if runtime.GOARCH == "ppc64le" {
+				if svc.IsPPC64() {
 					Skip("ppc64le is currently running is privileged mode, so skipping test")
 				}
-				sriovInterface := v1.InterfaceSRIOV{}
-				domain := v1.DomainSpec{
-					Devices: v1.Devices{
-						DisableHotplug: true,
-					},
-				}
-				domain.Devices.Interfaces = []v1.Interface{{Name: "testnet", InterfaceBindingMethod: v1.InterfaceBindingMethod{SRIOV: &sriovInterface}}}
-				vmi := v1.VirtualMachineInstance{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "testvmi", Namespace: "default", UID: "1234",
-					},
-					Spec: v1.VirtualMachineInstanceSpec{Domain: domain},
-				}
-
-				pod, err := svc.RenderLaunchManifest(&vmi)
+				pod, err := svc.RenderLaunchManifest(newVMIWithSriovInterface("testvmi", "1234"))
 				Expect(err).ToNot(HaveOccurred())
 
 				Expect(len(pod.Spec.Containers)).To(Equal(1))
 				Expect(*pod.Spec.Containers[0].SecurityContext.Privileged).To(BeFalse())
 			})
-			It("should not mount pci related host directories", func() {
-				sriovInterface := v1.InterfaceSRIOV{}
-				domain := v1.DomainSpec{
-					Devices: v1.Devices{
-						DisableHotplug: true,
-					},
-				}
-				domain.Devices.Interfaces = []v1.Interface{{Name: "testnet", InterfaceBindingMethod: v1.InterfaceBindingMethod{SRIOV: &sriovInterface}}}
-				vmi := v1.VirtualMachineInstance{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "testvmi", Namespace: "default", UID: "1234",
-					},
-					Spec: v1.VirtualMachineInstanceSpec{Domain: domain},
-				}
+			It("should run with CAP_SYS_RESOURCE capability when SRIOVLiveMigration feature-gate is on", func() {
+				enableFeatureGate(virtconfig.SRIOVLiveMigrationGate)
 
-				pod, err := svc.RenderLaunchManifest(&vmi)
+				pod, err := svc.RenderLaunchManifest(newVMIWithSriovInterface("testvmi", "1234"))
+				Expect(err).ToNot(HaveOccurred())
+
+				Expect(pod.Spec.Containers[0].SecurityContext.Capabilities.Add).To(ContainElement(capSysResource))
+			})
+			It("should run without CAP_SYS_RESOURCE capability when SRIOVLiveMigration feature-gate is off", func() {
+				pod, err := svc.RenderLaunchManifest(newVMIWithSriovInterface("testvmi", "1234"))
+				Expect(err).ToNot(HaveOccurred())
+
+				Expect(pod.Spec.Containers[0].SecurityContext.Capabilities.Add).ToNot(ContainElement(capSysResource))
+			})
+			It("should not mount pci related host directories", func() {
+				pod, err := svc.RenderLaunchManifest(newVMIWithSriovInterface("testvmi", "1234"))
 				Expect(err).ToNot(HaveOccurred())
 
 				Expect(len(pod.Spec.Containers)).To(Equal(1))
@@ -1972,76 +2015,46 @@ var _ = Describe("Template", func() {
 				}
 			})
 			It("should add 1G of memory overhead", func() {
-				sriovInterface := v1.InterfaceSRIOV{}
-				domain := v1.DomainSpec{
-					Devices: v1.Devices{
-						DisableHotplug: true,
+				vmi := newVMIWithSriovInterface("testvmi", "1234")
+				vmi.Spec.Domain.Resources = v1.ResourceRequirements{
+					Requests: kubev1.ResourceList{
+						kubev1.ResourceMemory: resource.MustParse("1G"),
 					},
-					Resources: v1.ResourceRequirements{
-						Requests: kubev1.ResourceList{
-							kubev1.ResourceMemory: resource.MustParse("1G"),
-						},
-					},
-				}
-				domain.Devices.Interfaces = []v1.Interface{{Name: "testnet", InterfaceBindingMethod: v1.InterfaceBindingMethod{SRIOV: &sriovInterface}}}
-				vmi := v1.VirtualMachineInstance{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "testvmi", Namespace: "default", UID: "1234",
-					},
-					Spec: v1.VirtualMachineInstanceSpec{Domain: domain},
 				}
 
-				pod, err := svc.RenderLaunchManifest(&vmi)
+				pod, err := svc.RenderLaunchManifest(vmi)
+				arch := svc.GetCpuArch()
 				Expect(err).ToNot(HaveOccurred())
 				expectedMemory := resource.NewScaledQuantity(0, resource.Kilo)
-				expectedMemory.Add(*getMemoryOverhead(&vmi))
-				expectedMemory.Add(*domain.Resources.Requests.Memory())
+				expectedMemory.Add(*getMemoryOverhead(vmi, arch))
+				expectedMemory.Add(*vmi.Spec.Domain.Resources.Requests.Memory())
 				Expect(pod.Spec.Containers[0].Resources.Requests.Memory().Value()).To(Equal(expectedMemory.Value()))
 			})
 			It("should still add memory overhead for 1 core if cpu topology wasn't provided", func() {
-				domain := v1.DomainSpec{
-					Devices: v1.Devices{
-						DisableHotplug: true,
-					},
-					Resources: v1.ResourceRequirements{
-						Requests: kubev1.ResourceList{
-							kubev1.ResourceMemory: resource.MustParse("512Mi"),
-							kubev1.ResourceCPU:    resource.MustParse("150m"),
-						},
+				requirements := v1.ResourceRequirements{
+					Requests: kubev1.ResourceList{
+						kubev1.ResourceMemory: resource.MustParse("512Mi"),
+						kubev1.ResourceCPU:    resource.MustParse("150m"),
 					},
 				}
-				domain1 := v1.DomainSpec{
-					CPU: &v1.CPU{
-						Model: "Conroe",
-						Cores: 1,
-					},
-					Resources: v1.ResourceRequirements{
-						Requests: kubev1.ResourceList{
-							kubev1.ResourceMemory: resource.MustParse("512Mi"),
-							kubev1.ResourceCPU:    resource.MustParse("150m"),
-						},
-					},
-				}
-				vmi := v1.VirtualMachineInstance{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "testvmi", Namespace: "default", UID: "1234",
-					},
-					Spec: v1.VirtualMachineInstanceSpec{Domain: domain},
-				}
-				vmi1 := v1.VirtualMachineInstance{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "testvmi1", Namespace: "default", UID: "1134",
-					},
-					Spec: v1.VirtualMachineInstanceSpec{Domain: domain1},
+				vmi := newVMIWithSriovInterface("testvmi1", "1234")
+				vmi.Spec.Domain.Resources = requirements
+
+				vmi1 := newVMIWithSriovInterface("testvmi2", "1134")
+				vmi1.Spec.Domain.Resources = requirements
+				vmi1.Spec.Domain.CPU = &v1.CPU{
+					Model: "Conroe",
+					Cores: 1,
 				}
 
-				pod, err := svc.RenderLaunchManifest(&vmi)
+				pod, err := svc.RenderLaunchManifest(vmi)
 				Expect(err).ToNot(HaveOccurred())
-				pod1, err := svc.RenderLaunchManifest(&vmi1)
+				pod1, err := svc.RenderLaunchManifest(vmi1)
+				arch := svc.GetCpuArch()
 				Expect(err).ToNot(HaveOccurred())
 				expectedMemory := resource.NewScaledQuantity(0, resource.Kilo)
-				expectedMemory.Add(*getMemoryOverhead(&vmi))
-				expectedMemory.Add(*domain.Resources.Requests.Memory())
+				expectedMemory.Add(*getMemoryOverhead(vmi1, arch))
+				expectedMemory.Add(*vmi.Spec.Domain.Resources.Requests.Memory())
 				Expect(pod.Spec.Containers[0].Resources.Requests.Memory().Value()).To(Equal(expectedMemory.Value()))
 				Expect(pod1.Spec.Containers[0].Resources.Requests.Memory().Value()).To(Equal(expectedMemory.Value()))
 			})
@@ -2157,7 +2170,6 @@ var _ = Describe("Template", func() {
 
 				caps := pod.Spec.Containers[0].SecurityContext.Capabilities
 
-				Expect(caps.Add).To(ContainElement(kubev1.Capability(CAP_NET_ADMIN)), "Expected compute container to be granted NET_ADMIN capability")
 				Expect(caps.Drop).To(ContainElement(kubev1.Capability(CAP_NET_RAW)), "Expected compute container to drop NET_RAW capability")
 			})
 
@@ -2181,7 +2193,6 @@ var _ = Describe("Template", func() {
 
 				caps := pod.Spec.Containers[0].SecurityContext.Capabilities
 
-				Expect(caps.Add).To(ContainElement(kubev1.Capability(CAP_NET_ADMIN)), "Expected compute container to be granted NET_ADMIN capability")
 				Expect(caps.Drop).To(ContainElement(kubev1.Capability(CAP_NET_RAW)), "Expected compute container to drop NET_RAW capability")
 			})
 
@@ -2204,7 +2215,6 @@ var _ = Describe("Template", func() {
 
 				caps := pod.Spec.Containers[0].SecurityContext.Capabilities
 
-				Expect(caps.Add).To(Not(ContainElement(kubev1.Capability(CAP_NET_ADMIN))), "Expected compute container not to be granted NET_ADMIN capability")
 				Expect(caps.Drop).To(ContainElement(kubev1.Capability(CAP_NET_RAW)), "Expected compute container to drop NET_RAW capability")
 			})
 		})
@@ -2241,6 +2251,69 @@ var _ = Describe("Template", func() {
 				Expect(len(pod.Spec.Volumes)).To(Equal(6))
 				Expect(pod.Spec.Volumes[1].ConfigMap).ToNot(BeNil())
 				Expect(pod.Spec.Volumes[1].ConfigMap.LocalObjectReference.Name).To(Equal("test-configmap"))
+			})
+		})
+
+		Context("with a Sysprep volume source", func() {
+			Context("with a ConfigMap", func() {
+				It("Should add the Sysprep ConfigMap to template", func() {
+					volumes := []v1.Volume{
+						{
+							Name: "sysprep-configmap-volume",
+							VolumeSource: v1.VolumeSource{
+								Sysprep: &v1.SysprepSource{
+									ConfigMap: &kubev1.LocalObjectReference{
+										Name: "test-sysprep-configmap",
+									},
+								},
+							},
+						},
+					}
+					vmi := v1.VirtualMachineInstance{
+						ObjectMeta: metav1.ObjectMeta{
+							Name: "testvmi", Namespace: "default", UID: "1234",
+						},
+						Spec: v1.VirtualMachineInstanceSpec{Volumes: volumes, Domain: v1.DomainSpec{}},
+					}
+
+					pod, err := svc.RenderLaunchManifest(&vmi)
+					Expect(err).ToNot(HaveOccurred())
+
+					Expect(pod.Spec.Volumes).ToNot(BeEmpty())
+					Expect(len(pod.Spec.Volumes)).To(Equal(7))
+					Expect(pod.Spec.Volumes[1].ConfigMap).ToNot(BeNil())
+					Expect(pod.Spec.Volumes[1].ConfigMap.LocalObjectReference.Name).To(Equal("test-sysprep-configmap"))
+				})
+			})
+			Context("with a Secret", func() {
+				It("Should add the Sysprep SecretRef to template", func() {
+					volumes := []v1.Volume{
+						{
+							Name: "sysprep-configmap-volume",
+							VolumeSource: v1.VolumeSource{
+								Sysprep: &v1.SysprepSource{
+									Secret: &kubev1.LocalObjectReference{
+										Name: "test-sysprep-secret",
+									},
+								},
+							},
+						},
+					}
+					vmi := v1.VirtualMachineInstance{
+						ObjectMeta: metav1.ObjectMeta{
+							Name: "testvmi", Namespace: "default", UID: "1234",
+						},
+						Spec: v1.VirtualMachineInstanceSpec{Volumes: volumes, Domain: v1.DomainSpec{}},
+					}
+
+					pod, err := svc.RenderLaunchManifest(&vmi)
+					Expect(err).ToNot(HaveOccurred())
+
+					Expect(pod.Spec.Volumes).ToNot(BeEmpty())
+					Expect(len(pod.Spec.Volumes)).To(Equal(7))
+					Expect(pod.Spec.Volumes[1].Secret).ToNot(BeNil())
+					Expect(pod.Spec.Volumes[1].Secret.SecretName).To(Equal("test-sysprep-secret"))
+				})
 			})
 		})
 
@@ -2358,7 +2431,7 @@ var _ = Describe("Template", func() {
 		Context("with GPU device interface", func() {
 			It("should not run privileged", func() {
 				// For Power we are currently running in privileged mode or libvirt will fail to lock memory
-				if runtime.GOARCH == "ppc64le" {
+				if svc.IsPPC64() {
 					Skip("ppc64le is currently running is privileged mode, so skipping test")
 				}
 				vmi := v1.VirtualMachineInstance{
@@ -2372,7 +2445,7 @@ var _ = Describe("Template", func() {
 							Devices: v1.Devices{
 								DisableHotplug: true,
 								GPUs: []v1.GPU{
-									v1.GPU{
+									{
 										Name:       "gpu1",
 										DeviceName: "vendor.com/gpu_name",
 									},
@@ -2399,7 +2472,7 @@ var _ = Describe("Template", func() {
 							Devices: v1.Devices{
 								DisableHotplug: true,
 								GPUs: []v1.GPU{
-									v1.GPU{
+									{
 										Name:       "gpu1",
 										DeviceName: "vendor.com/gpu_name",
 									},
@@ -2433,7 +2506,7 @@ var _ = Describe("Template", func() {
 		Context("with HostDevice device interface", func() {
 			It("should not run privileged", func() {
 				// For Power we are currently running in privileged mode or libvirt will fail to lock memory
-				if runtime.GOARCH == "ppc64le" {
+				if svc.IsPPC64() {
 					Skip("ppc64le is currently running is privileged mode, so skipping test")
 				}
 				vmi := v1.VirtualMachineInstance{
@@ -2447,7 +2520,7 @@ var _ = Describe("Template", func() {
 							Devices: v1.Devices{
 								DisableHotplug: true,
 								HostDevices: []v1.HostDevice{
-									v1.HostDevice{
+									{
 										Name:       "hostdev1",
 										DeviceName: "vendor.com/dev_name",
 									},
@@ -2474,7 +2547,7 @@ var _ = Describe("Template", func() {
 							Devices: v1.Devices{
 								DisableHotplug: true,
 								HostDevices: []v1.HostDevice{
-									v1.HostDevice{
+									{
 										Name:       "hostdev1",
 										DeviceName: "vendor.com/dev_name",
 									},
@@ -2545,6 +2618,55 @@ var _ = Describe("Template", func() {
 				Expect(err).ToNot(HaveOccurred())
 				Expect(pod.Spec.PriorityClassName).To(Equal("test"))
 			})
+
+		})
+
+		Context("Ephemeral storage request", func() {
+
+			table.DescribeTable("by verifying that ephemeral storage ", func(defineEphemeralStorageLimit bool) {
+				vmi := v1.NewMinimalVMI("fake-vmi")
+
+				ephemeralStorageRequests := resource.MustParse("30M")
+				ephemeralStorageLimit := resource.MustParse("70M")
+				ephemeralStorageAddition := resource.MustParse(ephemeralStorageOverheadSize)
+
+				if defineEphemeralStorageLimit {
+					vmi.Spec.Domain.Resources = v1.ResourceRequirements{
+						Requests: kubev1.ResourceList{
+							kubev1.ResourceEphemeralStorage: ephemeralStorageRequests,
+						},
+						Limits: kubev1.ResourceList{
+							kubev1.ResourceEphemeralStorage: ephemeralStorageLimit,
+						},
+					}
+				} else {
+					vmi.Spec.Domain.Resources = v1.ResourceRequirements{
+						Requests: kubev1.ResourceList{
+							kubev1.ResourceEphemeralStorage: ephemeralStorageRequests,
+						},
+					}
+				}
+
+				ephemeralStorageRequests.Add(ephemeralStorageAddition)
+				ephemeralStorageLimit.Add(ephemeralStorageAddition)
+
+				pod, err := svc.RenderLaunchManifest(vmi)
+				Expect(err).ToNot(HaveOccurred())
+
+				computeContainer := pod.Spec.Containers[0]
+				Expect(computeContainer.Name).To(Equal("compute"))
+
+				if defineEphemeralStorageLimit {
+					Expect(computeContainer.Resources.Requests).To(HaveKeyWithValue(kubev1.ResourceEphemeralStorage, ephemeralStorageRequests))
+					Expect(computeContainer.Resources.Limits).To(HaveKeyWithValue(kubev1.ResourceEphemeralStorage, ephemeralStorageLimit))
+				} else {
+					Expect(computeContainer.Resources.Requests).To(HaveKeyWithValue(kubev1.ResourceEphemeralStorage, ephemeralStorageRequests))
+					Expect(computeContainer.Resources.Limits).To(Not(HaveKey(kubev1.ResourceEphemeralStorage)))
+				}
+			},
+				table.Entry("request is increased to consist non-user ephemeral storage", false),
+				table.Entry("request and limit is increased to consist non-user ephemeral storage", true),
+			)
 
 		})
 
@@ -2665,6 +2787,25 @@ var _ = Describe("requestResource", func() {
 	})
 })
 
+func newVMIWithSriovInterface(name, uid string) *v1.VirtualMachineInstance {
+	sriovInterface := v1.Interface{
+		Name: "sriov-nic",
+		InterfaceBindingMethod: v1.InterfaceBindingMethod{
+			SRIOV: &v1.InterfaceSRIOV{},
+		},
+	}
+	vmi := &v1.VirtualMachineInstance{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: "default",
+			UID:       types.UID(uid),
+		},
+	}
+	vmi.Spec.Domain.Devices.Interfaces = []v1.Interface{sriovInterface}
+
+	return vmi
+}
+
 func True() *bool {
 	b := true
 	return &b
@@ -2676,7 +2817,5 @@ func False() *bool {
 }
 
 func TestTemplate(t *testing.T) {
-	log.Log.SetIOWriter(GinkgoWriter)
-	RegisterFailHandler(Fail)
-	RunSpecs(t, "Template")
+	testutils2.KubeVirtTestSuiteSetup(t, "Template")
 }

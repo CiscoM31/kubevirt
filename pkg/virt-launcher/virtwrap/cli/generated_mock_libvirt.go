@@ -104,6 +104,27 @@ func (_mr *_MockConnectionRecorder) AgentEventLifecycleRegister(arg0 interface{}
 	return _mr.mock.ctrl.RecordCall(_mr.mock, "AgentEventLifecycleRegister", arg0)
 }
 
+func (_m *MockConnection) VolatileDomainEventDeviceRemovedRegister(domain VirDomain, callback libvirt_go.DomainEventDeviceRemovedCallback) (int, error) {
+	ret := _m.ctrl.Call(_m, "VolatileDomainEventDeviceRemovedRegister", domain, callback)
+	ret0, _ := ret[0].(int)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+func (_mr *_MockConnectionRecorder) VolatileDomainEventDeviceRemovedRegister(arg0, arg1 interface{}) *gomock.Call {
+	return _mr.mock.ctrl.RecordCall(_mr.mock, "VolatileDomainEventDeviceRemovedRegister", arg0, arg1)
+}
+
+func (_m *MockConnection) DomainEventDeregister(registrationID int) error {
+	ret := _m.ctrl.Call(_m, "DomainEventDeregister", registrationID)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+func (_mr *_MockConnectionRecorder) DomainEventDeregister(arg0 interface{}) *gomock.Call {
+	return _mr.mock.ctrl.RecordCall(_mr.mock, "DomainEventDeregister", arg0)
+}
+
 func (_m *MockConnection) ListAllDomains(flags libvirt_go.ConnectListAllDomainsFlags) ([]VirDomain, error) {
 	ret := _m.ctrl.Call(_m, "ListAllDomains", flags)
 	ret0, _ := ret[0].([]VirDomain)
@@ -303,6 +324,16 @@ func (_mr *_MockVirDomainRecorder) AttachDevice(arg0 interface{}) *gomock.Call {
 	return _mr.mock.ctrl.RecordCall(_mr.mock, "AttachDevice", arg0)
 }
 
+func (_m *MockVirDomain) AttachDeviceFlags(xml string, flags libvirt_go.DomainDeviceModifyFlags) error {
+	ret := _m.ctrl.Call(_m, "AttachDeviceFlags", xml, flags)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+func (_mr *_MockVirDomainRecorder) AttachDeviceFlags(arg0, arg1 interface{}) *gomock.Call {
+	return _mr.mock.ctrl.RecordCall(_mr.mock, "AttachDeviceFlags", arg0, arg1)
+}
+
 func (_m *MockVirDomain) DetachDevice(xml string) error {
 	ret := _m.ctrl.Call(_m, "DetachDevice", xml)
 	ret0, _ := ret[0].(error)
@@ -311,6 +342,16 @@ func (_m *MockVirDomain) DetachDevice(xml string) error {
 
 func (_mr *_MockVirDomainRecorder) DetachDevice(arg0 interface{}) *gomock.Call {
 	return _mr.mock.ctrl.RecordCall(_mr.mock, "DetachDevice", arg0)
+}
+
+func (_m *MockVirDomain) DetachDeviceFlags(xml string, flags libvirt_go.DomainDeviceModifyFlags) error {
+	ret := _m.ctrl.Call(_m, "DetachDeviceFlags", xml, flags)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+func (_mr *_MockVirDomainRecorder) DetachDeviceFlags(arg0, arg1 interface{}) *gomock.Call {
+	return _mr.mock.ctrl.RecordCall(_mr.mock, "DetachDeviceFlags", arg0, arg1)
 }
 
 func (_m *MockVirDomain) DestroyFlags(flags libvirt_go.DomainDestroyFlags) error {
@@ -450,6 +491,17 @@ func (_mr *_MockVirDomainRecorder) GetJobInfo() *gomock.Call {
 	return _mr.mock.ctrl.RecordCall(_mr.mock, "GetJobInfo")
 }
 
+func (_m *MockVirDomain) GetDiskErrors(flags uint32) ([]libvirt_go.DomainDiskError, error) {
+	ret := _m.ctrl.Call(_m, "GetDiskErrors", flags)
+	ret0, _ := ret[0].([]libvirt_go.DomainDiskError)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+func (_mr *_MockVirDomainRecorder) GetDiskErrors(arg0 interface{}) *gomock.Call {
+	return _mr.mock.ctrl.RecordCall(_mr.mock, "GetDiskErrors", arg0)
+}
+
 func (_m *MockVirDomain) SetTime(secs int64, nsecs uint, flags libvirt_go.DomainSetTimeFlags) error {
 	ret := _m.ctrl.Call(_m, "SetTime", secs, nsecs, flags)
 	ret0, _ := ret[0].(error)
@@ -458,6 +510,17 @@ func (_m *MockVirDomain) SetTime(secs int64, nsecs uint, flags libvirt_go.Domain
 
 func (_mr *_MockVirDomainRecorder) SetTime(arg0, arg1, arg2 interface{}) *gomock.Call {
 	return _mr.mock.ctrl.RecordCall(_mr.mock, "SetTime", arg0, arg1, arg2)
+}
+
+func (_m *MockVirDomain) IsPersistent() (bool, error) {
+	ret := _m.ctrl.Call(_m, "IsPersistent")
+	ret0, _ := ret[0].(bool)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+func (_mr *_MockVirDomainRecorder) IsPersistent() *gomock.Call {
+	return _mr.mock.ctrl.RecordCall(_mr.mock, "IsPersistent")
 }
 
 func (_m *MockVirDomain) AbortJob() error {

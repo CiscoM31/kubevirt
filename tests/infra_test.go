@@ -20,6 +20,7 @@
 package tests_test
 
 import (
+	"context"
 	"crypto/tls"
 	"encoding/json"
 	"errors"
@@ -45,6 +46,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/tools/leaderelection/resourcelock"
 	"k8s.io/client-go/util/retry"
@@ -56,8 +58,9 @@ import (
 	"kubevirt.io/client-go/kubecli"
 	clusterutil "kubevirt.io/kubevirt/pkg/util/cluster"
 	"kubevirt.io/kubevirt/pkg/virt-controller/leaderelectionconfig"
-	"kubevirt.io/kubevirt/pkg/virt-operator/creation/components"
-	crds "kubevirt.io/kubevirt/pkg/virt-operator/creation/components"
+	nodelabellerutil "kubevirt.io/kubevirt/pkg/virt-handler/node-labeller/util"
+	"kubevirt.io/kubevirt/pkg/virt-operator/resource/generate/components"
+	crds "kubevirt.io/kubevirt/pkg/virt-operator/resource/generate/components"
 	"kubevirt.io/kubevirt/tests"
 	"kubevirt.io/kubevirt/tests/console"
 	cd "kubevirt.io/kubevirt/tests/containerdisk"
@@ -65,7 +68,7 @@ import (
 	"kubevirt.io/kubevirt/tests/libnet"
 )
 
-var _ = Describe("[Serial]Infrastructure", func() {
+var _ = Describe("[Serial][sig-compute]Infrastructure", func() {
 	var (
 		virtClient       kubecli.KubevirtClient
 		aggregatorClient *aggregatorclient.Clientset
@@ -96,7 +99,7 @@ var _ = Describe("[Serial]Infrastructure", func() {
 				ext, err := extclient.NewForConfig(virtClient.Config())
 				Expect(err).ToNot(HaveOccurred())
 
-				crd, err := ext.ApiextensionsV1().CustomResourceDefinitions().Get(name, metav1.GetOptions{})
+				crd, err := ext.ApiextensionsV1().CustomResourceDefinitions().Get(context.Background(), name, metav1.GetOptions{})
 				Expect(err).ToNot(HaveOccurred())
 
 				for _, condition := range crd.Status.Conditions {
@@ -122,12 +125,16 @@ var _ = Describe("[Serial]Infrastructure", func() {
 			}, 10*time.Second, 1*time.Second).Should(BeNumerically(">", 0))
 
 			By("destroying the certificate")
-			secret, err := virtClient.CoreV1().Secrets(flags.KubeVirtInstallNamespace).Get(components.KubeVirtCASecretName, metav1.GetOptions{})
-			Expect(err).ToNot(HaveOccurred())
-			secret.Data = map[string][]byte{
-				"random": []byte("nonsense"),
-			}
-			_, err = virtClient.CoreV1().Secrets(flags.KubeVirtInstallNamespace).Update(secret)
+			err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
+				secret, err := virtClient.CoreV1().Secrets(flags.KubeVirtInstallNamespace).Get(context.Background(), components.KubeVirtCASecretName, metav1.GetOptions{})
+				Expect(err).ToNot(HaveOccurred())
+				secret.Data = map[string][]byte{
+					"random": []byte("nonsense"),
+				}
+
+				_, err = virtClient.CoreV1().Secrets(flags.KubeVirtInstallNamespace).Update(context.Background(), secret, metav1.UpdateOptions{})
+				return err
+			})
 			Expect(err).ToNot(HaveOccurred())
 
 			By("checking that the CA secret gets restored with a new ca bundle")
@@ -146,7 +153,7 @@ var _ = Describe("[Serial]Infrastructure", func() {
 
 			By("checking that the ca bundle gets propagated to the validating webhook")
 			Eventually(func() bool {
-				webhook, err := virtClient.AdmissionregistrationV1beta1().ValidatingWebhookConfigurations().Get(components.VirtAPIValidatingWebhookName, metav1.GetOptions{})
+				webhook, err := virtClient.AdmissionregistrationV1().ValidatingWebhookConfigurations().Get(context.Background(), components.VirtAPIValidatingWebhookName, metav1.GetOptions{})
 				Expect(err).ToNot(HaveOccurred())
 				if len(webhook.Webhooks) > 0 {
 					return tests.ContainsCrt(webhook.Webhooks[0].ClientConfig.CABundle, newCA)
@@ -155,7 +162,7 @@ var _ = Describe("[Serial]Infrastructure", func() {
 			}, 10*time.Second, 1*time.Second).Should(BeTrue())
 			By("checking that the ca bundle gets propagated to the mutating webhook")
 			Eventually(func() bool {
-				webhook, err := virtClient.AdmissionregistrationV1beta1().MutatingWebhookConfigurations().Get(components.VirtAPIMutatingWebhookName, metav1.GetOptions{})
+				webhook, err := virtClient.AdmissionregistrationV1().MutatingWebhookConfigurations().Get(context.Background(), components.VirtAPIMutatingWebhookName, metav1.GetOptions{})
 				Expect(err).ToNot(HaveOccurred())
 				if len(webhook.Webhooks) > 0 {
 					return tests.ContainsCrt(webhook.Webhooks[0].ClientConfig.CABundle, newCA)
@@ -165,7 +172,7 @@ var _ = Describe("[Serial]Infrastructure", func() {
 
 			By("checking that the ca bundle gets propagated to the apiservice")
 			Eventually(func() bool {
-				apiService, err := aggregatorClient.ApiregistrationV1beta1().APIServices().Get(fmt.Sprintf("%s.subresources.kubevirt.io", v1.ApiLatestVersion), metav1.GetOptions{})
+				apiService, err := aggregatorClient.ApiregistrationV1().APIServices().Get(context.Background(), fmt.Sprintf("%s.subresources.kubevirt.io", v1.ApiLatestVersion), metav1.GetOptions{})
 				Expect(err).ToNot(HaveOccurred())
 				return tests.ContainsCrt(apiService.Spec.CABundle, newCA)
 			}, 10*time.Second, 1*time.Second).Should(BeTrue())
@@ -176,13 +183,13 @@ var _ = Describe("[Serial]Infrastructure", func() {
 			Expect(console.LoginToAlpine(vmi)).To(Succeed())
 		})
 
-		It("[test_id:4100] should be valid during the whole rotation process", func() {
+		It("[QUARANTINE][sig-compute][test_id:4100] should be valid during the whole rotation process", func() {
 			oldAPICert := tests.EnsurePodsCertIsSynced(fmt.Sprintf("%s=%s", v1.AppLabel, "virt-api"), flags.KubeVirtInstallNamespace, "8443")
 			oldHandlerCert := tests.EnsurePodsCertIsSynced(fmt.Sprintf("%s=%s", v1.AppLabel, "virt-handler"), flags.KubeVirtInstallNamespace, "8186")
 			Expect(err).ToNot(HaveOccurred())
 
 			By("destroying the CA certificate")
-			err = virtClient.CoreV1().Secrets(flags.KubeVirtInstallNamespace).Delete(components.KubeVirtCASecretName, &metav1.DeleteOptions{})
+			err = virtClient.CoreV1().Secrets(flags.KubeVirtInstallNamespace).Delete(context.Background(), components.KubeVirtCASecretName, metav1.DeleteOptions{})
 			Expect(err).ToNot(HaveOccurred())
 
 			By("repeatedly starting VMIs until virt-api and virt-handler certificates are updated")
@@ -203,14 +210,14 @@ var _ = Describe("[Serial]Infrastructure", func() {
 		table.DescribeTable("should be rotated when deleted for ", func(secretName string) {
 			By("destroying the certificate")
 			err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
-				secret, err := virtClient.CoreV1().Secrets(flags.KubeVirtInstallNamespace).Get(secretName, metav1.GetOptions{})
+				secret, err := virtClient.CoreV1().Secrets(flags.KubeVirtInstallNamespace).Get(context.Background(), secretName, metav1.GetOptions{})
 				if err != nil {
 					return err
 				}
 				secret.Data = map[string][]byte{
 					"random": []byte("nonsense"),
 				}
-				_, err = virtClient.CoreV1().Secrets(flags.KubeVirtInstallNamespace).Update(secret)
+				_, err = virtClient.CoreV1().Secrets(flags.KubeVirtInstallNamespace).Update(context.Background(), secret, metav1.UpdateOptions{})
 
 				return err
 			})
@@ -238,7 +245,7 @@ var _ = Describe("[Serial]Infrastructure", func() {
 			Resource("virtualmachineinstances").
 			Namespace(tests.NamespaceTestDefault).
 			Body(vmi).
-			Do().Get()
+			Do(context.Background()).Get()
 		Expect(err).ToNot(HaveOccurred(), "Should create VMI")
 
 		By("Waiting until the VM is ready")
@@ -259,7 +266,7 @@ var _ = Describe("[Serial]Infrastructure", func() {
 				if selectedNodeName != "" {
 					By("removing the taint from the tainted node")
 					err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
-						selectedNode, err := virtClient.CoreV1().Nodes().Get(selectedNodeName, metav1.GetOptions{})
+						selectedNode, err := virtClient.CoreV1().Nodes().Get(context.Background(), selectedNodeName, metav1.GetOptions{})
 						if err != nil {
 							return err
 						}
@@ -275,7 +282,7 @@ var _ = Describe("[Serial]Infrastructure", func() {
 						nodeCopy.ResourceVersion = ""
 						nodeCopy.Spec.Taints = taints
 
-						_, err = virtClient.CoreV1().Nodes().Update(nodeCopy)
+						_, err = virtClient.CoreV1().Nodes().Update(context.Background(), nodeCopy, metav1.UpdateOptions{})
 						return err
 					})
 					Expect(err).ShouldNot(HaveOccurred())
@@ -285,7 +292,7 @@ var _ = Describe("[Serial]Infrastructure", func() {
 			It("[test_id:4134] kubevirt components on that node should not evict", func() {
 
 				By("finding all kubevirt pods")
-				pods, err := virtClient.CoreV1().Pods(flags.KubeVirtInstallNamespace).List(metav1.ListOptions{})
+				pods, err := virtClient.CoreV1().Pods(flags.KubeVirtInstallNamespace).List(context.Background(), metav1.ListOptions{})
 				Expect(err).ShouldNot(HaveOccurred(), "failed listing kubevirt pods")
 				Expect(len(pods.Items)).To(BeNumerically(">", 0), "no kubevirt pods found")
 
@@ -320,7 +327,7 @@ var _ = Describe("[Serial]Infrastructure", func() {
 				}
 
 				By("setting up a watch for terminated pods")
-				lw, err := virtClient.CoreV1().Pods(flags.KubeVirtInstallNamespace).Watch(metav1.ListOptions{})
+				lw, err := virtClient.CoreV1().Pods(flags.KubeVirtInstallNamespace).Watch(context.Background(), metav1.ListOptions{})
 				Expect(err).ToNot(HaveOccurred())
 				// in the test env, we also deploy non core-kubevirt apps
 				kvCoreApps := map[string]string{
@@ -355,7 +362,7 @@ var _ = Describe("[Serial]Infrastructure", func() {
 
 				By("tainting the selected node")
 				err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
-					selectedNode, err := virtClient.CoreV1().Nodes().Get(selectedNodeName, metav1.GetOptions{})
+					selectedNode, err := virtClient.CoreV1().Nodes().Get(context.Background(), selectedNodeName, metav1.GetOptions{})
 					if err != nil {
 						return err
 					}
@@ -367,7 +374,7 @@ var _ = Describe("[Serial]Infrastructure", func() {
 						Effect: k8sv1.TaintEffectNoExecute,
 					})
 
-					_, err = virtClient.CoreV1().Nodes().Update(selectedNodeCopy)
+					_, err = virtClient.CoreV1().Nodes().Update(context.Background(), selectedNodeCopy, metav1.UpdateOptions{})
 					return err
 				})
 				Expect(err).ShouldNot(HaveOccurred())
@@ -410,8 +417,7 @@ var _ = Describe("[Serial]Infrastructure", func() {
 			startVMI(vmi)
 
 			By("finding virt-operator pod")
-			ops, err := virtClient.CoreV1().Pods(flags.KubeVirtInstallNamespace).
-				List(metav1.ListOptions{LabelSelector: "kubevirt.io=virt-operator"})
+			ops, err := virtClient.CoreV1().Pods(flags.KubeVirtInstallNamespace).List(context.Background(), metav1.ListOptions{LabelSelector: "kubevirt.io=virt-operator"})
 			Expect(err).ToNot(HaveOccurred(), "failed to list virt-operators")
 			Expect(ops.Size).ToNot(Equal(0), "no virt-operators found")
 			op := ops.Items[0]
@@ -420,8 +426,7 @@ var _ = Describe("[Serial]Infrastructure", func() {
 			var ep *k8sv1.Endpoints
 			By("finding Prometheus endpoint")
 			Eventually(func() bool {
-				ep, err = virtClient.CoreV1().Endpoints("openshift-monitoring").
-					Get("prometheus-k8s", metav1.GetOptions{})
+				ep, err = virtClient.CoreV1().Endpoints("openshift-monitoring").Get(context.Background(), "prometheus-k8s", metav1.GetOptions{})
 				Expect(err).ToNot(HaveOccurred(), "failed to retrieve Prometheus endpoint")
 
 				if len(ep.Subsets) == 0 || len(ep.Subsets[0].Addresses) == 0 {
@@ -599,9 +604,7 @@ var _ = Describe("[Serial]Infrastructure", func() {
 		})
 
 		PIt("[test_id:4136][flaky] should find one leading virt-controller and two ready", func() {
-			endpoint, err := virtClient.CoreV1().
-				Endpoints(flags.KubeVirtInstallNamespace).
-				Get("kubevirt-prometheus-metrics", metav1.GetOptions{})
+			endpoint, err := virtClient.CoreV1().Endpoints(flags.KubeVirtInstallNamespace).Get(context.Background(), "kubevirt-prometheus-metrics", metav1.GetOptions{})
 			Expect(err).ToNot(HaveOccurred())
 			foundMetrics := map[string]int{
 				"ready":   0,
@@ -627,9 +630,9 @@ var _ = Describe("[Serial]Infrastructure", func() {
 						continue
 					}
 					switch data {
-					case "leading_virt_controller 1":
+					case "kubevirt_virt_controller_leading 1":
 						foundMetrics["leading"]++
-					case "ready_virt_controller 1":
+					case "kubevirt_virt_controller_ready 1":
 						foundMetrics["ready"]++
 					}
 				}
@@ -640,9 +643,7 @@ var _ = Describe("[Serial]Infrastructure", func() {
 		})
 
 		It("[test_id:4137]should find one leading virt-operator and two ready", func() {
-			endpoint, err := virtClient.CoreV1().
-				Endpoints(flags.KubeVirtInstallNamespace).
-				Get("kubevirt-prometheus-metrics", metav1.GetOptions{})
+			endpoint, err := virtClient.CoreV1().Endpoints(flags.KubeVirtInstallNamespace).Get(context.Background(), "kubevirt-prometheus-metrics", metav1.GetOptions{})
 			Expect(err).ToNot(HaveOccurred())
 			foundMetrics := map[string]int{
 				"ready":   0,
@@ -668,9 +669,9 @@ var _ = Describe("[Serial]Infrastructure", func() {
 						continue
 					}
 					switch data {
-					case "leading_virt_operator 1":
+					case "kubevirt_virt_operator_leading 1":
 						foundMetrics["leading"]++
-					case "ready_virt_operator 1":
+					case "kubevirt_virt_operator_ready 1":
 						foundMetrics["ready"]++
 					}
 				}
@@ -681,11 +682,11 @@ var _ = Describe("[Serial]Infrastructure", func() {
 		})
 
 		It("[test_id:4138]should be exposed and registered on the metrics endpoint", func() {
-			endpoint, err := virtClient.CoreV1().Endpoints(flags.KubeVirtInstallNamespace).Get("kubevirt-prometheus-metrics", metav1.GetOptions{})
+			endpoint, err := virtClient.CoreV1().Endpoints(flags.KubeVirtInstallNamespace).Get(context.Background(), "kubevirt-prometheus-metrics", metav1.GetOptions{})
 			Expect(err).ToNot(HaveOccurred())
 			l, err := labels.Parse("prometheus.kubevirt.io")
 			Expect(err).ToNot(HaveOccurred())
-			pods, err := virtClient.CoreV1().Pods(flags.KubeVirtInstallNamespace).List(metav1.ListOptions{LabelSelector: l.String()})
+			pods, err := virtClient.CoreV1().Pods(flags.KubeVirtInstallNamespace).List(context.Background(), metav1.ListOptions{LabelSelector: l.String()})
 			Expect(err).ToNot(HaveOccurred())
 			Expect(endpoint.Subsets).To(HaveLen(1))
 
@@ -707,7 +708,7 @@ var _ = Describe("[Serial]Infrastructure", func() {
 			}
 		})
 		It("[test_id:4139]should return Prometheus metrics", func() {
-			endpoint, err := virtClient.CoreV1().Endpoints(flags.KubeVirtInstallNamespace).Get("kubevirt-prometheus-metrics", metav1.GetOptions{})
+			endpoint, err := virtClient.CoreV1().Endpoints(flags.KubeVirtInstallNamespace).Get(context.Background(), "kubevirt-prometheus-metrics", metav1.GetOptions{})
 			Expect(err).ToNot(HaveOccurred())
 			for _, ep := range endpoint.Subsets[0].Addresses {
 				stdout, _, err := tests.ExecuteCommandOnPodV2(virtClient,
@@ -790,25 +791,44 @@ var _ = Describe("[Serial]Infrastructure", func() {
 			table.Entry("by using IPv6", k8sv1.IPv6Protocol),
 		)
 
-		table.DescribeTable("should include the storage metrics for a running VM", func(family k8sv1.IPFamily) {
+		table.DescribeTable("should include the storage metrics for a running VM", func(family k8sv1.IPFamily, metricSubstring, operator string) {
 			if family == k8sv1.IPv6Protocol {
 				libnet.SkipWhenNotDualStackCluster(virtClient)
 			}
 
 			ip := getSupportedIP(metricsIPs, family)
 
-			metrics := collectMetrics(ip, "kubevirt_vmi_storage_")
+			metrics := collectMetrics(ip, metricSubstring)
 			By("Checking the collected metrics")
 			keys := getKeysFromMetrics(metrics)
-			for _, key := range keys {
-				if strings.Contains(key, `drive="vdb"`) {
+			for _, vmi := range preparedVMIs {
+				for _, vol := range vmi.Spec.Volumes {
+					key := getMetricKeyForVmiDisk(keys, vmi.Name, vol.Name)
+					Expect(key).To(Not(BeEmpty()))
+
 					value := metrics[key]
-					Expect(value).To(BeNumerically(">", float64(0.0)))
+					fmt.Fprintf(GinkgoWriter, "metric value was %f\n", value)
+					Expect(value).To(BeNumerically(operator, float64(0.0)))
+
 				}
 			}
 		},
-			table.Entry("[test_id:4142] by using IPv4", k8sv1.IPv4Protocol),
-			table.Entry("by using IPv6", k8sv1.IPv6Protocol),
+			table.Entry("[test_id:4142] storage flush requests metric by using IPv4", k8sv1.IPv4Protocol, "kubevirt_vmi_storage_flush_requests_total", ">="),
+			table.Entry("storage flush requests metric by using IPv6", k8sv1.IPv6Protocol, "kubevirt_vmi_storage_flush_requests_total", ">="),
+			table.Entry("[test_id:4142] time (ms) spent on cache flushing metric by using IPv4", k8sv1.IPv4Protocol, "kubevirt_vmi_storage_flush_times_ms_total", ">="),
+			table.Entry("time (ms) spent on cache flushing metric by using IPv6", k8sv1.IPv6Protocol, "kubevirt_vmi_storage_flush_times_ms_total", ">="),
+			table.Entry("[test_id:4142] I/O read operations metric by using IPv4", k8sv1.IPv4Protocol, "kubevirt_vmi_storage_iops_read_total", ">="),
+			table.Entry("I/O read operations metric by using IPv6", k8sv1.IPv6Protocol, "kubevirt_vmi_storage_iops_read_total", ">="),
+			table.Entry("[test_id:4142] I/O write operations metric by using IPv4", k8sv1.IPv4Protocol, "kubevirt_vmi_storage_iops_write_total", ">="),
+			table.Entry("I/O write operations metric by using IPv6", k8sv1.IPv6Protocol, "kubevirt_vmi_storage_iops_write_total", ">="),
+			table.Entry("[test_id:4142] storage read operation time metric by using IPv4", k8sv1.IPv4Protocol, "kubevirt_vmi_storage_read_times_ms_total", ">="),
+			table.Entry("storage read operation time metric by using IPv6", k8sv1.IPv6Protocol, "kubevirt_vmi_storage_read_times_ms_total", ">="),
+			table.Entry("[test_id:4142] storage read traffic in bytes metric by using IPv4", k8sv1.IPv4Protocol, "kubevirt_vmi_storage_read_traffic_bytes_total", ">="),
+			table.Entry("storage read traffic in bytes metric by using IPv6", k8sv1.IPv6Protocol, "kubevirt_vmi_storage_read_traffic_bytes_total", ">="),
+			table.Entry("[test_id:4142] storage write operation time metric by using IPv4", k8sv1.IPv4Protocol, "kubevirt_vmi_storage_write_times_ms_total", ">="),
+			table.Entry("storage write operation time metric by using IPv6", k8sv1.IPv6Protocol, "kubevirt_vmi_storage_write_times_ms_total", ">="),
+			table.Entry("[test_id:4142] storage write traffic in bytes metric by using IPv4", k8sv1.IPv4Protocol, "kubevirt_vmi_storage_write_traffic_bytes_total", ">="),
+			table.Entry("storage write traffic in bytes metric by using IPv6", k8sv1.IPv6Protocol, "kubevirt_vmi_storage_write_traffic_bytes_total", ">="),
 		)
 
 		table.DescribeTable("should include metrics for a running VM", func(family k8sv1.IPFamily, metricSubstring, operator string) {
@@ -899,6 +919,26 @@ var _ = Describe("[Serial]Infrastructure", func() {
 			table.Entry("by IPv6", k8sv1.IPv6Protocol),
 		)
 
+		table.DescribeTable("should include VMI eviction blocker status for all running VMs", func(family k8sv1.IPFamily) {
+			if family == k8sv1.IPv6Protocol {
+				libnet.SkipWhenNotDualStackCluster(virtClient)
+			}
+
+			ip := getSupportedIP(metricsIPs, family)
+
+			metrics := collectMetrics(ip, "kubevirt_vmi_non_evictable")
+			By("Checking the collected metrics")
+			keys := getKeysFromMetrics(metrics)
+			for _, key := range keys {
+				value := metrics[key]
+				fmt.Fprintf(GinkgoWriter, "metric value was %f\n", value)
+				Expect(value).To(BeNumerically(">=", float64(0.0)))
+			}
+		},
+			table.Entry("[test_id:4148] by IPv4", k8sv1.IPv4Protocol),
+			table.Entry("by IPv6", k8sv1.IPv6Protocol),
+		)
+
 		table.DescribeTable("should include kubernetes labels to VMI metrics", func(family k8sv1.IPFamily) {
 			if family == k8sv1.IPv6Protocol {
 				libnet.SkipWhenNotDualStackCluster(virtClient)
@@ -933,14 +973,14 @@ var _ = Describe("[Serial]Infrastructure", func() {
 
 			metrics := collectMetrics(ip, "kubevirt_vmi_memory_swap_")
 			var in, out bool
-			for k, _ := range metrics {
+			for k := range metrics {
 				if in && out {
 					break
 				}
-				if strings.Contains(k, `type="in"`) {
+				if strings.Contains(k, `swap_in`) {
 					in = true
 				}
-				if strings.Contains(k, `type="out"`) {
+				if strings.Contains(k, `swap_out`) {
 					out = true
 				}
 			}
@@ -969,18 +1009,18 @@ var _ = Describe("[Serial]Infrastructure", func() {
 				Eventually(func() string {
 					leaderPodName := getLeader()
 
-					Expect(virtClient.CoreV1().Pods(flags.KubeVirtInstallNamespace).Delete(leaderPodName, &metav1.DeleteOptions{})).To(BeNil())
+					Expect(virtClient.CoreV1().Pods(flags.KubeVirtInstallNamespace).Delete(context.Background(), leaderPodName, metav1.DeleteOptions{})).To(BeNil())
 
 					Eventually(getLeader, 30*time.Second, 5*time.Second).ShouldNot(Equal(leaderPodName))
 
-					leaderPod, err := virtClient.CoreV1().Pods(flags.KubeVirtInstallNamespace).Get(getLeader(), metav1.GetOptions{})
+					leaderPod, err := virtClient.CoreV1().Pods(flags.KubeVirtInstallNamespace).Get(context.Background(), getLeader(), metav1.GetOptions{})
 					Expect(err).To(BeNil())
 
 					return leaderPod.Name
 				}, 90*time.Second, 5*time.Second).Should(Equal(newLeaderPod.Name))
 
 				Expect(func() k8sv1.ConditionStatus {
-					leaderPod, err := virtClient.CoreV1().Pods(flags.KubeVirtInstallNamespace).Get(newLeaderPod.Name, metav1.GetOptions{})
+					leaderPod, err := virtClient.CoreV1().Pods(flags.KubeVirtInstallNamespace).Get(context.Background(), newLeaderPod.Name, metav1.GetOptions{})
 					Expect(err).To(BeNil())
 
 					for _, condition := range leaderPod.Status.Conditions {
@@ -994,20 +1034,284 @@ var _ = Describe("[Serial]Infrastructure", func() {
 				vmi := tests.NewRandomVMI()
 
 				By("Starting a new VirtualMachineInstance")
-				obj, err := virtClient.RestClient().Post().Resource("virtualmachineinstances").Namespace(tests.NamespaceTestDefault).Body(vmi).Do().Get()
+				obj, err := virtClient.RestClient().Post().Resource("virtualmachineinstances").Namespace(tests.NamespaceTestDefault).Body(vmi).Do(context.Background()).Get()
 				Expect(err).To(BeNil())
 				tests.WaitForSuccessfulVMIStart(obj)
 			}, 150)
 		})
 
 	})
+
+	Describe("Node-labeller", func() {
+		var nodesWithKVM []*k8sv1.Node
+
+		BeforeEach(func() {
+			tests.BeforeTestCleanup()
+			nodesWithKVM = tests.GetNodesWithKVM()
+			if len(nodesWithKVM) == 0 {
+				Skip("Skip testing with node-labeller, because there are no nodes with kvm")
+			}
+		})
+
+		Context("basic labelling", func() {
+			It("label nodes with cpu model and cpu features", func() {
+				for _, node := range nodesWithKVM {
+					Expect(err).ToNot(HaveOccurred())
+					cpuModelLabelPresent := false
+					cpuFeatureLabelPresent := false
+					hyperVLabelPresent := false
+					for key := range node.Labels {
+						if strings.Contains(key, v1.CPUModelLabel) {
+							cpuModelLabelPresent = true
+						}
+						if strings.Contains(key, v1.CPUFeatureLabel) {
+							cpuFeatureLabelPresent = true
+						}
+						if strings.Contains(key, v1.HypervLabel) {
+							hyperVLabelPresent = true
+						}
+
+						if cpuModelLabelPresent && cpuFeatureLabelPresent && hyperVLabelPresent {
+							break
+						}
+					}
+					Expect(cpuModelLabelPresent).To(Equal(true), "node "+node.Name+" doesn't contain cpu label")
+					Expect(cpuFeatureLabelPresent).To(Equal(true), "node "+node.Name+" doesn't contain feature label")
+					Expect(hyperVLabelPresent).To(Equal(true), "node "+node.Name+" doesn't contain hyperV label")
+				}
+			})
+
+			It("should set default obsolete cpu models filter when obsolete-cpus-models is not set in kubevirt config", func() {
+				node := nodesWithKVM[0]
+
+				for key := range node.Labels {
+					if strings.Contains(key, v1.CPUModelLabel) {
+						model := strings.TrimPrefix(key, v1.CPUModelLabel)
+						for obsoleteModel := range nodelabellerutil.DefaultObsoleteCPUModels {
+							Expect(model == obsoleteModel).To(Equal(false), "Node can't contain label with cpu model, which is in default obsolete filter")
+						}
+					}
+				}
+			})
+
+			It("should set default min cpu model filter when min-cpu is not set in kubevirt config", func() {
+				node := nodesWithKVM[0]
+
+				for key := range node.Labels {
+					Expect(key).ToNot(Equal(v1.CPUFeatureLabel+"apic"), "Node can't contain label with apic feature (it is feature of default min cpu)")
+				}
+			})
+		})
+
+		Context("advanced labelling", func() {
+			var originalKubeVirt *v1.KubeVirt
+
+			BeforeEach(func() {
+				originalKubeVirt = tests.GetCurrentKv(virtClient)
+			})
+
+			AfterEach(func() {
+				tests.UpdateKubeVirtConfigValueAndWait(originalKubeVirt.Spec.Configuration)
+			})
+
+			It("should update node with new cpu model label set", func() {
+				obsoleteModel := ""
+				node := nodesWithKVM[0]
+
+				kvConfig := originalKubeVirt.Spec.Configuration.DeepCopy()
+				kvConfig.ObsoleteCPUModels = make(map[string]bool)
+
+				for key := range node.Labels {
+					if strings.Contains(key, v1.CPUModelLabel) {
+						obsoleteModel = strings.TrimPrefix(key, v1.CPUModelLabel)
+						kvConfig.ObsoleteCPUModels[obsoleteModel] = true
+						break
+					}
+				}
+
+				tests.UpdateKubeVirtConfigValueAndWait(*kvConfig)
+
+				node, err = virtClient.CoreV1().Nodes().Get(context.Background(), nodesWithKVM[0].Name, metav1.GetOptions{})
+				Expect(err).ToNot(HaveOccurred())
+				found := false
+				for key := range node.Labels {
+					if key == (v1.CPUModelLabel + obsoleteModel) {
+						found = true
+						break
+					}
+				}
+
+				Expect(found).To(Equal(false), "Node can't contain label "+v1.CPUModelLabel+obsoleteModel)
+			})
+
+			It("should update node with new cpu model vendor label", func() {
+				nodes, err := virtClient.CoreV1().Nodes().List(context.Background(), metav1.ListOptions{})
+				Expect(err).ToNot(HaveOccurred())
+				for _, node := range nodes.Items {
+					for key := range node.Labels {
+						if strings.HasPrefix(key, v1.CPUModelVendorLabel) {
+							return
+						}
+					}
+				}
+
+				Fail("No node contains label " + v1.CPUModelVendorLabel)
+			})
+
+			It("should update node with new cpu feature label set", func() {
+				node := nodesWithKVM[0]
+
+				numberOfLabelsBeforeUpdate := len(node.Labels)
+				minCPU := "Haswell"
+
+				kvConfig := originalKubeVirt.Spec.Configuration.DeepCopy()
+				kvConfig.MinCPUModel = minCPU
+				tests.UpdateKubeVirtConfigValueAndWait(*kvConfig)
+
+				node, err = virtClient.CoreV1().Nodes().Get(context.Background(), nodesWithKVM[0].Name, metav1.GetOptions{})
+				Expect(err).ToNot(HaveOccurred())
+
+				Expect(numberOfLabelsBeforeUpdate).ToNot(Equal(len(node.Labels)), "Node should have different number of labels")
+			})
+
+			It("should remove all cpu model labels (all cpu model are in obsolete list)", func() {
+				node := nodesWithKVM[0]
+
+				obsoleteModels := nodelabellerutil.DefaultObsoleteCPUModels
+
+				for key := range node.Labels {
+					if strings.Contains(key, v1.CPUModelLabel) {
+						obsoleteModels[strings.TrimPrefix(key, v1.CPUModelLabel)] = true
+					}
+				}
+
+				kvConfig := originalKubeVirt.Spec.Configuration.DeepCopy()
+				kvConfig.ObsoleteCPUModels = obsoleteModels
+				tests.UpdateKubeVirtConfigValueAndWait(*kvConfig)
+
+				node, err = virtClient.CoreV1().Nodes().Get(context.Background(), nodesWithKVM[0].Name, metav1.GetOptions{})
+				Expect(err).ToNot(HaveOccurred())
+				found := false
+				label := ""
+				for key := range node.Labels {
+					if strings.Contains(key, v1.CPUModelLabel) {
+						found = true
+						label = key
+						break
+					}
+				}
+
+				Expect(found).To(Equal(false), "Node can't contain any label "+label)
+			})
+		})
+
+		Context("Clean up after old labeller", func() {
+			nfdLabel := "feature.node.kubernetes.io/some-fancy-feature-which-should-not-be-deleted"
+			var originalKubeVirt *v1.KubeVirt
+
+			BeforeEach(func() {
+				tests.BeforeTestCleanup()
+				originalKubeVirt = tests.GetCurrentKv(virtClient)
+
+			})
+
+			AfterEach(func() {
+				originalNode, err := virtClient.CoreV1().Nodes().Get(context.Background(), nodesWithKVM[0].Name, metav1.GetOptions{})
+				Expect(err).ToNot(HaveOccurred())
+
+				node := originalNode.DeepCopy()
+
+				for key := range node.Labels {
+					if strings.Contains(key, nfdLabel) {
+						delete(node.Labels, nfdLabel)
+					}
+				}
+				originalLabelsBytes, err := json.Marshal(originalNode.Labels)
+				Expect(err).ToNot(HaveOccurred())
+
+				labelsBytes, err := json.Marshal(node.Labels)
+				Expect(err).ToNot(HaveOccurred())
+
+				patchTestLabels := fmt.Sprintf(`{ "op": "test", "path": "/metadata/labels", "value": %s}`, string(originalLabelsBytes))
+				patchLabels := fmt.Sprintf(`{ "op": "replace", "path": "/metadata/labels", "value": %s}`, string(labelsBytes))
+
+				data := []byte(fmt.Sprintf("[ %s, %s ]", patchTestLabels, patchLabels))
+
+				_, err = virtClient.CoreV1().Nodes().Patch(context.Background(), nodesWithKVM[0].Name, types.JSONPatchType, data, metav1.PatchOptions{})
+				Expect(err).ToNot(HaveOccurred())
+			})
+
+			It("should remove old labeller labels and annotations", func() {
+				originalNode, err := virtClient.CoreV1().Nodes().Get(context.Background(), nodesWithKVM[0].Name, metav1.GetOptions{})
+				Expect(err).ToNot(HaveOccurred())
+
+				node := originalNode.DeepCopy()
+
+				node.Labels[nodelabellerutil.DeprecatedLabelNamespace+nodelabellerutil.DeprecatedcpuModelPrefix+"Penryn"] = "true"
+				node.Labels[nodelabellerutil.DeprecatedLabelNamespace+nodelabellerutil.DeprecatedcpuFeaturePrefix+"mmx"] = "true"
+				node.Labels[nodelabellerutil.DeprecatedLabelNamespace+nodelabellerutil.DeprecatedHyperPrefix+"synic"] = "true"
+				node.Labels[nfdLabel] = "true"
+				node.Annotations[nodelabellerutil.DeprecatedLabellerNamespaceAnnotation+nodelabellerutil.DeprecatedcpuModelPrefix+"Penryn"] = "true"
+				node.Annotations[nodelabellerutil.DeprecatedLabellerNamespaceAnnotation+nodelabellerutil.DeprecatedcpuFeaturePrefix+"mmx"] = "true"
+				node.Annotations[nodelabellerutil.DeprecatedLabellerNamespaceAnnotation+nodelabellerutil.DeprecatedHyperPrefix+"synic"] = "true"
+
+				originalLabelsBytes, err := json.Marshal(originalNode.Labels)
+				Expect(err).ToNot(HaveOccurred())
+
+				originalAnnotationsBytes, err := json.Marshal(originalNode.Annotations)
+				Expect(err).ToNot(HaveOccurred())
+
+				labelsBytes, err := json.Marshal(node.Labels)
+				Expect(err).ToNot(HaveOccurred())
+
+				annotationsBytes, err := json.Marshal(node.Annotations)
+				Expect(err).ToNot(HaveOccurred())
+
+				patchTestLabels := fmt.Sprintf(`{ "op": "test", "path": "/metadata/labels", "value": %s}`, string(originalLabelsBytes))
+				patchTestAnnotations := fmt.Sprintf(`{ "op": "test", "path": "/metadata/annotations", "value": %s}`, string(originalAnnotationsBytes))
+				patchLabels := fmt.Sprintf(`{ "op": "replace", "path": "/metadata/labels", "value": %s}`, string(labelsBytes))
+				patchAnnotations := fmt.Sprintf(`{ "op": "replace", "path": "/metadata/annotations", "value": %s}`, string(annotationsBytes))
+
+				data := []byte(fmt.Sprintf("[ %s, %s, %s, %s ]", patchTestLabels, patchLabels, patchTestAnnotations, patchAnnotations))
+
+				_, err = virtClient.CoreV1().Nodes().Patch(context.Background(), nodesWithKVM[0].Name, types.JSONPatchType, data, metav1.PatchOptions{})
+				Expect(err).ToNot(HaveOccurred())
+				kvConfig := originalKubeVirt.Spec.Configuration.DeepCopy()
+				kvConfig.ObsoleteCPUModels = map[string]bool{"486": true}
+				tests.UpdateKubeVirtConfigValueAndWait(*kvConfig)
+
+				time.Sleep(time.Second * 10)
+				node, err = virtClient.CoreV1().Nodes().Get(context.Background(), nodesWithKVM[0].Name, metav1.GetOptions{})
+				Expect(err).ToNot(HaveOccurred())
+
+				foundSpecialLabel := false
+				for key := range node.Labels {
+					Expect(key).ToNot(ContainSubstring(nodelabellerutil.DeprecatedLabelNamespace+nodelabellerutil.DeprecatedcpuModelPrefix), "Node can't contain any label with prefix "+nodelabellerutil.DeprecatedLabelNamespace+nodelabellerutil.DeprecatedcpuModelPrefix)
+					Expect(key).ToNot(ContainSubstring(nodelabellerutil.DeprecatedLabelNamespace+nodelabellerutil.DeprecatedcpuFeaturePrefix), "Node can't contain any label with prefix "+nodelabellerutil.DeprecatedLabelNamespace+nodelabellerutil.DeprecatedcpuFeaturePrefix)
+					Expect(key).ToNot(ContainSubstring(nodelabellerutil.DeprecatedLabelNamespace+nodelabellerutil.DeprecatedHyperPrefix), "Node can't contain any label with prefix "+nodelabellerutil.DeprecatedLabelNamespace+nodelabellerutil.DeprecatedHyperPrefix)
+
+					if key == nfdLabel {
+						foundSpecialLabel = true
+					}
+				}
+				Expect(foundSpecialLabel).To(Equal(true), "Labeller should not delete NFD labels")
+
+				for key := range node.Annotations {
+					Expect(key).ToNot(ContainSubstring(nodelabellerutil.DeprecatedLabellerNamespaceAnnotation), "Node can't contain any annotations with prefix "+nodelabellerutil.DeprecatedLabellerNamespaceAnnotation)
+
+				}
+			})
+
+		})
+	})
+
 })
 
 func getLeader() string {
 	virtClient, err := kubecli.GetKubevirtClient()
 	tests.PanicOnError(err)
 
-	controllerEndpoint, err := virtClient.CoreV1().Endpoints(flags.KubeVirtInstallNamespace).Get(leaderelectionconfig.DefaultEndpointName, metav1.GetOptions{})
+	controllerEndpoint, err := virtClient.CoreV1().Endpoints(flags.KubeVirtInstallNamespace).Get(context.Background(), leaderelectionconfig.DefaultEndpointName, metav1.GetOptions{})
 	tests.PanicOnError(err)
 
 	var record resourcelock.LeaderElectionRecord
@@ -1022,8 +1326,9 @@ func getNewLeaderPod(virtClient kubecli.KubevirtClient) *k8sv1.Pod {
 	labelSelector, err := labels.Parse(fmt.Sprint(v1.AppLabel + "=virt-controller"))
 	tests.PanicOnError(err)
 	fieldSelector := fields.ParseSelectorOrDie("status.phase=" + string(k8sv1.PodRunning))
-	controllerPods, err := virtClient.CoreV1().Pods(flags.KubeVirtInstallNamespace).List(
+	controllerPods, err := virtClient.CoreV1().Pods(flags.KubeVirtInstallNamespace).List(context.Background(),
 		metav1.ListOptions{LabelSelector: labelSelector.String(), FieldSelector: fieldSelector.String()})
+	tests.PanicOnError(err)
 	leaderPodName := getLeader()
 	for _, pod := range controllerPods.Items {
 		if pod.Name != leaderPodName {
@@ -1076,7 +1381,7 @@ func getKeysFromMetrics(metrics map[string]float64) []string {
 // returning the first unexpected error if any, or a custom error in case
 // there were no errors at all.
 func validatedHTTPResponses(errorsChan chan error, concurrency int) error {
-	var expectedErrorsCount int = 0
+	var expectedErrorsCount = 0
 	var unexpectedError error
 	for ix := 0; ix < concurrency; ix++ {
 		err := <-errorsChan
@@ -1106,4 +1411,14 @@ func getSupportedIP(ips []string, family k8sv1.IPFamily) string {
 
 func prepareMetricsURL(ip string, port int) string {
 	return fmt.Sprintf("https://%s/metrics", net.JoinHostPort(ip, strconv.Itoa(port)))
+}
+
+func getMetricKeyForVmiDisk(keys []string, vmiName string, diskName string) string {
+	for _, key := range keys {
+		if strings.Contains(key, "name=\""+vmiName+"\"") &&
+			strings.Contains(key, "drive=\""+diskName+"\"") {
+			return key
+		}
+	}
+	return ""
 }

@@ -1,12 +1,18 @@
 package expose
 
 import (
+	"context"
 	"fmt"
+	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/spf13/cobra"
 	v1 "k8s.io/api/core/v1"
 	k8smetav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/tools/clientcmd"
 
@@ -35,8 +41,8 @@ var strProtocol string
 var strTargetPort string
 var strServiceType string
 var portName string
-var namespace string
 var strIPFamily string
+var strIPFamilyPolicy string
 
 // NewExposeCommand generates a new "expose" command
 func NewExposeCommand(clientConfig clientcmd.ClientConfig) *cobra.Command {
@@ -45,17 +51,17 @@ func NewExposeCommand(clientConfig clientcmd.ClientConfig) *cobra.Command {
 		Short: "Expose a virtual machine instance, virtual machine, or virtual machine instance replica set as a new service.",
 		Long: `Looks up a virtual machine instance, virtual machine or virtual machine instance replica set by name and use its selector as the selector for a new service on the specified port.
 A virtual machine instance replica set will be exposed as a service only if its selector is convertible to a selector that service supports, i.e. when the selector contains only the matchLabels component.
-Note that if no port is specified via --port and the exposed resource has multiple ports, all will be re-used by the new service. 
+Note that if no port is specified via --port and the exposed resource has multiple ports, all will be re-used by the new service.
 Also if no labels are specified, the new service will re-use the labels from the resource it exposes.
-        
+
 Possible types are (case insensitive, both single and plurant forms):
-        
+
 virtualmachineinstance (vmi), virtualmachine (vm), virtualmachineinstancereplicaset (vmirs)`,
 		Example: usage(),
 		Args:    templates.ExactArgs("expose", 2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			c := Command{command: COMMAND_EXPOSE, clientConfig: clientConfig}
-			return c.RunE(cmd, args)
+			return c.RunE(args)
 		},
 	}
 
@@ -70,7 +76,8 @@ virtualmachineinstance (vmi), virtualmachine (vm), virtualmachineinstancereplica
 	cmd.Flags().StringVar(&strTargetPort, "target-port", "", "Name or number for the port on the VM that the service should direct traffic to. Optional.")
 	cmd.Flags().StringVar(&strServiceType, "type", "ClusterIP", "Type for this service: ClusterIP, NodePort, or LoadBalancer.")
 	cmd.Flags().StringVar(&portName, "port-name", "", "Name of the port. Optional.")
-	cmd.Flags().StringVar(&strIPFamily, "ip-family", "IPv4", "IP family over which the service will be exposed. Valid values are 'IPv4' or 'IPv6'.")
+	cmd.Flags().StringVar(&strIPFamily, "ip-family", "IPv4", "IP family over which the service will be exposed. Valid values are 'IPv4', 'IPv6', 'IPv4,IPv6' or 'IPv6,IPv4'")
+	cmd.Flags().StringVar(&strIPFamilyPolicy, "ip-family-policy", "", "IP family policy defines whether the service can use IPv4, IPv6, or both. Valid values are 'SingleStack', 'PreferDualStack' or 'RequireDualStack'")
 	cmd.SetUsageTemplate(templates.UsageTemplate())
 
 	return cmd
@@ -89,7 +96,7 @@ func usage() string {
 }
 
 // executing the "expose" command
-func (o *Command) RunE(cmd *cobra.Command, args []string) error {
+func (o *Command) RunE(args []string) error {
 	// first argument is type of VM: VMI, VM or VMIRS
 	vmType := strings.ToLower(args[0])
 	// second argument must be name of the VM
@@ -99,7 +106,6 @@ func (o *Command) RunE(cmd *cobra.Command, args []string) error {
 	var protocol v1.Protocol
 	var targetPort intstr.IntOrString
 	var serviceType v1.ServiceType
-	var ipFamily v1.IPFamily
 
 	// convert from integer to the IntOrString type
 	targetPort = intstr.Parse(strTargetPort)
@@ -128,7 +134,12 @@ func (o *Command) RunE(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("unknown service type: %s", strServiceType)
 	}
 
-	ipFamily, err := convertIPFamily(strIPFamily)
+	ipFamilies, err := convertIPFamily(strIPFamily)
+	if err != nil {
+		return err
+	}
+
+	ipFamilyPolicy, err := convertIPFamilyPolicy(strIPFamilyPolicy)
 	if err != nil {
 		return err
 	}
@@ -210,7 +221,7 @@ func (o *Command) RunE(cmd *cobra.Command, args []string) error {
 			ClusterIP:      clusterIP,
 			Type:           serviceType,
 			LoadBalancerIP: loadBalancerIP,
-			IPFamily:       &ipFamily,
+			IPFamilies:     ipFamilies,
 		},
 	}
 
@@ -219,23 +230,79 @@ func (o *Command) RunE(cmd *cobra.Command, args []string) error {
 		service.Spec.ExternalIPs = []string{externalIP}
 	}
 
-	// try to create the service on the cluster
-	_, err = virtClient.CoreV1().Services(namespace).Create(service)
+	if ipFamilyPolicy != "" {
+		service.Spec.IPFamilyPolicy = &ipFamilyPolicy
+	}
+
+	major, minor, err := serverVersion(virtClient)
 	if err != nil {
-		return fmt.Errorf("service creation failed: %v", err)
+		return err
+	}
+
+	if major > 1 || (major == 1 && minor >= 20) {
+		_, err = virtClient.CoreV1().Services(namespace).Create(context.Background(), service, k8smetav1.CreateOptions{})
+		if err != nil {
+			return fmt.Errorf("service creation failed for k8s >= 1.20: %v", err)
+		}
+		// For k8s < 1.20 we have to "migrate" the "ipFamilies" field to
+		// "ipFamily" we do this using an unstructured approach
+	} else {
+		if len(ipFamilies) > 1 {
+			return fmt.Errorf("k8s < 1.20 doesn't support multiple ip families")
+		}
+
+		if ipFamilyPolicy != "" {
+			return fmt.Errorf("k8s < 1.20 doesn't support 'ipFamilyPolicy'")
+		}
+		// convert the Service to unstructured.Unstructured
+		unstructuredService, err := runtime.DefaultUnstructuredConverter.ToUnstructured(service)
+		if err != nil {
+			return err
+		}
+
+		// Add ipFamily field with proper content
+		err = unstructured.SetNestedField(unstructuredService, string(ipFamilies[0]), "spec", "ipFamily")
+		if err != nil {
+			return err
+		}
+
+		// try to create the service on the cluster
+		_, err = virtClient.DynamicClient().Resource(schema.GroupVersionResource{Version: "v1", Resource: "services"}).Namespace(namespace).Create(context.Background(), &unstructured.Unstructured{Object: unstructuredService}, k8smetav1.CreateOptions{})
+		if err != nil {
+			return fmt.Errorf("service creation failed for k8s < 1.20: %v", err)
+		}
 	}
 	fmt.Printf("Service %s successfully exposed for %s %s\n", serviceName, vmType, vmName)
 	return nil
 }
 
-func convertIPFamily(strIPFamily string) (v1.IPFamily, error) {
+func convertIPFamily(strIPFamily string) ([]v1.IPFamily, error) {
 	switch strings.ToLower(strIPFamily) {
 	case "ipv4":
-		return v1.IPv4Protocol, nil
+		return []v1.IPFamily{v1.IPv4Protocol}, nil
 	case "ipv6":
-		return v1.IPv6Protocol, nil
+		return []v1.IPFamily{v1.IPv6Protocol}, nil
+	case "ipv4,ipv6":
+		return []v1.IPFamily{v1.IPv4Protocol, v1.IPv6Protocol}, nil
+	case "ipv6,ipv4":
+		return []v1.IPFamily{v1.IPv6Protocol, v1.IPv4Protocol}, nil
 	default:
-		return "", fmt.Errorf("unknown IPFamily: %s", strIPFamily)
+		return nil, fmt.Errorf("unknown IPFamily/s: %s", strIPFamily)
+	}
+}
+
+func convertIPFamilyPolicy(strIPFamilyPolicy string) (v1.IPFamilyPolicyType, error) {
+	switch strings.ToLower(strIPFamilyPolicy) {
+	case "":
+		return "", nil
+	case "singlestack":
+		return v1.IPFamilyPolicySingleStack, nil
+	case "preferdualstack":
+		return v1.IPFamilyPolicyPreferDualStack, nil
+	case "requiredualstack":
+		return v1.IPFamilyPolicyRequireDualStack, nil
+	default:
+		return "", fmt.Errorf("unknown IPFamilyPolicy/s: %s", strIPFamilyPolicy)
 	}
 }
 
@@ -259,4 +326,25 @@ func podNetworkPorts(vmiSpec *v12.VirtualMachineInstanceSpec) []v1.ServicePort {
 		}
 	}
 	return nil
+}
+
+func serverVersion(virtClient kubecli.KubevirtClient) (major int, minor int, err error) {
+	serverVersion, err := virtClient.DiscoveryClient().ServerVersion()
+	if err != nil {
+		return 0, 0, err
+	}
+	// Make a Regex to say we only want numbers
+	reg, err := regexp.Compile("[^0-9]+")
+	if err != nil {
+		return 0, 0, err
+	}
+	major, err = strconv.Atoi(reg.ReplaceAllString(serverVersion.Major, ""))
+	if err != nil {
+		return 0, 0, err
+	}
+	minor, err = strconv.Atoi(reg.ReplaceAllString(serverVersion.Minor, ""))
+	if err != nil {
+		return 0, 0, err
+	}
+	return
 }

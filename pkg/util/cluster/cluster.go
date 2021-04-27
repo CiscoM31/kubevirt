@@ -1,6 +1,7 @@
 package cluster
 
 import (
+	"context"
 	"encoding/json"
 	"strings"
 
@@ -47,7 +48,7 @@ func IsOnOpenShift(clientset kubecli.KubevirtClient) (bool, error) {
 	return false, nil
 }
 
-func GetKubernetesVersion(clientset kubecli.KubevirtClient) (string, error) {
+func GetKubernetesVersion() (string, error) {
 	var info k8sversion.Info
 
 	virtClient, err := kubecli.GetKubevirtClient()
@@ -55,7 +56,7 @@ func GetKubernetesVersion(clientset kubecli.KubevirtClient) (string, error) {
 		return "", err
 	}
 
-	response, err := virtClient.RestClient().Get().AbsPath("/version").DoRaw()
+	response, err := virtClient.RestClient().Get().AbsPath("/version").DoRaw(context.Background())
 	if err != nil {
 		return "", err
 	}
@@ -71,7 +72,7 @@ func GetKubernetesVersion(clientset kubecli.KubevirtClient) (string, error) {
 }
 
 func GetOpenShiftMajorVersion(clientset kubecli.KubevirtClient) int {
-	k8sVersion, err := GetKubernetesVersion(clientset)
+	k8sVersion, err := GetKubernetesVersion()
 	if err != nil {
 		log.Log.Errorf("Unable to detect major OpenShift version: %v", err)
 		return -1

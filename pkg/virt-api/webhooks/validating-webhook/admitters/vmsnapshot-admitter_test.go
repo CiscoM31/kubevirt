@@ -26,7 +26,7 @@ import (
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
 
-	"k8s.io/api/admission/v1beta1"
+	admissionv1 "k8s.io/api/admission/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -80,8 +80,8 @@ var _ = Describe("Validating VirtualMachineSnapshot Admitter", func() {
 		})
 
 		It("should reject invalid request resource", func() {
-			ar := &v1beta1.AdmissionReview{
-				Request: &v1beta1.AdmissionRequest{
+			ar := &admissionv1.AdmissionReview{
+				Request: &admissionv1.AdmissionRequest{
 					Resource: webhooks.VirtualMachineGroupVersionResource,
 				},
 			}
@@ -189,7 +189,7 @@ var _ = Describe("Validating VirtualMachineSnapshot Admitter", func() {
 				}
 			})
 
-			It("should reject when VM is running", func() {
+			It("should accept when VM is running", func() {
 				snapshot := &snapshotv1.VirtualMachineSnapshot{
 					Spec: snapshotv1.VirtualMachineSnapshotSpec{
 						Source: corev1.TypedLocalObjectReference{
@@ -205,9 +205,7 @@ var _ = Describe("Validating VirtualMachineSnapshot Admitter", func() {
 
 				ar := createSnapshotAdmissionReview(snapshot)
 				resp := createTestVMSnapshotAdmitter(config, vm).Admit(ar)
-				Expect(resp.Allowed).To(BeFalse())
-				Expect(len(resp.Result.Details.Causes)).To(Equal(1))
-				Expect(resp.Result.Details.Causes[0].Field).To(Equal("spec.source.name"))
+				Expect(resp.Allowed).To(BeTrue())
 			})
 
 			It("should reject invalid kind", func() {
@@ -275,12 +273,12 @@ var _ = Describe("Validating VirtualMachineSnapshot Admitter", func() {
 	})
 })
 
-func createSnapshotAdmissionReview(snapshot *snapshotv1.VirtualMachineSnapshot) *v1beta1.AdmissionReview {
+func createSnapshotAdmissionReview(snapshot *snapshotv1.VirtualMachineSnapshot) *admissionv1.AdmissionReview {
 	bytes, _ := json.Marshal(snapshot)
 
-	ar := &v1beta1.AdmissionReview{
-		Request: &v1beta1.AdmissionRequest{
-			Operation: v1beta1.Create,
+	ar := &admissionv1.AdmissionReview{
+		Request: &admissionv1.AdmissionRequest{
+			Operation: admissionv1.Create,
 			Namespace: "foo",
 			Resource: metav1.GroupVersionResource{
 				Group:    "snapshot.kubevirt.io",
@@ -295,13 +293,13 @@ func createSnapshotAdmissionReview(snapshot *snapshotv1.VirtualMachineSnapshot) 
 	return ar
 }
 
-func createSnapshotUpdateAdmissionReview(old, current *snapshotv1.VirtualMachineSnapshot) *v1beta1.AdmissionReview {
+func createSnapshotUpdateAdmissionReview(old, current *snapshotv1.VirtualMachineSnapshot) *admissionv1.AdmissionReview {
 	oldBytes, _ := json.Marshal(old)
 	currentBytes, _ := json.Marshal(current)
 
-	ar := &v1beta1.AdmissionReview{
-		Request: &v1beta1.AdmissionRequest{
-			Operation: v1beta1.Update,
+	ar := &admissionv1.AdmissionReview{
+		Request: &admissionv1.AdmissionRequest{
+			Operation: admissionv1.Update,
 			Namespace: "foo",
 			Resource: metav1.GroupVersionResource{
 				Group:    "snapshot.kubevirt.io",

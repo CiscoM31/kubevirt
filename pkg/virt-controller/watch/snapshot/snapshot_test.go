@@ -13,7 +13,7 @@ import (
 	vsv1beta1 "github.com/kubernetes-csi/external-snapshotter/v2/pkg/apis/volumesnapshot/v1beta1"
 	corev1 "k8s.io/api/core/v1"
 	storagev1 "k8s.io/api/storage/v1"
-	extv1beta1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1beta1"
+	extv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -268,7 +268,7 @@ var _ = Describe("Snapshot controlleer", func() {
 			volumeSnapshotClassInformer, volumeSnapshotClassSource = testutils.NewFakeInformerFor(&vsv1beta1.VolumeSnapshotClass{})
 			storageClassInformer, storageClassSource = testutils.NewFakeInformerFor(&storagev1.StorageClass{})
 			pvcInformer, pvcSource = testutils.NewFakeInformerFor(&corev1.PersistentVolumeClaim{})
-			crdInformer, crdSource = testutils.NewFakeInformerFor(&extv1beta1.CustomResourceDefinition{})
+			crdInformer, crdSource = testutils.NewFakeInformerFor(&extv1.CustomResourceDefinition{})
 			dvInformer, dvSource = testutils.NewFakeInformerFor(&cdiv1alpha1.DataVolume{})
 
 			recorder = record.NewFakeRecorder(100)
@@ -362,7 +362,7 @@ var _ = Describe("Snapshot controlleer", func() {
 			mockVMSnapshotContentQueue.Wait()
 		}
 
-		addCRD := func(crd *extv1beta1.CustomResourceDefinition) {
+		addCRD := func(crd *extv1.CustomResourceDefinition) {
 			syncCaches(stop)
 			mockCRDQueue.ExpectAdds(1)
 			crdSource.Add(crd)
@@ -567,22 +567,38 @@ var _ = Describe("Snapshot controlleer", func() {
 				controller.processVMSnapshotWorkItem()
 			})
 
-			It("should not lock source if running", func() {
+			It("should lock source if running", func() {
 				vmSnapshot := createVMSnapshotInProgress()
 				vm := createVM()
 				vm.Spec.Running = &t
+				vmStatusUpdate := vm.DeepCopy()
+				vmStatusUpdate.ResourceVersion = "1"
+				vmStatusUpdate.Status.SnapshotInProgress = &vmSnapshotName
+				vmUpdate := vmStatusUpdate.DeepCopy()
+				vmUpdate.Finalizers = []string{"snapshot.kubevirt.io/snapshot-source-protection"}
 
+				vmSnapshotSource.Add(vmSnapshot)
 				vmSource.Add(vm)
+				vmInterface.EXPECT().UpdateStatus(vmStatusUpdate).Return(vmStatusUpdate, nil)
+				vmInterface.EXPECT().Update(vmUpdate).Return(vmUpdate, nil)
 				addVirtualMachineSnapshot(vmSnapshot)
 				controller.processVMSnapshotWorkItem()
 			})
 
-			It("should not lock source if VMI exists", func() {
+			It("should lock source if VMI exists", func() {
 				vmSnapshot := createVMSnapshotInProgress()
 				vm := createVM()
+				vmStatusUpdate := vm.DeepCopy()
+				vmStatusUpdate.ResourceVersion = "1"
+				vmStatusUpdate.Status.SnapshotInProgress = &vmSnapshotName
+				vmUpdate := vmStatusUpdate.DeepCopy()
+				vmUpdate.Finalizers = []string{"snapshot.kubevirt.io/snapshot-source-protection"}
 				vm.Spec.Running = &f
 
 				vmiSource.Add(createVMI(vm))
+				vmSnapshotSource.Add(vmSnapshot)
+				vmInterface.EXPECT().UpdateStatus(vmStatusUpdate).Return(vmStatusUpdate, nil)
+				vmInterface.EXPECT().Update(vmUpdate).Return(vmUpdate, nil)
 				vmSource.Add(vm)
 				addVirtualMachineSnapshot(vmSnapshot)
 				controller.processVMSnapshotWorkItem()
@@ -595,6 +611,26 @@ var _ = Describe("Snapshot controlleer", func() {
 
 				pods := createPodsUsingPVCs(vm)
 				podSource.Add(&pods[0])
+				vmSource.Add(vm)
+				addVirtualMachineSnapshot(vmSnapshot)
+				controller.processVMSnapshotWorkItem()
+			})
+
+			It("should lock source if pods using PVCs if VM is running", func() {
+				vmSnapshot := createVMSnapshotInProgress()
+				vm := createVM()
+				vm.Spec.Running = &t
+				vmStatusUpdate := vm.DeepCopy()
+				vmStatusUpdate.ResourceVersion = "1"
+				vmStatusUpdate.Status.SnapshotInProgress = &vmSnapshotName
+				vmUpdate := vmStatusUpdate.DeepCopy()
+				vmUpdate.Finalizers = []string{"snapshot.kubevirt.io/snapshot-source-protection"}
+
+				pods := createPodsUsingPVCs(vm)
+				podSource.Add(&pods[0])
+				vmSnapshotSource.Add(vmSnapshot)
+				vmInterface.EXPECT().UpdateStatus(vmStatusUpdate).Return(vmStatusUpdate, nil)
+				vmInterface.EXPECT().Update(vmUpdate).Return(vmUpdate, nil)
 				vmSource.Add(vm)
 				addVirtualMachineSnapshot(vmSnapshot)
 				controller.processVMSnapshotWorkItem()
@@ -659,12 +695,44 @@ var _ = Describe("Snapshot controlleer", func() {
 				updatedSnapshot.Status.VirtualMachineSnapshotContentName = &vmSnapshotContent.Name
 				updatedSnapshot.Status.CreationTime = timeFunc()
 				updatedSnapshot.Status.ReadyToUse = &t
+				updatedSnapshot.Status.Indications = nil
 				updatedSnapshot.Status.Conditions = []snapshotv1.Condition{
 					newProgressingCondition(corev1.ConditionFalse, "Operation complete"),
 					newReadyCondition(corev1.ConditionTrue, "Operation complete"),
 				}
 
 				vm := createLockedVM()
+
+				vmSource.Add(vm)
+				vmSnapshotContentSource.Add(vmSnapshotContent)
+				expectVMSnapshotUpdate(vmSnapshotClient, updatedSnapshot)
+				addVirtualMachineSnapshot(vmSnapshot)
+				controller.processVMSnapshotWorkItem()
+			})
+
+			It("should update VirtualMachineSnapshotStatus Indications if vm is running", func() {
+				vmSnapshotContent := createVMSnapshotContent()
+				vmSnapshotContent.Status = &snapshotv1.VirtualMachineSnapshotContentStatus{
+					CreationTime: timeFunc(),
+					ReadyToUse:   &t,
+				}
+
+				vmSnapshot := createVMSnapshotInProgress()
+				updatedSnapshot := vmSnapshot.DeepCopy()
+				updatedSnapshot.ResourceVersion = "1"
+				updatedSnapshot.Status.SourceUID = &vmUID
+				updatedSnapshot.Status.VirtualMachineSnapshotContentName = &vmSnapshotContent.Name
+				updatedSnapshot.Status.CreationTime = timeFunc()
+				updatedSnapshot.Status.ReadyToUse = &t
+				updatedSnapshot.Status.Indications = append(updatedSnapshot.Status.Indications, snapshotv1.VMSnapshotOnlineSnapshotIndication)
+				updatedSnapshot.Status.Indications = append(updatedSnapshot.Status.Indications, snapshotv1.VMSnapshotNoGuestAgentIndication)
+				updatedSnapshot.Status.Conditions = []snapshotv1.Condition{
+					newProgressingCondition(corev1.ConditionFalse, "Operation complete"),
+					newReadyCondition(corev1.ConditionTrue, "Operation complete"),
+				}
+
+				vm := createLockedVM()
+				vm.Spec.Running = &t
 
 				vmSource.Add(vm)
 				vmSnapshotContentSource.Add(vmSnapshotContent)
@@ -863,13 +931,13 @@ var _ = Describe("Snapshot controlleer", func() {
 			})
 
 			DescribeTable("should delete informer", func(crdName string) {
-				crd := &extv1beta1.CustomResourceDefinition{
+				crd := &extv1.CustomResourceDefinition{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:              crdName,
 						DeletionTimestamp: timeFunc(),
 					},
-					Spec: extv1beta1.CustomResourceDefinitionSpec{
-						Versions: []extv1beta1.CustomResourceDefinitionVersion{
+					Spec: extv1.CustomResourceDefinitionSpec{
+						Versions: []extv1.CustomResourceDefinitionVersion{
 							{
 								Name:   "v1beta1",
 								Served: true,
@@ -1179,27 +1247,27 @@ var _ = Describe("Snapshot controlleer", func() {
 						Expect(vm.Status.VolumeSnapshotStatuses[0].Name).To(Equal("disk1"))
 						Expect(vm.Status.VolumeSnapshotStatuses[0].Enabled).To(BeFalse())
 						Expect(vm.Status.VolumeSnapshotStatuses[0].Reason).
-							To(Equal("No Volume Snapshot Storage Class found for volume [disk1]"))
+							To(Equal("No VolumeSnapshotClass: Volume snapshots are not configured for this StorageClass [local] [disk1]"))
 
 						Expect(vm.Status.VolumeSnapshotStatuses[1].Name).To(Equal("disk2"))
 						Expect(vm.Status.VolumeSnapshotStatuses[1].Enabled).To(BeFalse())
 						Expect(vm.Status.VolumeSnapshotStatuses[1].Reason).
-							To(Equal("Volume type does not suport snapshots"))
+							To(Equal("Volume type has no StorageClass defined"))
 
 						Expect(vm.Status.VolumeSnapshotStatuses[2].Name).To(Equal("disk3"))
 						Expect(vm.Status.VolumeSnapshotStatuses[2].Enabled).To(BeFalse())
 						Expect(vm.Status.VolumeSnapshotStatuses[2].Reason).
-							To(Equal("No Volume Snapshot Storage Class found for volume [disk3]"))
+							To(Equal("No VolumeSnapshotClass: Volume snapshots are not configured for this StorageClass [local] [disk3]"))
 
 						Expect(vm.Status.VolumeSnapshotStatuses[3].Name).To(Equal("disk4"))
 						Expect(vm.Status.VolumeSnapshotStatuses[3].Enabled).To(BeFalse())
 						Expect(vm.Status.VolumeSnapshotStatuses[3].Reason).
-							To(Equal("Volume type does not suport snapshots"))
+							To(Equal("Volume type has no StorageClass defined"))
 
 						Expect(vm.Status.VolumeSnapshotStatuses[4].Name).To(Equal("disk5"))
 						Expect(vm.Status.VolumeSnapshotStatuses[4].Enabled).To(BeFalse())
 						Expect(vm.Status.VolumeSnapshotStatuses[4].Reason).
-							To(Equal("No Volume Snapshot Storage Class found for volume [disk5]"))
+							To(Equal("No VolumeSnapshotClass: Volume snapshots are not configured for this StorageClass [local] [disk5]"))
 
 						Expect(vm.Status.VolumeSnapshotStatuses[5].Name).To(Equal("disk6"))
 						Expect(vm.Status.VolumeSnapshotStatuses[5].Enabled).To(BeFalse())
@@ -1209,12 +1277,12 @@ var _ = Describe("Snapshot controlleer", func() {
 						Expect(vm.Status.VolumeSnapshotStatuses[6].Name).To(Equal("disk7"))
 						Expect(vm.Status.VolumeSnapshotStatuses[6].Enabled).To(BeFalse())
 						Expect(vm.Status.VolumeSnapshotStatuses[6].Reason).
-							To(Equal("No Volume Snapshot Storage Class found for volume [disk7]"))
+							To(Equal("No VolumeSnapshotClass: Volume snapshots are not configured for this StorageClass [] [disk7]"))
 
 						Expect(vm.Status.VolumeSnapshotStatuses[7].Name).To(Equal("disk8"))
 						Expect(vm.Status.VolumeSnapshotStatuses[7].Enabled).To(BeFalse())
 						Expect(vm.Status.VolumeSnapshotStatuses[7].Reason).
-							To(Equal("No Volume Snapshot Storage Class found for volume [disk8]"))
+							To(Equal("No VolumeSnapshotClass: Volume snapshots are not configured for this StorageClass [] [disk8]"))
 
 						updateCalled = true
 					})
@@ -1373,12 +1441,12 @@ var _ = Describe("Snapshot controlleer", func() {
 			})
 
 			DescribeTable("should create informer", func(crdName string) {
-				crd := &extv1beta1.CustomResourceDefinition{
+				crd := &extv1.CustomResourceDefinition{
 					ObjectMeta: metav1.ObjectMeta{
 						Name: crdName,
 					},
-					Spec: extv1beta1.CustomResourceDefinitionSpec{
-						Versions: []extv1beta1.CustomResourceDefinitionVersion{
+					Spec: extv1.CustomResourceDefinitionSpec{
+						Versions: []extv1.CustomResourceDefinitionVersion{
 							{
 								Name:   "v1beta1",
 								Served: true,

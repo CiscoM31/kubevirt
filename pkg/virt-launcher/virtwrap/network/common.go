@@ -22,18 +22,12 @@
 package network
 
 import (
-	"crypto/rand"
-	"encoding/json"
 	"fmt"
-	"io/ioutil"
 	"net"
 	"os"
 	"os/exec"
-	"runtime"
-	"syscall"
 
 	"github.com/coreos/go-iptables/iptables"
-	"github.com/opencontainers/selinux/go-selinux"
 	lmf "github.com/subgraph/libmacouflage"
 	"github.com/vishvananda/netlink"
 
@@ -45,15 +39,15 @@ import (
 
 	v1 "kubevirt.io/client-go/api/v1"
 	"kubevirt.io/client-go/log"
-	kvselinux "kubevirt.io/kubevirt/pkg/virt-handler/selinux"
+	"kubevirt.io/kubevirt/pkg/virt-handler/selinux"
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/network/dhcp"
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/network/dhcpv6"
 )
 
 const (
 	randomMacGenerationAttempts = 10
-	tapOwnerUID                 = "0"
-	tapOwnerGID                 = "0"
+	allowForwarding             = 1
+	libvirtUserAndGroupId       = "0"
 )
 
 type VIF struct {
@@ -94,42 +88,35 @@ type NetworkHandler interface {
 	RouteList(link netlink.Link, family int) ([]netlink.Route, error)
 	AddrDel(link netlink.Link, addr *netlink.Addr) error
 	AddrAdd(link netlink.Link, addr *netlink.Addr) error
+	AddrReplace(link netlink.Link, addr *netlink.Addr) error
 	LinkSetDown(link netlink.Link) error
 	LinkSetUp(link netlink.Link) error
+	LinkSetName(link netlink.Link, name string) error
 	LinkAdd(link netlink.Link) error
 	LinkSetLearningOff(link netlink.Link) error
 	ParseAddr(s string) (*netlink.Addr, error)
 	GetHostAndGwAddressesFromCIDR(s string) (string, string, error)
 	SetRandomMac(iface string) (net.HardwareAddr, error)
-	GenerateRandomMac() (net.HardwareAddr, error)
 	GetMacDetails(iface string) (net.HardwareAddr, error)
 	LinkSetMaster(link netlink.Link, master *netlink.Bridge) error
 	StartDHCP(nic *VIF, serverAddr net.IP, bridgeInterfaceName string, dhcpOptions *v1.DHCPOptions, filterByMAC bool) error
 	HasNatIptables(proto iptables.Protocol) bool
 	IsIpv6Enabled(interfaceName string) (bool, error)
 	IsIpv4Primary() (bool, error)
-	ConfigureIpv6Forwarding() error
+	ConfigureIpForwarding(proto iptables.Protocol) error
+	ConfigureIpv4ArpIgnore() error
 	IptablesNewChain(proto iptables.Protocol, table, chain string) error
 	IptablesAppendRule(proto iptables.Protocol, table, chain string, rulespec ...string) error
 	NftablesNewChain(proto iptables.Protocol, table, chain string) error
 	NftablesAppendRule(proto iptables.Protocol, table, chain string, rulespec ...string) error
-	NftablesLoad(fnName string) error
+	NftablesLoad(proto iptables.Protocol) error
 	GetNFTIPString(proto iptables.Protocol) string
-	CreateTapDevice(tapName string, queueNumber uint32, launcherPID int, mtu int) error
+	CreateTapDevice(tapName string, queueNumber uint32, launcherPID int, mtu int, tapOwner string) error
 	BindTapDeviceToBridge(tapName string, bridgeName string) error
 	DisableTXOffloadChecksum(ifaceName string) error
 }
 
 type NetworkUtilsHandler struct{}
-
-type tapDeviceMaker struct {
-	tapName         string
-	queueNumber     uint32
-	virtLauncherPID int
-	tapMakingCmd    *exec.Cmd
-}
-
-var Handler NetworkHandler
 
 func (h *NetworkUtilsHandler) LinkByName(name string) (netlink.Link, error) {
 	return netlink.LinkByName(name)
@@ -140,6 +127,9 @@ func (h *NetworkUtilsHandler) AddrList(link netlink.Link, family int) ([]netlink
 func (h *NetworkUtilsHandler) RouteList(link netlink.Link, family int) ([]netlink.Route, error) {
 	return netlink.RouteList(link, family)
 }
+func (h *NetworkUtilsHandler) AddrReplace(link netlink.Link, addr *netlink.Addr) error {
+	return netlink.AddrReplace(link, addr)
+}
 func (h *NetworkUtilsHandler) AddrDel(link netlink.Link, addr *netlink.Addr) error {
 	return netlink.AddrDel(link, addr)
 }
@@ -148,6 +138,9 @@ func (h *NetworkUtilsHandler) LinkSetDown(link netlink.Link) error {
 }
 func (h *NetworkUtilsHandler) LinkSetUp(link netlink.Link) error {
 	return netlink.LinkSetUp(link)
+}
+func (h *NetworkUtilsHandler) LinkSetName(link netlink.Link, name string) error {
+	return netlink.LinkSetName(link, name)
 }
 func (h *NetworkUtilsHandler) LinkAdd(link netlink.Link) error {
 	return netlink.LinkAdd(link)
@@ -180,17 +173,29 @@ func (h *NetworkUtilsHandler) HasNatIptables(proto iptables.Protocol) bool {
 	return true
 }
 
-func (h *NetworkUtilsHandler) ConfigureIpv6Forwarding() error {
-	err := sysctl.New().SetSysctl(sysctl.NetIPv6Forwarding, 1)
+func (h *NetworkUtilsHandler) ConfigureIpv4ArpIgnore() error {
+	err := sysctl.New().SetSysctl(sysctl.Ipv4ArpIgnoreAll, 1)
+	return err
+}
+
+func (h *NetworkUtilsHandler) ConfigureIpForwarding(proto iptables.Protocol) error {
+	var forwarding string
+	if proto == iptables.ProtocolIPv6 {
+		forwarding = sysctl.NetIPv6Forwarding
+	} else {
+		forwarding = sysctl.NetIPv4Forwarding
+	}
+
+	err := sysctl.New().SetSysctl(forwarding, allowForwarding)
 	return err
 }
 
 func (h *NetworkUtilsHandler) IsIpv6Enabled(interfaceName string) (bool, error) {
-	link, err := Handler.LinkByName(interfaceName)
+	link, err := h.LinkByName(interfaceName)
 	if err != nil {
 		return false, err
 	}
-	addrList, err := Handler.AddrList(link, netlink.FAMILY_V6)
+	addrList, err := h.AddrList(link, netlink.FAMILY_V6)
 	if err != nil {
 		return false, err
 	}
@@ -232,7 +237,7 @@ func (h *NetworkUtilsHandler) IptablesAppendRule(proto iptables.Protocol, table,
 
 func (h *NetworkUtilsHandler) NftablesNewChain(proto iptables.Protocol, table, chain string) error {
 	// #nosec g204 no risk to use GetNFTIPString as  argument as it returns either "ipv6" or "ip" strings
-	output, err := exec.Command("nft", "add", "chain", Handler.GetNFTIPString(proto), table, chain).CombinedOutput()
+	output, err := exec.Command("nft", "add", "chain", h.GetNFTIPString(proto), table, chain).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("%s", string(output))
 	}
@@ -241,7 +246,7 @@ func (h *NetworkUtilsHandler) NftablesNewChain(proto iptables.Protocol, table, c
 }
 
 func (h *NetworkUtilsHandler) NftablesAppendRule(proto iptables.Protocol, table, chain string, rulespec ...string) error {
-	cmd := append([]string{"add", "rule", Handler.GetNFTIPString(proto), table, chain}, rulespec...)
+	cmd := append([]string{"add", "rule", h.GetNFTIPString(proto), table, chain}, rulespec...)
 	// #nosec No risk for attacket injection. CMD variables are predefined strings
 	output, err := exec.Command("nft", cmd...).CombinedOutput()
 	if err != nil {
@@ -258,9 +263,13 @@ func (h *NetworkUtilsHandler) GetNFTIPString(proto iptables.Protocol) string {
 	return "ip"
 }
 
-func (h *NetworkUtilsHandler) NftablesLoad(fnName string) error {
-	// #nosec g204 no risk to use Sprintf as  argument as it uses two static strings (fname limited to ipv4-nat or ipv6-nat)
-	output, err := exec.Command("nft", "-f", fmt.Sprintf("/etc/nftables/%s.nft", fnName)).CombinedOutput()
+func (h *NetworkUtilsHandler) NftablesLoad(proto iptables.Protocol) error {
+	ipVersion := "4"
+	if proto == iptables.ProtocolIPv6 {
+		ipVersion = "6"
+	}
+	fnName := fmt.Sprintf("ipv%s-nat", ipVersion)
+	output, err := composeNftablesLoad(proto).CombinedOutput()
 	if err != nil {
 		log.Log.V(5).Reason(err).Infof("failed to load nftable %s", fnName)
 		return fmt.Errorf("failed to load nftable %s error %s", fnName, string(output))
@@ -268,6 +277,17 @@ func (h *NetworkUtilsHandler) NftablesLoad(fnName string) error {
 
 	return nil
 }
+
+func composeNftablesLoad(proto iptables.Protocol) *exec.Cmd {
+	ipVersion := "4"
+	if proto == iptables.ProtocolIPv6 {
+		ipVersion = "6"
+	}
+	fnName := fmt.Sprintf("ipv%s-nat", ipVersion)
+	// #nosec g204 no risk to use Sprintf as  argument as it uses two static strings (fname limited to ipv4-nat or ipv6-nat)
+	return exec.Command("nft", "-f", fmt.Sprintf("/etc/nftables/%s.nft", fnName))
+}
+
 func (h *NetworkUtilsHandler) GetHostAndGwAddressesFromCIDR(s string) (string, string, error) {
 	ip, ipnet, err := net.ParseCIDR(s)
 	if err != nil {
@@ -311,7 +331,7 @@ func (h *NetworkUtilsHandler) GetMacDetails(iface string) (net.HardwareAddr, err
 func (h *NetworkUtilsHandler) SetRandomMac(iface string) (net.HardwareAddr, error) {
 	var mac net.HardwareAddr
 
-	currentMac, err := Handler.GetMacDetails(iface)
+	currentMac, err := h.GetMacDetails(iface)
 	if err != nil {
 		return nil, err
 	}
@@ -326,7 +346,7 @@ func (h *NetworkUtilsHandler) SetRandomMac(iface string) (net.HardwareAddr, erro
 		}
 
 		if changed {
-			mac, err = Handler.GetMacDetails(iface)
+			mac, err = h.GetMacDetails(iface)
 			if err != nil {
 				return nil, err
 			}
@@ -386,25 +406,12 @@ func (h *NetworkUtilsHandler) StartDHCP(nic *VIF, serverAddr net.IP, bridgeInter
 	return nil
 }
 
-// Generate a random mac for interface
-// Avoid MAC address starting with reserved value 0xFE (https://github.com/kubevirt/kubevirt/issues/1494)
-func (h *NetworkUtilsHandler) GenerateRandomMac() (net.HardwareAddr, error) {
-	prefix := []byte{0x02, 0x00, 0x00} // local unicast prefix
-	suffix := make([]byte, 3)
-	_, err := rand.Read(suffix)
+func (h *NetworkUtilsHandler) CreateTapDevice(tapName string, queueNumber uint32, launcherPID int, mtu int, tapOwner string) error {
+	tapDeviceSELinuxCmdExecutor, err := buildTapDeviceMaker(tapName, queueNumber, launcherPID, mtu, tapOwner)
 	if err != nil {
-		return nil, err
+		return err
 	}
-	return net.HardwareAddr(append(prefix, suffix...)), nil
-}
-
-func (h *NetworkUtilsHandler) CreateTapDevice(tapName string, queueNumber uint32, launcherPID int, mtu int) error {
-	tapDeviceMaker, err := buildTapDeviceMaker(tapName, queueNumber, launcherPID, mtu)
-	if err != nil {
-		return fmt.Errorf("error creating tap device named %s; %v", tapName, err)
-	}
-
-	if err := tapDeviceMaker.makeTapDevice(); err != nil {
+	if err := tapDeviceSELinuxCmdExecutor.Execute(); err != nil {
 		return fmt.Errorf("error creating tap device named %s; %v", tapName, err)
 	}
 
@@ -412,82 +419,18 @@ func (h *NetworkUtilsHandler) CreateTapDevice(tapName string, queueNumber uint32
 	return nil
 }
 
-func buildTapDeviceMaker(tapName string, queueNumber uint32, virtLauncherPID int, mtu int) (*tapDeviceMaker, error) {
+func buildTapDeviceMaker(tapName string, queueNumber uint32, virtLauncherPID int, mtu int, tapOwner string) (*selinux.ContextExecutor, error) {
 	createTapDeviceArgs := []string{
 		"create-tap",
 		"--tap-name", tapName,
-		"--uid", tapOwnerUID,
-		"--gid", tapOwnerGID,
+		"--uid", tapOwner,
+		"--gid", tapOwner,
 		"--queue-number", fmt.Sprintf("%d", queueNumber),
 		"--mtu", fmt.Sprintf("%d", mtu),
 	}
 	// #nosec No risk for attacket injection. createTapDeviceArgs includes predefined strings
 	cmd := exec.Command("virt-chroot", createTapDeviceArgs...)
-
-	return &tapDeviceMaker{
-		tapMakingCmd:    cmd,
-		tapName:         tapName,
-		queueNumber:     queueNumber,
-		virtLauncherPID: virtLauncherPID,
-	}, nil
-}
-
-func (tmc *tapDeviceMaker) makeTapDevice() error {
-	if isSELinuxEnabled() {
-		defer func() {
-			_ = resetVirtHandlerSELinuxContext()
-		}()
-
-		if err := setVirtLauncherSELinuxContext(tmc.virtLauncherPID); err != nil {
-			return err
-		}
-	}
-
-	preventFDLeakOntoChild()
-	if err := tmc.tapMakingCmd.Run(); err != nil {
-		return fmt.Errorf("failed to create tap device %s: %v", tmc.tapName, err)
-	}
-	return nil
-}
-
-func isSELinuxEnabled() bool {
-	_, selinuxEnabled, err := kvselinux.NewSELinux()
-	return err == nil && selinuxEnabled
-}
-
-func setVirtLauncherSELinuxContext(virtLauncherPID int) error {
-	virtLauncherSELinuxLabel, err := getProcessCurrentSELinuxLabel(virtLauncherPID)
-	if err != nil {
-		return fmt.Errorf("error reading virt-launcher %d selinux label. Reason: %v", virtLauncherPID, err)
-	}
-
-	runtime.LockOSThread()
-	if err := selinux.SetExecLabel(virtLauncherSELinuxLabel); err != nil {
-		return fmt.Errorf("failed to switch selinux context to %s. Reason: %v", virtLauncherSELinuxLabel, err)
-	}
-	return nil
-}
-
-func resetVirtHandlerSELinuxContext() error {
-	virtHandlerSELinuxLabel := "system_u:system_r:spc_t:s0"
-	err := selinux.SetExecLabel(virtHandlerSELinuxLabel)
-	runtime.UnlockOSThread()
-	return err
-}
-
-func getProcessCurrentSELinuxLabel(pid int) (string, error) {
-	launcherSELinuxLabel, err := selinux.FileLabel(fmt.Sprintf("/proc/%d/attr/current", pid))
-	if err != nil {
-		return "", fmt.Errorf("could not retrieve pid %d selinux label: %v", pid, err)
-	}
-	return launcherSELinuxLabel, nil
-}
-
-func preventFDLeakOntoChild() {
-	// we want to share the parent process std{in|out|err}
-	for fd := 3; fd < 256; fd++ {
-		syscall.CloseOnExec(fd)
-	}
+	return selinux.NewContextExecutor(virtLauncherPID, cmd)
 }
 
 func (h *NetworkUtilsHandler) BindTapDeviceToBridge(tapName string, bridgeName string) error {
@@ -528,46 +471,6 @@ func (h *NetworkUtilsHandler) DisableTXOffloadChecksum(ifaceName string) error {
 var DHCPServer = dhcp.SingleClientDHCPServer
 var DHCPv6Server = dhcpv6.SingleClientDHCPv6Server
 
-func initHandler() {
-	if Handler == nil {
-		Handler = &NetworkUtilsHandler{}
-	}
-}
-
-func writeToCachedFile(inter interface{}, fileName, pid, name string) error {
-	buf, err := json.MarshalIndent(&inter, "", "  ")
-	if err != nil {
-		return fmt.Errorf("error marshaling cached object: %v", err)
-	}
-
-	fileName = getInterfaceCacheFile(fileName, pid, name)
-	err = ioutil.WriteFile(fileName, buf, 0644)
-	if err != nil {
-		return fmt.Errorf("error writing cached object: %v", err)
-	}
-	return nil
-}
-
-func readFromCachedFile(pid, name, fileName string, inter interface{}) (bool, error) {
-	buf, err := ioutil.ReadFile(getInterfaceCacheFile(fileName, pid, name))
-	if err != nil {
-		if os.IsNotExist(err) {
-			return false, nil
-		}
-		return false, err
-	}
-
-	err = json.Unmarshal(buf, &inter)
-	if err != nil {
-		return false, fmt.Errorf("error unmarshaling cached object: %v", err)
-	}
-	return true, nil
-}
-
-func getInterfaceCacheFile(filePath, pid, name string) string {
-	return fmt.Sprintf(filePath, pid, name)
-}
-
 // filter out irrelevant routes
 func filterPodNetworkRoutes(routes []netlink.Route, nic *VIF) (filteredRoutes []netlink.Route) {
 	for _, route := range routes {
@@ -584,13 +487,4 @@ func filterPodNetworkRoutes(routes []netlink.Route, nic *VIF) (filteredRoutes []
 		filteredRoutes = append(filteredRoutes, route)
 	}
 	return
-}
-
-// only used by unit test suite
-func setInterfaceCacheFile(path string) {
-	interfaceCacheFile = path
-}
-
-func setVifCacheFile(path string) {
-	vifCacheFile = path
 }

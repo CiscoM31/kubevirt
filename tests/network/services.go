@@ -20,6 +20,7 @@
 package network
 
 import (
+	"context"
 	"fmt"
 	"strconv"
 	"time"
@@ -45,12 +46,15 @@ import (
 var _ = SIGDescribe("[Serial]Services", func() {
 	var virtClient kubecli.KubevirtClient
 
-	runTCPClientExpectingHelloWorldFromServer := func(host, port, namespace string, isIPv6 bool) *batchv1.Job {
+	runTCPClientExpectingHelloWorldFromServer := func(host, port, namespace string, isIPv6 bool, retries int32) *batchv1.Job {
 		var pingCmd string
 		if isIPv6 {
 			pingCmd = fmt.Sprintf("ping -c1 %s;", host)
 		}
-		job, err := virtClient.BatchV1().Jobs(namespace).Create(tests.NewHelloWorldJob(host, port, pingCmd))
+		job := tests.NewHelloWorldJob(host, port, pingCmd)
+		job.Spec.BackoffLimit = &retries
+		var err error
+		job, err = virtClient.BatchV1().Jobs(namespace).Create(context.Background(), job, k8smetav1.CreateOptions{})
 		ExpectWithOffset(1, err).ToNot(HaveOccurred())
 		return job
 	}
@@ -82,19 +86,19 @@ var _ = SIGDescribe("[Serial]Services", func() {
 	}
 
 	cleanupService := func(namespace string, serviceName string) error {
-		return virtClient.CoreV1().Services(namespace).Delete(serviceName, &k8smetav1.DeleteOptions{})
+		return virtClient.CoreV1().Services(namespace).Delete(context.Background(), serviceName, k8smetav1.DeleteOptions{})
 	}
 
 	assertConnectivityToService := func(serviceName, namespace string, servicePort int, isIPv6 bool) (func() error, error) {
 		serviceFQDN := fmt.Sprintf("%s.%s", serviceName, namespace)
 
 		By(fmt.Sprintf("starting a job which tries to reach the vmi via service %s", serviceFQDN))
-		job := runTCPClientExpectingHelloWorldFromServer(serviceFQDN, strconv.Itoa(servicePort), namespace, isIPv6)
+		job := runTCPClientExpectingHelloWorldFromServer(serviceFQDN, strconv.Itoa(servicePort), namespace, isIPv6, 3)
 
 		By(fmt.Sprintf("waiting for the job to report a SUCCESSFUL connection attempt to service %s on port %d", serviceFQDN, servicePort))
 		err := tests.WaitForJobToSucceed(job, 90*time.Second)
 		return func() error {
-			return virtClient.BatchV1().Jobs(tests.NamespaceTestDefault).Delete(job.Name, &k8smetav1.DeleteOptions{})
+			return virtClient.BatchV1().Jobs(tests.NamespaceTestDefault).Delete(context.Background(), job.Name, k8smetav1.DeleteOptions{})
 		}, err
 	}
 
@@ -102,12 +106,12 @@ var _ = SIGDescribe("[Serial]Services", func() {
 		serviceFQDN := fmt.Sprintf("%s.%s", serviceName, namespace)
 
 		By(fmt.Sprintf("starting a job which tries to reach the vmi via service %s", serviceFQDN))
-		job := runTCPClientExpectingHelloWorldFromServer(serviceFQDN, strconv.Itoa(servicePort), namespace, isIPv6)
+		job := runTCPClientExpectingHelloWorldFromServer(serviceFQDN, strconv.Itoa(servicePort), namespace, isIPv6, 0)
 
 		By(fmt.Sprintf("waiting for the job to report a FAILED connection attempt to service %s on port %d", serviceFQDN, servicePort))
 		err := tests.WaitForJobToFail(job, 90*time.Second)
 		return func() error {
-			return virtClient.BatchV1().Jobs(tests.NamespaceTestDefault).Delete(job.Name, &k8smetav1.DeleteOptions{})
+			return virtClient.BatchV1().Jobs(tests.NamespaceTestDefault).Delete(context.Background(), job.Name, k8smetav1.DeleteOptions{})
 		}, err
 	}
 
@@ -159,7 +163,7 @@ var _ = SIGDescribe("[Serial]Services", func() {
 				serviceName = "myservice"
 
 				service := buildServiceSpec(serviceName, servicePort, servicePort, selectorLabelKey, selectorLabelValue)
-				_, err := virtClient.CoreV1().Services(inboundVMI.Namespace).Create(service)
+				_, err := virtClient.CoreV1().Services(inboundVMI.Namespace).Create(context.Background(), service, k8smetav1.CreateOptions{})
 				Expect(err).ToNot(HaveOccurred())
 			})
 
@@ -195,12 +199,12 @@ var _ = SIGDescribe("[Serial]Services", func() {
 				serviceName = inboundVMI.Spec.Subdomain
 
 				service := buildHeadlessServiceSpec(serviceName, servicePort, servicePort, selectorLabelKey, selectorLabelValue)
-				_, err := virtClient.CoreV1().Services(inboundVMI.Namespace).Create(service)
+				_, err := virtClient.CoreV1().Services(inboundVMI.Namespace).Create(context.Background(), service, k8smetav1.CreateOptions{})
 				Expect(err).ToNot(HaveOccurred())
 			})
 
 			AfterEach(func() {
-				Expect(virtClient.CoreV1().Services(inboundVMI.Namespace).Delete(serviceName, &k8smetav1.DeleteOptions{})).To(Succeed())
+				Expect(virtClient.CoreV1().Services(inboundVMI.Namespace).Delete(context.Background(), serviceName, k8smetav1.DeleteOptions{})).To(Succeed())
 			})
 
 			AfterEach(func() {
@@ -273,7 +277,7 @@ var _ = SIGDescribe("[Serial]Services", func() {
 						service = buildServiceSpec(serviceName, servicePort, servicePort, selectorLabelKey, selectorLabelValue)
 					}
 
-					_, err := virtClient.CoreV1().Services(inboundVMI.Namespace).Create(service)
+					_, err := virtClient.CoreV1().Services(inboundVMI.Namespace).Create(context.Background(), service, k8smetav1.CreateOptions{})
 					Expect(err).NotTo(HaveOccurred(), "the k8sv1.Service entity should have been created.")
 				})
 
@@ -318,7 +322,7 @@ func buildHeadlessServiceSpec(serviceName string, exposedPort int, portToExpose 
 func buildIPv6ServiceSpec(serviceName string, exposedPort int, portToExpose int, selectorKey string, selectorValue string) *k8sv1.Service {
 	service := buildServiceSpec(serviceName, exposedPort, portToExpose, selectorKey, selectorValue)
 	ipv6Family := k8sv1.IPv6Protocol
-	service.Spec.IPFamily = &ipv6Family
+	service.Spec.IPFamilies = []k8sv1.IPFamily{ipv6Family}
 
 	return service
 }

@@ -36,6 +36,10 @@ var permanentDevicePluginPaths = map[string]string{
 	"vhost-net": "/dev/vhost-net",
 }
 
+type DeviceControllerInterface interface {
+	Initialized() bool
+}
+
 type DeviceController struct {
 	devicePlugins      map[string]ControlledDevice
 	devicePluginsMutex sync.Mutex
@@ -51,20 +55,20 @@ type ControlledDevice struct {
 	stopChan     chan struct{}
 }
 
-func getPermanentHostDevicePlugins(maxDevices int) map[string]ControlledDevice {
+func getPermanentHostDevicePlugins(maxDevices int, permissions string) map[string]ControlledDevice {
 	ret := map[string]ControlledDevice{}
 	for name, path := range permanentDevicePluginPaths {
 		ret[name] = ControlledDevice{
-			devicePlugin: NewGenericDevicePlugin(name, path, maxDevices, (name != "kvm")),
+			devicePlugin: NewGenericDevicePlugin(name, path, maxDevices, permissions, (name != "kvm")),
 			stopChan:     make(chan struct{}),
 		}
 	}
 	return ret
 }
 
-func NewDeviceController(host string, maxDevices int, clusterConfig *virtconfig.ClusterConfig) *DeviceController {
+func NewDeviceController(host string, maxDevices int, permissions string, clusterConfig *virtconfig.ClusterConfig) *DeviceController {
 	controller := &DeviceController{
-		devicePlugins: getPermanentHostDevicePlugins(maxDevices),
+		devicePlugins: getPermanentHostDevicePlugins(maxDevices, permissions),
 		host:          host,
 		maxDevices:    maxDevices,
 		backoff:       []time.Duration{1 * time.Second, 2 * time.Second, 5 * time.Second, 10 * time.Second},
@@ -74,7 +78,7 @@ func NewDeviceController(host string, maxDevices int, clusterConfig *virtconfig.
 	return controller
 }
 
-func (c *DeviceController) nodeHasDevice(devicePath string) bool {
+func (c *DeviceController) NodeHasDevice(devicePath string) bool {
 	_, err := os.Stat(devicePath)
 	// Since this is a boolean question, any error means "no"
 	return (err == nil)
@@ -113,25 +117,30 @@ func (c *DeviceController) startDevicePlugin(controlledDev ControlledDevice) {
 func (c *DeviceController) updatePermittedHostDevicePlugins() (map[string]ControlledDevice, map[string]ControlledDevice) {
 	devicePluginsToRun := make(map[string]ControlledDevice)
 	devicePluginsToStop := make(map[string]ControlledDevice)
-	if hostDevs := c.virtConfig.GetPermittedHostDevices(); hostDevs != nil {
-		// generate a map of currently started device plugins
-		for resourceName, hostDevDP := range c.devicePlugins {
-			_, isPermanent := permanentDevicePluginPaths[resourceName]
-			if !isPermanent {
-				devicePluginsToStop[resourceName] = hostDevDP
-			}
+	// generate a map of currently started device plugins
+	for resourceName, hostDevDP := range c.devicePlugins {
+		_, isPermanent := permanentDevicePluginPaths[resourceName]
+		if !isPermanent {
+			devicePluginsToStop[resourceName] = hostDevDP
 		}
+	}
+	if hostDevs := c.virtConfig.GetPermittedHostDevices(); hostDevs != nil {
 		supportedPCIDeviceMap := make(map[string]string)
 		if len(hostDevs.PciHostDevices) != 0 {
 			for _, pciDev := range hostDevs.PciHostDevices {
+				log.Log.V(4).Infof("Permitted PCI device in the cluster, ID: %s, resourceName: %s, externalProvider: %t",
+					strings.ToLower(pciDev.PCIVendorSelector),
+					pciDev.ResourceName,
+					pciDev.ExternalResourceProvider)
 				// do not add a device plugin for this resource if it's being provided via an external device plugin
 				if !pciDev.ExternalResourceProvider {
-					supportedPCIDeviceMap[pciDev.PCIVendorSelector] = pciDev.ResourceName
+					supportedPCIDeviceMap[strings.ToLower(pciDev.PCIVendorSelector)] = pciDev.ResourceName
 				}
 			}
 			pciHostDevices := discoverPermittedHostPCIDevices(supportedPCIDeviceMap)
 			for pciID, pciDevices := range pciHostDevices {
 				pciResourceName := supportedPCIDeviceMap[pciID]
+				log.Log.V(4).Infof("Discovered PCI device on the node, ID: %s, resourceName: %s", pciID, pciResourceName)
 				// add a device plugin only for new devices
 				if _, isRunning := c.devicePlugins[pciResourceName]; !isRunning {
 					devicePluginsToRun[pciResourceName] = ControlledDevice{
@@ -146,6 +155,9 @@ func (c *DeviceController) updatePermittedHostDevicePlugins() (map[string]Contro
 		if len(hostDevs.MediatedDevices) != 0 {
 			supportedMdevsMap := make(map[string]string)
 			for _, supportedMdev := range hostDevs.MediatedDevices {
+				log.Log.V(4).Infof("Permitted mediated device in the cluster, ID: %s, resourceName: %s",
+					supportedMdev.MDEVNameSelector,
+					supportedMdev.ResourceName)
 				// do not add a device plugin for this resource if it's being provided via an external device plugin
 				if !supportedMdev.ExternalResourceProvider {
 					selector := removeSelectorSpaces(supportedMdev.MDEVNameSelector)
@@ -156,6 +168,7 @@ func (c *DeviceController) updatePermittedHostDevicePlugins() (map[string]Contro
 			hostMdevs := discoverPermittedHostMediatedDevices(supportedMdevsMap)
 			for mdevTypeName, mdevUUIDs := range hostMdevs {
 				mdevResourceName := supportedMdevsMap[mdevTypeName]
+				log.Log.V(4).Infof("Discovered mediated device on the node, type: %s, resourceName: %s", mdevTypeName, mdevResourceName)
 				// add a device plugin only for new devices
 				if _, isRunning := c.devicePlugins[mdevResourceName]; !isRunning {
 					devicePluginsToRun[mdevResourceName] = ControlledDevice{

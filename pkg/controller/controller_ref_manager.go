@@ -21,6 +21,7 @@ and adapted for KubeVirt.
 package controller
 
 import (
+	"context"
 	"fmt"
 	"sync"
 
@@ -227,7 +228,7 @@ func (m *VirtualMachineControllerRefManager) ClaimVirtualMachines(vmis []*virtv1
 //
 // If the error is nil, either the reconciliation succeeded, or no
 // reconciliation was necessary. The list of DataVolumes that you now own is returned.
-func (m *VirtualMachineControllerRefManager) ClaimMatchedDataVolumes(dataVolumes []*cdiv1.DataVolume, filters ...func(machine *cdiv1.DataVolume) bool) ([]*cdiv1.DataVolume, error) {
+func (m *VirtualMachineControllerRefManager) ClaimMatchedDataVolumes(dataVolumes []*cdiv1.DataVolume) ([]*cdiv1.DataVolume, error) {
 	var claimed []*cdiv1.DataVolume
 	var errlist []error
 
@@ -404,7 +405,7 @@ func (r RealVirtualMachineControl) PatchVirtualMachine(namespace, name string, d
 
 func (r RealVirtualMachineControl) PatchDataVolume(namespace, name string, data []byte) error {
 	// TODO should be a strategic merge patch, but not possible until https://github.com/kubernetes/kubernetes/issues/56348 is resolved
-	_, err := r.Clientset.CdiClient().CdiV1alpha1().DataVolumes(namespace).Patch(name, types.MergePatchType, data)
+	_, err := r.Clientset.CdiClient().CdiV1alpha1().DataVolumes(namespace).Patch(context.Background(), name, types.MergePatchType, data, metav1.PatchOptions{})
 	return err
 }
 

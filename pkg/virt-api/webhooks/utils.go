@@ -21,6 +21,7 @@ package webhooks
 
 import (
 	"fmt"
+	"runtime"
 	"sync"
 
 	"github.com/golang/glog"
@@ -28,7 +29,7 @@ import (
 	"k8s.io/client-go/tools/cache"
 
 	"kubevirt.io/client-go/log"
-	"kubevirt.io/kubevirt/pkg/virt-operator/creation/rbac"
+	"kubevirt.io/kubevirt/pkg/virt-operator/resource/generate/rbac"
 
 	v1 "kubevirt.io/client-go/api/v1"
 	"kubevirt.io/client-go/kubecli"
@@ -39,7 +40,7 @@ import (
 )
 
 var webhookInformers *Informers
-var once sync.Once
+var Arch = runtime.GOARCH
 
 var Validator = openapi.CreateOpenAPIValidator(rest.ComposeAPIDefinitions())
 
@@ -136,4 +137,18 @@ func IsKubeVirtServiceAccount(serviceAccount string) bool {
 	return serviceAccount == fmt.Sprintf("%s:%s", prefix, rbac.ApiServiceAccountName) ||
 		serviceAccount == fmt.Sprintf("%s:%s", prefix, rbac.HandlerServiceAccountName) ||
 		serviceAccount == fmt.Sprintf("%s:%s", prefix, rbac.ControllerServiceAccountName)
+}
+
+func IsARM64() bool {
+	if Arch == "arm64" {
+		return true
+	}
+	return false
+}
+
+func IsPPC64() bool {
+	if Arch == "ppc64le" {
+		return true
+	}
+	return false
 }

@@ -468,6 +468,12 @@ spec:
         - apiGroups:
           - ""
           resources:
+          - pods/eviction
+          verbs:
+          - create
+        - apiGroups:
+          - ""
+          resources:
           - nodes
           verbs:
           - get
@@ -475,6 +481,12 @@ spec:
           - watch
           - update
           - patch
+        - apiGroups:
+          - apps
+          resources:
+          - daemonsets
+          verbs:
+          - list
         - apiGroups:
           - ""
           resources:
@@ -582,6 +594,17 @@ spec:
           - nodes
           verbs:
           - patch
+          - list
+          - watch
+          - get
+        - apiGroups:
+          - ""
+          resources:
+          - configmaps
+          verbs:
+          - get
+          - list
+          - watch
         - apiGroups:
           - ""
           resources:
@@ -735,6 +758,13 @@ spec:
         - apiGroups:
           - kubevirt.io
           resources:
+          - kubevirts
+          verbs:
+          - get
+          - list
+        - apiGroups:
+          - kubevirt.io
+          resources:
           - virtualmachines
           - virtualmachineinstances
           - virtualmachineinstancepresets
@@ -838,7 +868,10 @@ spec:
                     scheme: HTTPS
                   initialDelaySeconds: 5
                   timeoutSeconds: 10
-                resources: {}
+                resources:
+                  requests:
+                    cpu: 10m
+                    memory: 150Mi
                 volumeMounts:
                 - mountPath: /etc/virt-operator/certificates
                   name: kubevirt-operator-certs

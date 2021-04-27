@@ -14,7 +14,7 @@ casually referred to as `binding` throughout this developer's guide.
 In this section we'll explain how VM networking is configured. In order to
 follow the principle of least privilege (where each component is limited
 to only its required privileges), the configuration of a KubeVirt VM interfaces
-is split into two distint phases:
+is split into two distinct phases:
 - [privileged networking configuration](#privileged-vmi-networking-configuration): occurs in the virt-handler process
 - [unprivileged networking configuration](#unprivileged-vmi-networking-configuration): occurs in the virt-launcher process
 
@@ -379,4 +379,4 @@ which implicitly highly encourages IPv6 communication towards the VM instance.
 
 On a final note, there is a difference that impacts the user experience when
 using masquerade binding for IPv6 addresses; the VMI IP must be [manually
-configured by the user](https://kubevirt.io/user-guide/#/creation/interfaces-and-networks?id=masquerade-ipv4-and-ipv6-dual-stack-support).
+configured by the user](https://kubevirt.io/user-guide/virtual_machines/interfaces_and_networks/#masquerade-ipv4-and-ipv6-dual-stack-support).

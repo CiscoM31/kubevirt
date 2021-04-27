@@ -5,7 +5,7 @@ set -ex
 source hack/common.sh
 source hack/config.sh
 
-LIBVIRT_VERSION=0:6.6.0-13
+LIBVIRT_VERSION=0:6.6.0-13.1
 SEABIOS_VERSION=0:1.14.0-1
 QEMU_VERSION=15:5.1.0-18
 
@@ -24,10 +24,6 @@ bazel run \
     //:bazeldnf -- rpmtree --public --name testimage_x86_64 \
     $basesystem \
     qemu-img \
-    qemu-guest-agent \
-    stress \
-    dmidecode \
-    virt-what \
     which \
     nginx \
     scsi-target-utils \
@@ -41,8 +37,19 @@ bazel run \
     //:bazeldnf -- rpmtree --public --arch=ppc64le --name testimage_ppc64le \
     $basesystem \
     qemu-img \
-    qemu-guest-agent \
-    stress \
+    nginx \
+    scsi-target-utils \
+    procps-ng \
+    nmap-ncat \
+    iputils \
+    e2fsprogs
+
+bazel run \
+    --config=${ARCHITECTURE} \
+    //:bazeldnf -- rpmtree --public --arch=aarch64 --name testimage_aarch64 \
+    $basesystem \
+    qemu-img \
+    which \
     nginx \
     scsi-target-utils \
     procps-ng \
@@ -53,8 +60,11 @@ bazel run \
 # create a rpmtree for libvirt-devel. libvirt-devel is needed for compilation and unit-testing.
 bazel run \
     --config=${ARCHITECTURE} \
-    //:bazeldnf -- rpmtree --public --name libvirt-devel_x86_64 $basesystem libvirt-devel-${LIBVIRT_VERSION}
+    //:bazeldnf -- rpmtree --public --name libvirt-devel_x86_64 $basesystem libvirt-devel-${LIBVIRT_VERSION} lz4-libs
 
+bazel run \
+    --config=${ARCHITECTURE} \
+    //:bazeldnf -- rpmtree --public --arch=aarch64 --name libvirt-devel_aarch64 $basesystem libvirt-devel-${LIBVIRT_VERSION} lz4-libs
 # create a rpmtree for virt-launcher and virt-handler. This is the OS for our node-components.
 bazel run \
     --config=${ARCHITECTURE} \
@@ -71,7 +81,25 @@ bazel run \
     nftables \
     findutils \
     procps-ng \
-    iptables
+    iptables \
+    tar
+
+bazel run \
+    --config=${ARCHITECTURE} \
+    //:bazeldnf -- rpmtree --public --arch=aarch64 --name launcherbase_aarch64 \
+    $basesystem \
+    libverto-libev \
+    libvirt-daemon-driver-qemu-${LIBVIRT_VERSION} \
+    libvirt-client-${LIBVIRT_VERSION} \
+    libvirt-daemon-driver-storage-core-${LIBVIRT_VERSION} \
+    qemu-kvm-${QEMU_VERSION} \
+    genisoimage \
+    selinux-policy selinux-policy-targeted \
+    nftables \
+    findutils \
+    procps-ng \
+    iptables \
+    tar
 
 # remove all RPMs which are no longer referenced by a rpmtree
 bazel run \
@@ -84,8 +112,15 @@ bazel build \
     --config=${ARCHITECTURE} \
     //rpm:libvirt-devel_x86_64
 
+bazel build \
+    --config=${ARCHITECTURE} \
+    //rpm:libvirt-devel_aarch64
 # update tar2files targets which act as an adapter between rpms
 # and cc_library which we need for virt-launcher and virt-handler
 bazel run \
     --config=${ARCHITECTURE} \
-    //rpm:ldd
+    //rpm:ldd_x86_64
+
+bazel run \
+    --config=${ARCHITECTURE} \
+    //rpm:ldd_aarch64

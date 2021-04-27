@@ -31,9 +31,9 @@ import (
 	"time"
 
 	"github.com/spf13/pflag"
+	"k8s.io/apimachinery/pkg/types"
 	libvirt "libvirt.org/libvirt-go"
 
-	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
 	utilwait "k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/apimachinery/pkg/watch"
@@ -123,7 +123,7 @@ func startDomainEventMonitoring(
 	virtShareDir string,
 	domainConn virtcli.Connection,
 	deleteNotificationSent chan watch.Event,
-	vmiUID types.UID,
+	vmi *v1.VirtualMachineInstance,
 	domainName string,
 	agentStore *agentpoller.AsyncAgentStore,
 	qemuAgentSysInterval time.Duration,
@@ -140,7 +140,7 @@ func startDomainEventMonitoring(
 		}
 	}()
 
-	err := notifier.StartDomainNotifier(domainConn, deleteNotificationSent, vmiUID, domainName, agentStore, qemuAgentSysInterval, qemuAgentFileInterval, qemuAgentUserInterval, qemuAgentVersionInterval)
+	err := notifier.StartDomainNotifier(domainConn, deleteNotificationSent, vmi, domainName, agentStore, qemuAgentSysInterval, qemuAgentFileInterval, qemuAgentUserInterval, qemuAgentVersionInterval)
 	if err != nil {
 		panic(err)
 	}
@@ -197,6 +197,11 @@ func initializeDirs(virtShareDir string,
 		panic(err)
 	}
 
+	err = virtlauncher.InitializeDisksDirectories(config.SysprepDisksDir)
+	if err != nil {
+		panic(err)
+	}
+
 	err = virtlauncher.InitializeDisksDirectories(config.SecretDisksDir)
 	if err != nil {
 		panic(err)
@@ -216,29 +221,35 @@ func initializeDirs(virtShareDir string,
 func waitForDomainUUID(timeout time.Duration, events chan watch.Event, stop chan struct{}, domainManager virtwrap.DomainManager) *api.Domain {
 
 	ticker := time.NewTicker(timeout).C
-	select {
-	case <-ticker:
-		panic(fmt.Errorf("timed out waiting for domain to be defined"))
-	case e := <-events:
-		if e.Object != nil && e.Type == watch.Added {
-			domain := e.Object.(*api.Domain)
-			log.Log.Infof("Detected domain with UUID %s", domain.Spec.UUID)
-			return domain
-		} else if e.Type == watch.Modified {
-			domain, ok := e.Object.(*api.Domain)
-			if ok && domain.ObjectMeta.DeletionTimestamp != nil {
-				return nil
+	checkEarlyExit := time.NewTicker(time.Second * 2).C
+	for {
+		select {
+		case <-ticker:
+			panic(fmt.Errorf("timed out waiting for domain to be defined"))
+		case e := <-events:
+			if e.Object != nil && e.Type == watch.Added {
+				domain := e.Object.(*api.Domain)
+				log.Log.Infof("Detected domain with UUID %s", domain.Spec.UUID)
+				return domain
+			} else if e.Type == watch.Modified {
+				domain, ok := e.Object.(*api.Domain)
+				if ok && domain.ObjectMeta.DeletionTimestamp != nil {
+					return nil
+				}
+			}
+		case <-stop:
+			return nil
+		case <-checkEarlyExit:
+			if cmdserver.ReceivedEarlyExitSignal() {
+				panic(fmt.Errorf("received early exit signal"))
 			}
 		}
-	case <-stop:
-		return nil
 	}
-	return nil
 }
 
 func waitForFinalNotify(deleteNotificationSent chan watch.Event,
 	domainManager virtwrap.DomainManager,
-	vm *v1.VirtualMachineInstance) {
+	vmi *v1.VirtualMachineInstance) {
 
 	log.Log.Info("Waiting on final notifications to be sent to virt-handler.")
 
@@ -271,7 +282,7 @@ func waitForFinalNotify(deleteNotificationSent chan watch.Event,
 	// KillVMI is idempotent. Making a call to KillVMI here ensures that the deletion
 	// occurs regardless if the VirtualMachineInstance crashed unexpectedly or if virt-handler requested
 	// a graceful shutdown.
-	domainManager.KillVMI(vm)
+	domainManager.KillVMI(vmi)
 
 	// We don't want to block here forever. If the delete does not occur, that could mean
 	// something is wrong with libvirt. In this situation, virt-handler will detect that
@@ -312,7 +323,7 @@ func main() {
 	name := pflag.String("name", "", "Name of the VirtualMachineInstance")
 	uid := pflag.String("uid", "", "UID of the VirtualMachineInstance")
 	namespace := pflag.String("namespace", "", "Namespace of the VirtualMachineInstance")
-	gracePeriodSeconds := pflag.Int("grace-period-seconds", 30, "Grace period to observe before sending SIGTERM to vm process")
+	gracePeriodSeconds := pflag.Int("grace-period-seconds", 30, "Grace period to observe before sending SIGTERM to vmi process")
 	useEmulation := pflag.Bool("use-emulation", false, "Use software emulation")
 	hookSidecars := pflag.Uint("hook-sidecars", 0, "Number of requested hook sidecars, virt-launcher will wait for all of them to become available")
 	noFork := pflag.Bool("no-fork", false, "Fork and let virt-launcher watch itself to react to crashes if set to false")
@@ -356,7 +367,7 @@ func main() {
 		panic(err)
 	}
 
-	vm := v1.NewVMIReferenceFromNameWithNS(*namespace, *name)
+	vmi := v1.NewVMIReferenceWithUUID(*namespace, *name, types.UID(*uid))
 
 	// Initialize local and shared directories
 	initializeDirs(*virtShareDir, *ephemeralDiskDir, *containerDiskDir, *hotplugDiskDir, *uid)
@@ -370,7 +381,7 @@ func main() {
 	}
 	util.StartLibvirt(stopChan)
 	// only single domain should be present
-	domainName := api.VMINamespaceKeyFunc(vm)
+	domainName := api.VMINamespaceKeyFunc(vmi)
 	util.StartVirtlog(stopChan, domainName)
 
 	domainConn := createLibvirtConnection()
@@ -395,7 +406,7 @@ func main() {
 
 	gracefulShutdownCallback := func() {
 		err := wait.PollImmediate(time.Second, 15*time.Second, func() (bool, error) {
-			err := domainManager.MarkGracefulShutdownVMI(vm)
+			err := domainManager.MarkGracefulShutdownVMI(vmi)
 			if err != nil {
 				log.Log.Reason(err).Errorf("Unable to signal graceful shutdown")
 				return false, err
@@ -408,11 +419,11 @@ func main() {
 			log.Log.Reason(err).Errorf("Gave up attempting to signal graceful shutdown")
 		}
 
-		log.Log.Object(vm).Info("Successfully signaled graceful shutdown")
+		log.Log.Object(vmi).Info("Successfully signaled graceful shutdown")
 	}
 
 	finalShutdownCallback := func(pid int) {
-		err := domainManager.KillVMI(vm)
+		err := domainManager.KillVMI(vmi)
 		if err != nil {
 			log.Log.Reason(err).Errorf("Unable to stop qemu with libvirt, falling back to SIGTERM")
 			syscall.Kill(pid, syscall.SIGTERM)
@@ -421,7 +432,7 @@ func main() {
 
 	events := make(chan watch.Event, 2)
 	// Send domain notifications to virt-handler
-	startDomainEventMonitoring(notifier, *virtShareDir, domainConn, events, vm.UID, domainName, &agentStore, *qemuAgentSysInterval, *qemuAgentFileInterval, *qemuAgentUserInterval, *qemuAgentVersionInterval)
+	startDomainEventMonitoring(notifier, *virtShareDir, domainConn, events, vmi, domainName, &agentStore, *qemuAgentSysInterval, *qemuAgentFileInterval, *qemuAgentUserInterval, *qemuAgentVersionInterval)
 
 	c := make(chan os.Signal, 1)
 	signal.Notify(c, os.Interrupt,
@@ -457,7 +468,7 @@ func main() {
 		// Now that the pid has exited, we wait for the final delete notification to be
 		// sent back to virt-handler. This delete notification contains the reason the
 		// domain exited.
-		waitForFinalNotify(events, domainManager, vm)
+		waitForFinalNotify(events, domainManager, vmi)
 	}
 
 	close(stopChan)
@@ -556,6 +567,9 @@ func ForkAndMonitor(containerDiskDir string) (int, error) {
 			}
 			return false, nil
 		})
+		if err != nil {
+			return 1, err
+		}
 	}
 	return exitCode, nil
 }

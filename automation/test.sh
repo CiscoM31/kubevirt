@@ -35,11 +35,23 @@ readonly ARTIFACTS_PATH="${ARTIFACTS-$WORKSPACE/exported-artifacts}"
 readonly TEMPLATES_SERVER="https://templates.ovirt.org/kubevirt/"
 readonly BAZEL_CACHE="${BAZEL_CACHE:-http://bazel-cache.kubevirt-prow.svc.cluster.local:8080/kubevirt.io/kubevirt}"
 
+if [ -z $TARGET ]; then
+  echo "FATAL: TARGET must be non empty"
+  exit 1
+fi
+
 if [[ $TARGET =~ windows.* ]]; then
   echo "picking the default provider for windows tests"
 elif [[ $TARGET =~ cnao ]]; then
   export KUBEVIRT_WITH_CNAO=true
   export KUBEVIRT_PROVIDER=${TARGET/-cnao/}
+elif [[ $TARGET =~ sig-network ]]; then
+  export KUBEVIRT_WITH_CNAO=true
+  export KUBEVIRT_PROVIDER=${TARGET/-sig-network/}
+elif [[ $TARGET =~ sig-storage ]]; then
+  export KUBEVIRT_PROVIDER=${TARGET/-sig-storage/}
+elif [[ $TARGET =~ sig-compute ]]; then
+  export KUBEVIRT_PROVIDER=${TARGET/-sig-compute/}
 else
   export KUBEVIRT_PROVIDER=${TARGET}
 fi
@@ -49,7 +61,12 @@ if [ ! -d "cluster-up/cluster/$KUBEVIRT_PROVIDER" ]; then
   exit 1
 fi
 
-export KUBEVIRT_NUM_NODES=2
+if [[ $TARGET =~ sriov.* ]]; then
+  export KUBEVIRT_NUM_NODES=3
+else
+  export KUBEVIRT_NUM_NODES=2
+fi
+
 # Give the nodes enough memory to run tests in parallel, including tests which involve fedora
 export KUBEVIRT_MEMORY_SIZE=9216M
 
@@ -151,6 +168,20 @@ collect_debug_logs() {
     done
 }
 
+build_images() {
+    # build all images with the basic repeat logic
+    # probably because load on the node, possible situation when the bazel
+    # fails to download artifacts, to avoid job fails because of it,
+    # we repeat the build images action
+    local tries=3
+    for i in $(seq 1 $tries); do
+        make bazel-build-images && return
+        rc=$?
+    done
+
+    return $rc
+}
+
 export NAMESPACE="${NAMESPACE:-kubevirt}"
 
 # Make sure that the VM is properly shut down on exit
@@ -160,26 +191,14 @@ make cluster-down
 
 # Create .bazelrc to use remote cache
 cat >ci.bazelrc <<EOF
-startup --host_jvm_args=-Dbazel.DigestFunction=sha256
-build --remote_local_fallback
-build --remote_http_cache=${BAZEL_CACHE}
 build --jobs=4
+build --remote_download_toplevel
 EOF
 
 # Build and test images with a custom image name prefix
 export IMAGE_PREFIX_ALT=${IMAGE_PREFIX_ALT:-kv-}
 
-# build all images with the basic repeat logic
-# probably because load on the node, possible situation when the bazel
-# fails to download artifacts, to avoid job fails because of it,
-# we repeat the build images action
-set +e
-for i in $(seq 1 3);
-do
-  make bazel-build-images
-done
-set -e
-make bazel-build-images
+build_images
 
 trap '{ collect_debug_logs; echo "Dump kubevirt state:"; make dump; }' ERR
 make cluster-up
@@ -200,13 +219,7 @@ set -e
 echo "Nodes are ready:"
 kubectl get nodes
 
-make cluster-build
-
-# I do not have good indication that OKD API server ready to serve requests, so I will just
-# repeat cluster-deploy until it succeeds
-until make cluster-deploy; do
-    sleep 1
-done
+make cluster-sync
 
 hack/dockerized bazel shutdown
 
@@ -282,22 +295,45 @@ spec:
     path: /
   storageClassName: windows
 EOF
-  # Run only Windows tests
-  export KUBEVIRT_E2E_FOCUS=Windows
-elif [[ $TARGET =~ (cnao|multus) ]]; then
-  export KUBEVIRT_E2E_FOCUS="Multus|Networking|VMIlifecycle|Expose|Macvtap"
-elif [[ $TARGET =~ sriov.* ]]; then
-  export KUBEVIRT_E2E_FOCUS=SRIOV
-elif [[ $TARGET =~ gpu.* ]]; then
-  export KUBEVIRT_E2E_FOCUS=GPU
-elif [[ $TARGET =~ (okd|ocp).* ]]; then
-  export KUBEVIRT_E2E_SKIP="SRIOV|GPU"
-else
-  export KUBEVIRT_E2E_SKIP="Multus|SRIOV|GPU|Macvtap"
 fi
 
-if [[ "$KUBEVIRT_STORAGE" == "rook-ceph" ]]; then
-  export KUBEVIRT_E2E_FOCUS=rook-ceph
+# Set KUBEVIRT_E2E_FOCUS and KUBEVIRT_E2E_SKIP only if both of them are not already set
+if [[ -z ${KUBEVIRT_E2E_FOCUS} && -z ${KUBEVIRT_E2E_SKIP} ]]; then
+  if [[ $TARGET =~ windows.* ]]; then
+    # Run only Windows tests
+    export KUBEVIRT_E2E_FOCUS=Windows
+  elif [[ $TARGET =~ (cnao|multus) ]]; then
+    export KUBEVIRT_E2E_FOCUS="Multus|Networking|VMIlifecycle|Expose|Macvtap"
+  elif [[ $TARGET =~ sig-network ]]; then
+    export KUBEVIRT_E2E_FOCUS="\\[sig-network\\]"
+  elif [[ $TARGET =~ sig-storage ]]; then
+    export KUBEVIRT_E2E_FOCUS="\\[sig-storage\\]"
+  elif [[ $TARGET =~ sig-compute ]]; then
+    export KUBEVIRT_E2E_FOCUS="\\[sig-compute\\]"
+    export KUBEVIRT_E2E_SKIP="GPU"
+  elif [[ $TARGET =~ sriov.* ]]; then
+    export KUBEVIRT_E2E_FOCUS=SRIOV
+  elif [[ $TARGET =~ gpu.* ]]; then
+    export KUBEVIRT_E2E_FOCUS=GPU
+  elif [[ $TARGET =~ (okd|ocp).* ]]; then
+    export KUBEVIRT_E2E_SKIP="SRIOV|GPU"
+  else
+    export KUBEVIRT_E2E_SKIP="Multus|SRIOV|GPU|Macvtap"
+  fi
+
+  if [[ "$KUBEVIRT_STORAGE" == "rook-ceph" || "$KUBEVIRT_STORAGE" == "rook-ceph-default" ]]; then
+    export KUBEVIRT_E2E_FOCUS=rook-ceph
+  fi
+fi
+
+# If KUBEVIRT_QUARANTINE is not set, do not run quarantined tests. When it is
+# set the whole suite (quarantined and stable) will be run.
+if [ -z "$KUBEVIRT_QUARANTINE" ]; then
+    if [ -n "$KUBEVIRT_E2E_SKIP" ]; then
+        export KUBEVIRT_E2E_SKIP="${KUBEVIRT_E2E_SKIP}|QUARANTINE"
+    else
+        export KUBEVIRT_E2E_SKIP="QUARANTINE"
+    fi
 fi
 
 # Prepare RHEL PV for Template testing

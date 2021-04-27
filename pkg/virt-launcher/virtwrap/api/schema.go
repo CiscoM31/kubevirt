@@ -17,13 +17,13 @@
  *
  */
 
-//go:generate deepcopy-gen -i . --go-header-file ../../../../hack/boilerplate/boilerplate.go.txt
-
 package api
 
 import (
+	"encoding/json"
 	"encoding/xml"
 	"fmt"
+	"strings"
 
 	kubev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -247,11 +247,12 @@ type CPUTopology struct {
 }
 
 type Features struct {
-	ACPI   *FeatureEnabled `xml:"acpi,omitempty"`
-	APIC   *FeatureEnabled `xml:"apic,omitempty"`
-	Hyperv *FeatureHyperv  `xml:"hyperv,omitempty"`
-	SMM    *FeatureEnabled `xml:"smm,omitempty"`
-	KVM    *FeatureKVM     `xml:"kvm,omitempty"`
+	ACPI       *FeatureEnabled    `xml:"acpi,omitempty"`
+	APIC       *FeatureEnabled    `xml:"apic,omitempty"`
+	Hyperv     *FeatureHyperv     `xml:"hyperv,omitempty"`
+	SMM        *FeatureEnabled    `xml:"smm,omitempty"`
+	KVM        *FeatureKVM        `xml:"kvm,omitempty"`
+	PVSpinlock *FeaturePVSpinlock `xml:"pvspinlock,omitempty"`
 }
 
 type FeatureHyperv struct {
@@ -261,7 +262,7 @@ type FeatureHyperv struct {
 	VPIndex         *FeatureState     `xml:"vpindex,omitempty"`
 	Runtime         *FeatureState     `xml:"runtime,omitempty"`
 	SyNIC           *FeatureState     `xml:"synic,omitempty"`
-	SyNICTimer      *FeatureState     `xml:"stimer,omitempty"`
+	SyNICTimer      *SyNICTimer       `xml:"stimer,omitempty"`
 	Reset           *FeatureState     `xml:"reset,omitempty"`
 	VendorID        *FeatureVendorID  `xml:"vendor_id,omitempty"`
 	Frequencies     *FeatureState     `xml:"frequencies,omitempty"`
@@ -274,6 +275,15 @@ type FeatureHyperv struct {
 type FeatureSpinlocks struct {
 	State   string  `xml:"state,attr,omitempty"`
 	Retries *uint32 `xml:"retries,attr,omitempty"`
+}
+
+type SyNICTimer struct {
+	Direct *FeatureState `xml:"direct,omitempty"`
+	State  string        `xml:"state,attr,omitempty"`
+}
+
+type FeaturePVSpinlock struct {
+	State string `xml:"state,attr,omitempty"`
 }
 
 type FeatureVendorID struct {
@@ -443,6 +453,7 @@ type Input struct {
 
 // BEGIN HostDevice -----------------------------
 type HostDevice struct {
+	XMLName   xml.Name         `xml:"hostdev"`
 	Source    HostDeviceSource `xml:"source"`
 	Type      string           `xml:"type,attr"`
 	BootOrder *BootOrder       `xml:"boot,omitempty"`
@@ -497,6 +508,7 @@ type Disk struct {
 	BootOrder    *BootOrder    `xml:"boot,omitempty"`
 	Address      *Address      `xml:"address,omitempty"`
 	Model        string        `xml:"model,attr,omitempty"`
+	BlockIO      *BlockIO      `xml:"blockio,omitempty"`
 }
 
 type DiskAuth struct {
@@ -535,6 +547,7 @@ type DiskDriver struct {
 	Type        string `xml:"type,attr"`
 	IOThread    *uint  `xml:"iothread,attr,omitempty"`
 	Queues      *uint  `xml:"queues,attr,omitempty"`
+	Discard     string `xml:"discard,attr,omitempty"`
 }
 
 type DiskSourceHost struct {
@@ -550,6 +563,11 @@ type BackingStore struct {
 
 type BackingStoreFormat struct {
 	Type string `xml:"type,attr"`
+}
+
+type BlockIO struct {
+	LogicalBlockSize  uint `xml:"logical_block_size,attr,omitempty"`
+	PhysicalBlockSize uint `xml:"physical_block_size,attr,omitempty"`
 }
 
 // END Disk -----------------------------
@@ -661,29 +679,65 @@ type InterfaceTarget struct {
 }
 
 type Alias struct {
-	Name string `xml:"name,attr"`
+	name        string
+	userDefined bool
 }
 
-type UserAlias Alias
+// Package private, responsible to interact with xml and json marshal/unmarshal
+type userAliasMarshal struct {
+	Name        string `xml:"name,attr"`
+	UserDefined bool   `xml:"-"`
+}
 
 type Rom struct {
 	Enabled string `xml:"enabled,attr"`
 }
 
+func NewUserDefinedAlias(aliasName string) *Alias {
+	return &Alias{name: aliasName, userDefined: true}
+}
+
+func (alias Alias) GetName() string {
+	return alias.name
+}
+
+func (alias Alias) IsUserDefined() bool {
+	return alias.userDefined
+}
+
 func (alias Alias) MarshalXML(e *xml.Encoder, start xml.StartElement) error {
-	userAlias := UserAlias(alias)
-	userAlias.Name = UserAliasPrefix + userAlias.Name
+	userAlias := userAliasMarshal{Name: alias.name}
+	if alias.userDefined {
+		userAlias.Name = UserAliasPrefix + userAlias.Name
+	}
 	return e.EncodeElement(userAlias, start)
 }
 
 func (alias *Alias) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
-	var userAlias UserAlias
+	var userAlias userAliasMarshal
 	err := d.DecodeElement(&userAlias, &start)
 	if err != nil {
 		return err
 	}
-	*alias = Alias(userAlias)
-	alias.Name = alias.Name[len(UserAliasPrefix):]
+	*alias = Alias{name: userAlias.Name}
+	if strings.HasPrefix(alias.name, UserAliasPrefix) {
+		alias.userDefined = true
+		alias.name = alias.name[len(UserAliasPrefix):]
+	}
+	return nil
+}
+
+func (alias Alias) MarshalJSON() ([]byte, error) {
+	userAlias := userAliasMarshal{Name: alias.name, UserDefined: alias.userDefined}
+	return json.Marshal(&userAlias)
+}
+
+func (alias *Alias) UnmarshalJSON(data []byte) error {
+	var userAlias userAliasMarshal
+	if err := json.Unmarshal(data, &userAlias); err != nil {
+		return err
+	}
+	*alias = Alias{name: userAlias.Name, userDefined: userAlias.UserDefined}
 	return nil
 }
 
