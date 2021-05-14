@@ -3,7 +3,6 @@ package watch
 import (
 	"fmt"
 
-	"github.com/go-openapi/errors"
 	"github.com/golang/mock/gomock"
 	. "github.com/onsi/ginkgo"
 	"github.com/onsi/ginkgo/extensions/table"
@@ -873,22 +872,6 @@ var _ = Describe("VirtualMachine", func() {
 			testutils.ExpectEvent(recorder, SuccessfulCreateVirtualMachineReason)
 		})
 
-		It("should detect that it is orphan deleted and remove the owner reference on the remaining VirtualMachineInstance", func() {
-			vm, vmi := DefaultVirtualMachine(true)
-
-			// Mark it as orphan deleted
-			now := metav1.Now()
-			vm.ObjectMeta.DeletionTimestamp = &now
-			vm.ObjectMeta.Finalizers = []string{metav1.FinalizerOrphanDependents}
-
-			addVirtualMachine(vm)
-			vmiFeeder.Add(vmi)
-
-			vmiInterface.EXPECT().Patch(vmi.ObjectMeta.Name, gomock.Any(), gomock.Any())
-
-			controller.Execute()
-		})
-
 		It("should detect that a VirtualMachineInstance already exists and adopt it", func() {
 			vm, vmi := DefaultVirtualMachine(true)
 			vmi.OwnerReferences = []metav1.OwnerReference{}
@@ -899,6 +882,49 @@ var _ = Describe("VirtualMachine", func() {
 			vmInterface.EXPECT().Get(vm.ObjectMeta.Name, gomock.Any()).Return(vm, nil)
 			vmInterface.EXPECT().UpdateStatus(gomock.Any()).Return(vm, nil)
 			vmiInterface.EXPECT().Patch(vmi.ObjectMeta.Name, gomock.Any(), gomock.Any())
+
+			controller.Execute()
+		})
+
+		It("should detect that a DataVolume already exists and adopt it", func() {
+			vm, _ := DefaultVirtualMachine(false)
+			vm.Spec.Template.Spec.Volumes = append(vm.Spec.Template.Spec.Volumes, v1.Volume{
+				Name: "test1",
+				VolumeSource: v1.VolumeSource{
+					DataVolume: &v1.DataVolumeSource{
+						Name: "dv1",
+					},
+				},
+			})
+
+			vm.Spec.DataVolumeTemplates = append(vm.Spec.DataVolumeTemplates, v1.DataVolumeTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "dv1",
+					Namespace: vm.Namespace,
+				},
+			})
+
+			addVirtualMachine(vm)
+
+			dv := createDataVolumeManifest(&vm.Spec.DataVolumeTemplates[0], vm)
+			dv.Status.Phase = cdiv1.Succeeded
+
+			orphanDV := dv.DeepCopy()
+			orphanDV.ObjectMeta.OwnerReferences = nil
+			dataVolumeInformer.GetStore().Add(orphanDV)
+
+			cdiClient.Fake.PrependReactor("patch", "datavolumes", func(action testing.Action) (handled bool, obj runtime.Object, err error) {
+				patch, ok := action.(testing.PatchAction)
+				Expect(ok).To(BeTrue())
+				Expect(patch.GetName()).To(Equal(dv.Name))
+				Expect(patch.GetNamespace()).To(Equal(dv.Namespace))
+				Expect(string(patch.GetPatch())).To(ContainSubstring(string(vm.UID)))
+				Expect(string(patch.GetPatch())).To(ContainSubstring("ownerReferences"))
+				return true, dv, nil
+			})
+
+			vmInterface.EXPECT().Get(vm.ObjectMeta.Name, gomock.Any()).Return(vm, nil)
+			vmInterface.EXPECT().UpdateStatus(gomock.Any()).Return(vm, nil)
 
 			controller.Execute()
 		})
@@ -1089,94 +1115,6 @@ var _ = Describe("VirtualMachine", func() {
 			}).Return(vmi, nil)
 
 			controller.Execute()
-		})
-
-		Context("VM rename", func() {
-			Context("source VM", func() {
-				var vm *v1.VirtualMachine
-
-				BeforeEach(func() {
-					vm, _ = DefaultVirtualMachineWithNames(false, "test", "")
-					virtcontroller.SetLatestApiVersionAnnotation(vm)
-				})
-
-				Context("a VM with the new name exists", func() {
-					var newVM *v1.VirtualMachine
-
-					BeforeEach(func() {
-						newVM, _ = DefaultVirtualMachineWithNames(false, "newtest", "")
-						vm.Status = v1.VirtualMachineStatus{
-							StateChangeRequests: []v1.VirtualMachineStateChangeRequest{
-								{
-									Action: v1.RenameRequest,
-									Data: map[string]string{
-										"newName": newVM.Name,
-									},
-								},
-							},
-						}
-					})
-
-					It("should remove the VM with the new name and create a copy of the source VM", func() {
-						vmInterface.EXPECT().Delete(newVM.Name, gomock.Any())
-						vmInterface.EXPECT().Create(gomock.Any()).
-							Do(func(objs ...interface{}) {
-								vm := objs[0].(*v1.VirtualMachine)
-
-								Expect(vm.Name).To(Equal(newVM.Name))
-								Expect(len(vm.Status.Conditions)).To(Equal(1))
-								Expect(vm.Status.Conditions[0].Type).To(Equal(virtv1.RenameConditionType))
-							})
-
-						vmInterface.EXPECT().Delete(vm.Name, gomock.Any())
-
-						addVirtualMachine(vm)
-						controller.Execute()
-					})
-				})
-
-				Context("a VM with the new name does not exist", func() {
-					var newName string
-
-					BeforeEach(func() {
-						newName = "newtest"
-
-						vmInterface.EXPECT().Delete(newName, gomock.Any()).Return(errors.NotFound("not found"))
-
-						vm.Status = v1.VirtualMachineStatus{
-							StateChangeRequests: []v1.VirtualMachineStateChangeRequest{
-								{
-									Action: v1.RenameRequest,
-									Data: map[string]string{
-										"newName": newName,
-									},
-								},
-							},
-						}
-					})
-
-					It("should create a new VM with the new name", func() {
-						newVM := vm.DeepCopy()
-						newVM.Name = newName
-
-						vmInterface.EXPECT().
-							Create(gomock.Any()).
-							Do(func(objs ...interface{}) {
-								vm := objs[0].(*v1.VirtualMachine)
-
-								Expect(vm.Name).To(Equal(newName))
-								Expect(len(vm.Status.Conditions)).To(Equal(1))
-								Expect(vm.Status.Conditions[0].Type).To(Equal(virtv1.RenameConditionType))
-							}).
-							Return(newVM, nil)
-
-						vmInterface.EXPECT().Delete(vm.Name, gomock.Any())
-
-						addVirtualMachine(vm)
-						controller.Execute()
-					})
-				})
-			})
 		})
 	})
 })

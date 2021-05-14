@@ -1065,8 +1065,6 @@ var _ = Describe("[Serial][rfe_id:393][crit:high][vendor:cnv-qe@redhat.com][leve
 			var wffcPod *k8sv1.Pod
 
 			BeforeEach(func() {
-				tests.SkipNFSTestIfRunnigOnKindInfra()
-
 				quantity, err := resource.ParseQuantity("5Gi")
 				Expect(err).ToNot(HaveOccurred())
 				url := "docker://" + cd.ContainerDiskFor(cd.ContainerDiskFedoraTestTooling)
@@ -1753,8 +1751,8 @@ var _ = Describe("[Serial][rfe_id:393][crit:high][vendor:cnv-qe@redhat.com][leve
 					By("Waiting for VMI to disappear")
 					tests.WaitForVirtualMachineToDisappearWithTimeout(vmi, 240)
 				},
-					table.Entry("[QUARANTINE][owner:@sig-storage][test_id:2226] with ContainerDisk", newVirtualMachineInstanceWithFedoraContainerDisk),
-					table.Entry("[QUARANTINE][owner:@sig-storage][sig-compute][test_id:2731] with OCS Disk (using ISCSI IPv4 address)", newVirtualMachineInstanceWithFedoraOCSDisk),
+					table.Entry("[QUARANTINE][sig-storage][test_id:2226] with ContainerDisk", newVirtualMachineInstanceWithFedoraContainerDisk),
+					table.Entry("[QUARANTINE][sig-storage][sig-compute][test_id:2731] with OCS Disk (using ISCSI IPv4 address)", newVirtualMachineInstanceWithFedoraOCSDisk),
 				)
 				It("[QUARANTINE][sig-compute][test_id:3241]should be able to cancel a migration right after posting it", func() {
 					vmi := tests.NewRandomFedoraVMIWithGuestAgent()
@@ -1823,9 +1821,12 @@ var _ = Describe("[Serial][rfe_id:393][crit:high][vendor:cnv-qe@redhat.com][leve
 			}
 			tests.AddLabelDownwardAPIVolume(vmi, downwardAPIName)
 
-			vmi.Spec.Domain.Devices = v1.Devices{Interfaces: []v1.Interface{{Name: "default", Tag: "testnic",
+			vmi.Spec.Domain.Devices.Interfaces = []v1.Interface{{Name: "default", Tag: "testnic",
 				InterfaceBindingMethod: v1.InterfaceBindingMethod{
-					Masquerade: &v1.InterfaceMasquerade{}}}}}
+					Masquerade: &v1.InterfaceMasquerade{}}}}
+
+			Expect(len(vmi.Spec.Domain.Devices.Disks)).To(Equal(6))
+			Expect(len(vmi.Spec.Domain.Devices.Interfaces)).To(Equal(1))
 
 			vmi = runVMIAndExpectLaunch(vmi, 180)
 

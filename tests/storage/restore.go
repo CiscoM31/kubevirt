@@ -575,7 +575,7 @@ var _ = SIGDescribe("[Serial]VirtualMachineRestore Tests", func() {
 				Expect(errors.IsNotFound(err)).To(BeTrue())
 			})
 
-			It("[QUARANTINE][test_id:5261]should restore a vm that boots from a datavolume (not template)", func() {
+			It("[test_id:5261]should restore a vm that boots from a datavolume (not template)", func() {
 				vm = tests.NewRandomVMWithDataVolumeAndUserDataInStorageClass(
 					tests.GetUrl(tests.CirrosHttpUrl),
 					tests.NamespaceTestDefault,
@@ -732,7 +732,7 @@ var _ = SIGDescribe("[Serial]VirtualMachineRestore Tests", func() {
 				Expect(errors.IsNotFound(err)).To(BeTrue())
 			})
 
-			It("[test_id:5264]should restore a vm from an online snapshot", func() {
+			It("[QUARANTINE][test_id:5264]should restore a vm from an online snapshot", func() {
 				vm, vmi = createAndStartVM(tests.NewRandomVMWithBlockDataVolumeAndUserDataInStorageClass(
 					tests.GetUrl(tests.CirrosHttpUrl),
 					tests.NamespaceTestDefault,

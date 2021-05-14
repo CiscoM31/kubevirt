@@ -244,6 +244,22 @@ spec:
                 type: object
               customizeComponents:
                 properties:
+                  flags:
+                    description: Configure the value used for deployment and daemonset resources
+                    properties:
+                      api:
+                        additionalProperties:
+                          type: string
+                        type: object
+                      controller:
+                        additionalProperties:
+                          type: string
+                        type: object
+                      handler:
+                        additionalProperties:
+                          type: string
+                        type: object
+                    type: object
                   patches:
                     items:
                       properties:
@@ -1112,6 +1128,11 @@ spec:
                     resource:
                       description: resource is the resource type of the thing you're tracking
                       type: string
+                  required:
+                  - group
+                  - lastGeneration
+                  - name
+                  - resource
                   type: object
                 type: array
                 x-kubernetes-list-type: atomic
@@ -1372,6 +1393,22 @@ spec:
                 type: object
               customizeComponents:
                 properties:
+                  flags:
+                    description: Configure the value used for deployment and daemonset resources
+                    properties:
+                      api:
+                        additionalProperties:
+                          type: string
+                        type: object
+                      controller:
+                        additionalProperties:
+                          type: string
+                        type: object
+                      handler:
+                        additionalProperties:
+                          type: string
+                        type: object
+                    type: object
                   patches:
                     items:
                       properties:
@@ -2240,6 +2277,11 @@ spec:
                     resource:
                       description: resource is the resource type of the thing you're tracking
                       type: string
+                  required:
+                  - group
+                  - lastGeneration
+                  - name
+                  - resource
                   type: object
                 type: array
                 x-kubernetes-list-type: atomic

@@ -210,9 +210,9 @@ func (_mr *_MockDomainManagerRecorder) InterfacesStatus(arg0 interface{}) *gomoc
 	return _mr.mock.ctrl.RecordCall(_mr.mock, "InterfacesStatus", arg0)
 }
 
-func (_m *MockDomainManager) GetGuestOSInfo() api.GuestOSInfo {
+func (_m *MockDomainManager) GetGuestOSInfo() *api.GuestOSInfo {
 	ret := _m.ctrl.Call(_m, "GetGuestOSInfo")
-	ret0, _ := ret[0].(api.GuestOSInfo)
+	ret0, _ := ret[0].(*api.GuestOSInfo)
 	return ret0
 }
 

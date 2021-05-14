@@ -208,6 +208,10 @@ const (
 	SecretLabel = "kubevirt.io/secret"
 )
 
+const (
+	IstioInjectNamespaceLabel = "istio-injection"
+)
+
 var (
 	// BlockDiskForTest contains name of the block PV and PVC
 	BlockDiskForTest string
@@ -762,7 +766,10 @@ func AdjustKubeVirtResource() {
 		kv.Spec.Configuration.DeveloperConfiguration = &v1.DeveloperConfiguration{}
 	}
 
-	kv.Spec.Configuration.DeveloperConfiguration.FeatureGates = []string{
+	if kv.Spec.Configuration.DeveloperConfiguration.FeatureGates == nil {
+		kv.Spec.Configuration.DeveloperConfiguration.FeatureGates = []string{}
+	}
+	kv.Spec.Configuration.DeveloperConfiguration.FeatureGates = append(kv.Spec.Configuration.DeveloperConfiguration.FeatureGates,
 		virtconfig.CPUManager,
 		virtconfig.LiveMigrationGate,
 		virtconfig.IgnitionGate,
@@ -771,7 +778,7 @@ func AdjustKubeVirtResource() {
 		virtconfig.HostDiskGate,
 		virtconfig.VirtIOFSGate,
 		virtconfig.HotplugVolumesGate,
-	}
+	)
 	kv.Spec.Configuration.SELinuxLauncherType = "virt_launcher.process"
 
 	data, err := json.Marshal(kv.Spec)
@@ -1224,13 +1231,6 @@ func DeleteRawManifest(object unstructured.Unstructured) error {
 }
 
 func deployOrWipeTestingInfrastrucure(actionOnObject func(unstructured.Unstructured) error) {
-	// Scale down KubeVirt
-	err, replicasApi := DoScaleDeployment(flags.KubeVirtInstallNamespace, "virt-api", 0)
-	PanicOnError(err)
-	err, replicasController := DoScaleDeployment(flags.KubeVirtInstallNamespace, "virt-controller", 0)
-	PanicOnError(err)
-	daemonInstances, selector, _, err := DoScaleVirtHandler(flags.KubeVirtInstallNamespace, "virt-handler", map[string]string{"kubevirt.io": "scaletozero"})
-	PanicOnError(err)
 	// Deploy / delete test infrastructure / dependencies
 	manifests := GetListOfManifests(flags.PathToTestingInfrastrucureManifests)
 	for _, manifest := range manifests {
@@ -1240,39 +1240,6 @@ func deployOrWipeTestingInfrastrucure(actionOnObject func(unstructured.Unstructu
 			PanicOnError(err)
 		}
 	}
-	// Scale KubeVirt back
-	err, _ = DoScaleDeployment(flags.KubeVirtInstallNamespace, "virt-api", replicasApi)
-	PanicOnError(err)
-	err, _ = DoScaleDeployment(flags.KubeVirtInstallNamespace, "virt-controller", replicasController)
-	PanicOnError(err)
-	_, _, newGeneration, err := DoScaleVirtHandler(flags.KubeVirtInstallNamespace, "virt-handler", selector)
-	PanicOnError(err)
-	virtCli, err := kubecli.GetKubevirtClient()
-	PanicOnError(err)
-
-	Eventually(func() int32 {
-		d, err := virtCli.AppsV1().Deployments(flags.KubeVirtInstallNamespace).Get(context.Background(), "virt-api", metav1.GetOptions{})
-		Expect(err).ToNot(HaveOccurred())
-		return d.Status.ReadyReplicas
-	}, 3*time.Minute, 2*time.Second).Should(Equal(replicasApi), "virt-api is not ready")
-
-	Eventually(func() int32 {
-		d, err := virtCli.AppsV1().Deployments(flags.KubeVirtInstallNamespace).Get(context.Background(), "virt-controller", metav1.GetOptions{})
-		Expect(err).ToNot(HaveOccurred())
-		return d.Status.ReadyReplicas
-	}, 3*time.Minute, 2*time.Second).Should(Equal(replicasController), "virt-controller is not ready")
-
-	Eventually(func() int64 {
-		d, err := virtCli.AppsV1().DaemonSets(flags.KubeVirtInstallNamespace).Get(context.Background(), "virt-handler", metav1.GetOptions{})
-		Expect(err).ToNot(HaveOccurred())
-		return d.Status.ObservedGeneration
-	}, 1*time.Minute, 2*time.Second).Should(Equal(newGeneration), "virt-handler did not bump the generation")
-
-	Eventually(func() int32 {
-		d, err := virtCli.AppsV1().DaemonSets(flags.KubeVirtInstallNamespace).Get(context.Background(), "virt-handler", metav1.GetOptions{})
-		Expect(err).ToNot(HaveOccurred())
-		return d.Status.NumberAvailable
-	}, 1*time.Minute, 2*time.Second).Should(Equal(daemonInstances), "virt-handler is not ready")
 
 	WaitForAllPodsReady(3*time.Minute, metav1.ListOptions{})
 }
@@ -1663,6 +1630,10 @@ func cleanNamespaces() {
 			continue
 		}
 
+		// Clean namespace labels
+		err = libnet.RemoveAllLabelsFromNamespace(virtCli, namespace)
+		PanicOnError(err)
+
 		//Remove all Jobs
 		PanicOnError(virtCli.BatchV1().RESTClient().Delete().Namespace(namespace).Resource("jobs").Do(context.Background()).Error())
 		//Remove all HPA
@@ -1757,6 +1728,12 @@ func cleanNamespaces() {
 		for _, netDef := range nets.Items {
 			PanicOnError(virtCli.NetworkClient().K8sCniCncfIoV1().NetworkAttachmentDefinitions(namespace).Delete(context.Background(), netDef.GetName(), metav1.DeleteOptions{}))
 		}
+
+		// Remove all Istio Sidecars
+		PanicOnError(removeAllGroupVersionResourceFromNamespace(schema.GroupVersionResource{Group: "networking.istio.io", Version: "v1beta1", Resource: "sidecars"}, namespace))
+
+		// Remove all Istio PeerAuthentications
+		PanicOnError(removeAllGroupVersionResourceFromNamespace(schema.GroupVersionResource{Group: "security.istio.io", Version: "v1beta1", Resource: "peerauthentications"}, namespace))
 	}
 }
 
@@ -1780,6 +1757,29 @@ func removeNamespaces() {
 			return virtCli.CoreV1().Namespaces().Delete(context.Background(), namespace, metav1.DeleteOptions{})
 		}, 240*time.Second, 1*time.Second).Should(SatisfyAll(HaveOccurred(), WithTransform(errors.IsNotFound, BeTrue())), fmt.Sprintf("should successfully delete namespace '%s'", namespace))
 	}
+}
+
+func removeAllGroupVersionResourceFromNamespace(groupVersionResource schema.GroupVersionResource, namespace string) error {
+	virtCli, err := kubecli.GetKubevirtClient()
+	if err != nil {
+		return err
+	}
+
+	gvr, err := virtCli.DynamicClient().Resource(groupVersionResource).Namespace(namespace).List(context.Background(), metav1.ListOptions{})
+	if errors.IsNotFound(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+
+	for _, r := range gvr.Items {
+		err = virtCli.DynamicClient().Resource(groupVersionResource).Namespace(namespace).Delete(context.Background(), r.GetName(), metav1.DeleteOptions{})
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func detectInstallNamespace() {
@@ -4932,27 +4932,34 @@ func FormatIPForURL(ip string) string {
 	return ip
 }
 
+func getClusterDnsServiceIP(virtClient kubecli.KubevirtClient) (string, error) {
+	dnsServiceName := "kube-dns"
+	dnsNamespace := "kube-system"
+	if IsOpenShift() {
+		dnsServiceName = "dns-default"
+		dnsNamespace = "openshift-dns"
+	}
+	kubeDNSService, err := virtClient.CoreV1().Services(dnsNamespace).Get(context.Background(), dnsServiceName, metav1.GetOptions{})
+	if err != nil {
+		return "", err
+	}
+	return kubeDNSService.Spec.ClusterIP, nil
+}
+
+func GetKubernetesApiServiceIp(virtClient kubecli.KubevirtClient) (string, error) {
+	kubernetesServiceName := "kubernetes"
+	kubernetesServiceNamespace := "default"
+
+	kubernetesService, err := virtClient.CoreV1().Services(kubernetesServiceNamespace).Get(context.Background(), kubernetesServiceName, metav1.GetOptions{})
+	if err != nil {
+		return "", err
+	}
+	return kubernetesService.Spec.ClusterIP, nil
+}
+
 func IsRunningOnKindInfra() bool {
 	provider := os.Getenv("KUBEVIRT_PROVIDER")
 	return strings.HasPrefix(provider, "kind")
-}
-
-func SkipPVCTestIfRunnigOnKindInfra() {
-	if IsRunningOnKindInfra() {
-		Skip("Skip PVC tests till PR https://github.com/kubevirt/kubevirt/pull/3171 is merged")
-	}
-}
-
-func SkipNFSTestIfRunnigOnKindInfra() {
-	if IsRunningOnKindInfra() {
-		Skip("Skip NFS tests till issue https://github.com/kubevirt/kubevirt/issues/3322 is fixed")
-	}
-}
-
-func SkipSELinuxTestIfRunnigOnKindInfra() {
-	if IsRunningOnKindInfra() {
-		Skip("Skip SELinux tests till issue https://github.com/kubevirt/kubevirt/issues/3780 is fixed")
-	}
 }
 
 func IsUsingBuiltinNodeDrainKey() bool {

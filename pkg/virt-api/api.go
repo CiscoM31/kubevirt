@@ -27,7 +27,10 @@ import (
 	"io/ioutil"
 	"net/http"
 	"os"
+	"os/signal"
 	"sync"
+	"syscall"
+	"time"
 
 	restful "github.com/emicklei/go-restful"
 	"github.com/go-openapi/spec"
@@ -114,7 +117,10 @@ type virtAPIApp struct {
 	externallyManaged   bool
 }
 
-var _ service.Service = &virtAPIApp{}
+var (
+	_                service.Service = &virtAPIApp{}
+	apiHealthVersion                 = new(healthz.KubeApiHealthzVersion)
+)
 
 func NewVirtApi() VirtApi {
 
@@ -278,7 +284,7 @@ func (app *virtAPIApp) composeSubresources() {
 				response.WriteAsJson(virtversion.Get())
 			}).Operation(version.Version + "Version"))
 		subws.Route(subws.GET(rest.SubResourcePath("healthz")).
-			To(healthz.KubeConnectionHealthzFuncFactory(app.clusterConfig)).
+			To(healthz.KubeConnectionHealthzFuncFactory(app.clusterConfig, apiHealthVersion)).
 			Consumes(restful.MIME_JSON).
 			Produces(restful.MIME_JSON).
 			Operation(version.Version+"CheckHealth").
@@ -294,16 +300,6 @@ func (app *virtAPIApp) composeSubresources() {
 			Doc("Get guest agent os information").
 			Writes(v1.VirtualMachineInstanceGuestAgentInfo{}).
 			Returns(http.StatusOK, "OK", v1.VirtualMachineInstanceGuestAgentInfo{}))
-
-		subws.Route(subws.PUT(rest.ResourcePath(subresourcesvmGVR)+rest.SubResourcePath("rename")).
-			To(subresourceApp.RenameVMRequestHandler).
-			Param(rest.NamespaceParam(subws)).Param(rest.NameParam(subws)).
-			Operation(version.Version+"Rename").
-			Doc("Rename a stopped VirtualMachine object.").
-			Returns(http.StatusOK, "OK", "").
-			Returns(http.StatusAccepted, "Accepted", "").
-			Returns(http.StatusNotFound, httpStatusNotFoundMessage, "").
-			Returns(http.StatusBadRequest, httpStatusBadRequestMessage, ""))
 
 		subws.Route(subws.GET(rest.ResourcePath(subresourcesvmiGVR)+rest.SubResourcePath("userlist")).
 			To(subresourceApp.UserList).
@@ -410,10 +406,6 @@ func (app *virtAPIApp) composeSubresources() {
 						Namespaced: true,
 					},
 					{
-						Name:       "virtualmachines/rename",
-						Namespaced: true,
-					},
-					{
 						Name:       "virtualmachineinstances/userlist",
 						Namespaced: true,
 					},
@@ -464,7 +456,7 @@ func (app *virtAPIApp) composeSubresources() {
 		Doc("Get KubeVirt API root paths").
 		Returns(http.StatusOK, "OK", metav1.RootPaths{}).
 		Returns(http.StatusNotFound, httpStatusNotFoundMessage, ""))
-	ws.Route(ws.GET("/healthz").To(healthz.KubeConnectionHealthzFuncFactory(app.clusterConfig)).Doc("Health endpoint"))
+	ws.Route(ws.GET("/healthz").To(healthz.KubeConnectionHealthzFuncFactory(app.clusterConfig, apiHealthVersion)).Doc("Health endpoint"))
 
 	for _, version := range v1.SubresourceGroupVersions {
 		// K8s needs the ability to query info about a specific API group
@@ -677,9 +669,17 @@ func (app *virtAPIApp) setupTLS(k8sCAManager webhooksutils.ClientCAManager, kube
 	app.handlerTLSConfiguration = webhooksutils.SetupTLSForVirtHandlerClients(kubevirtCAManager, app.handlerCertManager, app.externallyManaged)
 }
 
-func (app *virtAPIApp) startTLS(informerFactory controller.KubeInformerFactory, stopCh <-chan struct{}) error {
+func (app *virtAPIApp) startTLS(informerFactory controller.KubeInformerFactory) error {
 
 	errors := make(chan error)
+	c := make(chan os.Signal, 1)
+
+	signal.Notify(c, os.Interrupt,
+		syscall.SIGHUP,
+		syscall.SIGINT,
+		syscall.SIGTERM,
+		syscall.SIGQUIT,
+	)
 
 	authConfigMapInformer := informerFactory.ApiAuthConfigMap()
 	kubevirtCAConfigInformer := informerFactory.KubeVirtCAConfigMap()
@@ -691,20 +691,53 @@ func (app *virtAPIApp) startTLS(informerFactory controller.KubeInformerFactory, 
 
 	app.Compose()
 
+	http.Handle("/metrics", promhttp.Handler())
+	server := &http.Server{
+		Addr:      fmt.Sprintf("%s:%d", app.BindAddress, app.Port),
+		TLSConfig: app.tlsConfig,
+	}
+
 	// start TLS server
 	go func() {
-		http.Handle("/metrics", promhttp.Handler())
-
-		server := &http.Server{
-			Addr:      fmt.Sprintf("%s:%d", app.BindAddress, app.Port),
-			TLSConfig: app.tlsConfig,
-		}
-
 		errors <- server.ListenAndServeTLS("", "")
 	}()
 
+	// start graceful shutdown handler
+	go func() {
+		s := <-c
+		log.Log.Infof("Received signal %s, initiating graceful shutdown", s.String())
+
+		// pause briefly to ensure the load balancer has had a chance to
+		// remove this endpoint from rotation due to pod.DeletionTimestamp != nil
+		// By pausing, we reduce the chance that the load balancer will attempt to
+		// route new requests to the service after we've started the shutdown
+		// proceedure
+		time.Sleep(5 * time.Second)
+
+		// by default, server.Shutdown() waits indefinitely for all existing
+		// connections to close. We need to give this a timeout to ensure the
+		// shutdown will eventually complete.
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer func() {
+			cancel()
+		}()
+
+		// Shutdown means new connections are not permitted and it waits for existing
+		// connections to terminate (up to the context timeout)
+		server.Shutdown(ctx)
+		// Shutdown forces any existing connections that persist after the shutdown
+		// times out to be forced closed.
+		server.Close()
+	}()
+
 	// wait for server to exit
-	return <-errors
+	err := <-errors
+
+	if err != nil && err != http.ErrServerClosed {
+		// ErrServerClosed is an expected error during normal shutdown
+		return err
+	}
+	return nil
 }
 
 func (app *virtAPIApp) Run() {
@@ -736,6 +769,12 @@ func (app *virtAPIApp) Run() {
 	kubevirtCAConfigInformer := kubeInformerFactory.KubeVirtCAConfigMap()
 	kubeVirtInformer := kubeInformerFactory.KubeVirt()
 
+	// Wire up health check trigger
+	configMapInformer.SetWatchErrorHandler(func(r *cache.Reflector, err error) {
+		apiHealthVersion.Clear()
+		cache.DefaultWatchErrorHandler(r, err)
+	})
+
 	stopChan := make(chan struct{}, 1)
 	defer close(stopChan)
 	go webhookInformers.VMIInformer.Run(stopChan)
@@ -765,7 +804,7 @@ func (app *virtAPIApp) Run() {
 
 	// start TLS server
 	// tls server will only accept connections when fetching a certificate and internal configuration passed once
-	err = app.startTLS(kubeInformerFactory, stopChan)
+	err = app.startTLS(kubeInformerFactory)
 	if err != nil {
 		panic(err)
 	}

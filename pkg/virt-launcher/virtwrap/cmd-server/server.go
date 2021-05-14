@@ -309,8 +309,12 @@ func (l *Launcher) GetDomain(_ context.Context, _ *cmdv1.EmptyRequest) (*cmdv1.D
 
 	if len(list) > 0 {
 		domainObj := list[0]
-		domainObj.Status.OSInfo = l.domainManager.GetGuestOSInfo()
-		domainObj.Status.Interfaces = l.domainManager.InterfacesStatus(domainObj.Spec.Devices.Interfaces)
+		if osInfo := l.domainManager.GetGuestOSInfo(); osInfo != nil {
+			domainObj.Status.OSInfo = *osInfo
+		}
+		if interfaces := l.domainManager.InterfacesStatus(domainObj.Spec.Devices.Interfaces); interfaces != nil {
+			domainObj.Status.Interfaces = interfaces
+		}
 		if domain, err := json.Marshal(domainObj); err != nil {
 			log.Log.Reason(err).Errorf("Failed to marshal domain")
 			response.Response.Success = false

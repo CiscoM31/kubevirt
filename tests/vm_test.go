@@ -141,7 +141,7 @@ var _ = Describe("[rfe_id:1177][crit:medium][vendor:cnv-qe@redhat.com][level:com
 				}
 			})
 
-			It("[owner:@sig-storage][test_id:4643]should NOT be rejected when VM template lists a DataVolume, but VM lists PVC VolumeSource", func() {
+			It("[sig-storage][test_id:4643]should NOT be rejected when VM template lists a DataVolume, but VM lists PVC VolumeSource", func() {
 
 				dv := tests.NewRandomDataVolumeWithHttpImportInStorageClass(tests.GetUrl(tests.AlpineHttpUrl), tests.NamespaceTestDefault, storageClass.Name, k8sv1.ReadWriteOnce)
 				_, err = virtClient.CdiClient().CdiV1alpha1().DataVolumes(dv.Namespace).Create(context.Background(), dv, metav1.CreateOptions{})
@@ -197,9 +197,10 @@ var _ = Describe("[rfe_id:1177][crit:medium][vendor:cnv-qe@redhat.com][level:com
 					By("Deleting the DataVolume")
 					ExpectWithOffset(1, virtClient.CdiClient().CdiV1alpha1().DataVolumes(dv.Namespace).Delete(context.Background(), dv.Name, metav1.DeleteOptions{})).To(Succeed(), metav1.DeleteOptions{})
 				}(dv)
-				Eventually(func() (*corev1.PersistentVolumeClaim, error) {
-					return virtClient.CoreV1().PersistentVolumeClaims(dv.Namespace).Get(context.Background(), dv.Name, metav1.GetOptions{})
-				}).Should(Not(BeNil()), 30)
+				Eventually(func() error {
+					_, err := virtClient.CoreV1().PersistentVolumeClaims(dv.Namespace).Get(context.Background(), dv.Name, metav1.GetOptions{})
+					return err
+				}, 30*time.Second, 1*time.Second).Should(BeNil())
 
 				vmi := tests.NewRandomVMI()
 
@@ -1437,61 +1438,6 @@ var _ = Describe("[rfe_id:1177][crit:medium][vendor:cnv-qe@redhat.com][level:com
 				})
 			})
 		})
-
-		Context("VM rename", func() {
-			var vm1 *v1.VirtualMachine
-
-			BeforeEach(func() {
-				vm1 = newVirtualMachine(false)
-			})
-
-			It("[test_id:4646]should rename a stopped VM only once", func() {
-				renameCommand := tests.NewRepeatableVirtctlCommand(vm.COMMAND_RENAME, vm1.Name, vm1.Name+"new",
-					"--namespace", vm1.Namespace)
-				Expect(renameCommand()).To(Succeed())
-				Expect(renameCommand()).ToNot(Succeed())
-			})
-
-			It("[test_id:4647]should rename a stopped VM", func() {
-				renameCommand := tests.NewRepeatableVirtctlCommand(vm.COMMAND_RENAME, vm1.Name, vm1.Name+"new",
-					"--namespace", vm1.Namespace)
-				Expect(renameCommand()).To(Succeed())
-			})
-
-			It("[test_id:4648]should reject renaming a running VM", func() {
-				vm2 := newVirtualMachine(true)
-
-				renameCommand := tests.NewRepeatableVirtctlCommand(vm.COMMAND_RENAME, vm2.Name, vm2.Name+"new",
-					"--namespace", vm2.Namespace)
-				Expect(renameCommand()).ToNot(Succeed())
-			})
-
-			It("[test_id:4649]should reject renaming a VM to the same name", func() {
-				renameCommand := tests.NewRepeatableVirtctlCommand(vm.COMMAND_RENAME, vm1.Name, vm1.Name,
-					"--namespace", vm1.Namespace)
-				Expect(renameCommand()).ToNot(Succeed())
-			})
-
-			It("[test_id:4650]should reject renaming a VM with an empty name", func() {
-				renameCommand := tests.NewRepeatableVirtctlCommand(vm.COMMAND_RENAME, vm1.Name, "",
-					"--namespace", vm1.Namespace)
-				Expect(renameCommand()).ToNot(Succeed())
-			})
-
-			It("[test_id:4651]should reject renaming a VM with invalid name", func() {
-				renameCommand := tests.NewRepeatableVirtctlCommand(vm.COMMAND_RENAME, vm1.Name, "invalid name <>?:;",
-					"--namespace", vm1.Namespace)
-				Expect(renameCommand()).ToNot(Succeed())
-			})
-
-			It("[test_id:4652]should reject renaming a VM if the new name is taken", func() {
-				vm2 := newVirtualMachine(true)
-
-				renameCommand := tests.NewRepeatableVirtctlCommand(vm.COMMAND_RENAME, vm1.Name, vm2.Name,
-					"--namespace", vm1.Namespace)
-				Expect(renameCommand()).ToNot(Succeed())
-			})
-		})
 	})
 
 	Context("[rfe_id:273]with oc/kubectl", func() {
@@ -1730,82 +1676,15 @@ var _ = Describe("[rfe_id:1177][crit:medium][vendor:cnv-qe@redhat.com][level:com
 		})
 
 	})
-
-	Context("VM rename", func() {
-		var (
-			cli kubecli.VirtualMachineInterface
-		)
-
-		BeforeEach(func() {
-			cli = virtClient.VirtualMachine(tests.NamespaceTestDefault)
-		})
-
-		Context("VM update", func() {
-			var (
-				vm1 *v1.VirtualMachine
-			)
-
-			BeforeEach(func() {
-				vm1 = tests.NewRandomVMWithEphemeralDisk(cd.ContainerDiskFor(cd.ContainerDiskCirros))
-				cli.Create(vm1)
-			})
-
-			It("[test_id:4654]should fail if the new name is already taken", func() {
-				vm2 := tests.NewRandomVMWithEphemeralDisk(cd.ContainerDiskFor(cd.ContainerDiskCirros))
-				cli.Create(vm2)
-
-				err := cli.Rename(vm1.Name, &v1.RenameOptions{NewName: vm2.Name})
-				Expect(err).To(HaveOccurred())
-				Expect(err.Error()).To(ContainSubstring("name already exists"))
-			})
-
-			It("[test_id:4655]should fail if the new name is empty", func() {
-				err := cli.Rename(vm1.Name, &v1.RenameOptions{})
-				Expect(err).To(HaveOccurred())
-				Expect(err.Error()).To(ContainSubstring("Please provide a new name for the VM"))
-			})
-
-			It("[test_id:4656]should fail if the new name is invalid", func() {
-				err := cli.Rename(vm1.Name, &v1.RenameOptions{NewName: "invalid name <>?:;"})
-				Expect(err).To(HaveOccurred())
-				Expect(err.Error()).To(ContainSubstring("The VM's new name is not valid"))
-			})
-
-			It("[test_id:4657]should fail if the new name is identical to the current name", func() {
-				err := cli.Rename(vm1.Name, &v1.RenameOptions{NewName: vm1.Name})
-				Expect(err).To(HaveOccurred())
-				Expect(err.Error()).To(ContainSubstring("identical"))
-			})
-
-			It("[test_id:4658]should fail if the VM is running", func() {
-				err := cli.Start(vm1.Name)
-				Expect(err).ToNot(HaveOccurred())
-
-				err = cli.Rename(vm1.Name, &v1.RenameOptions{NewName: vm1.Name + "new"})
-				Expect(err).To(HaveOccurred())
-				Expect(err.Error()).To(ContainSubstring("running"))
-			})
-
-			It("[test_id:4659]should succeed", func() {
-				err := cli.Rename(vm1.Name, &v1.RenameOptions{NewName: vm1.Name + "new"})
-				Expect(err).ToNot(HaveOccurred())
-
-				Eventually(func() error {
-					_, err := cli.Get(vm1.Name+"new", &k8smetav1.GetOptions{})
-
-					return err
-				}, 10*time.Second, 1*time.Second).Should(BeNil())
-
-				Eventually(func() error {
-					_, err = cli.Get(vm1.Name, &k8smetav1.GetOptions{})
-
-					return err
-				}, 10*time.Second, 1*time.Second).Should(HaveOccurred())
-				Expect(errors.IsNotFound(err)).To(BeTrue())
-			})
-		})
-	})
 })
+
+func isKubemacpoolDeployed(virtClient kubecli.KubevirtClient) (bool, error) {
+	podList, err := virtClient.CoreV1().Pods(k8smetav1.NamespaceAll).List(context.Background(), k8smetav1.ListOptions{LabelSelector: "app=kubemacpool"})
+	if err != nil {
+		return false, err
+	}
+	return len(podList.Items) > 0, nil
+}
 
 func getExpectedPodName(vm *v1.VirtualMachine) string {
 	maxNameLength := 63

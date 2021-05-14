@@ -38,6 +38,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	libvirt "libvirt.org/libvirt-go"
 
+	agentpoller "kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/agent-poller"
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/converter"
 
 	ephemeraldiskutils "kubevirt.io/kubevirt/pkg/ephemeral-disk-utils"
@@ -128,7 +129,28 @@ var _ = Describe("Manager", func() {
 			Expect(err).To(BeNil())
 			mockConn.EXPECT().DomainDefineXML(string(xml)).Return(mockDomain, nil)
 			mockDomain.EXPECT().GetState().Return(libvirt.DOMAIN_SHUTDOWN, 1, nil)
-			mockDomain.EXPECT().Create().Return(nil)
+			mockDomain.EXPECT().CreateWithFlags(libvirt.DOMAIN_NONE).Return(nil)
+			mockDomain.EXPECT().GetXMLDesc(libvirt.DomainXMLFlags(0)).MaxTimes(2).Return(string(xml), nil)
+			manager, _ := NewLibvirtDomainManager(mockConn, testVirtShareDir, nil, 0, nil, "/usr/share/OVMF")
+			newspec, err := manager.SyncVMI(vmi, true, &cmdv1.VirtualMachineOptions{VirtualMachineSMBios: &cmdv1.SMBios{}})
+			Expect(err).To(BeNil())
+			Expect(newspec).ToNot(BeNil())
+		})
+		It("should define and start a new VirtualMachineInstance with StartStrategy paused", func() {
+			// Make sure that we always free the domain after use
+			mockDomain.EXPECT().Free()
+			vmi := newVMI(testNamespace, testVmName)
+			strategy := v1.StartStrategyPaused
+			vmi.Spec.StartStrategy = &strategy
+			mockConn.EXPECT().LookupDomainByName(testDomainName).Return(mockDomain, libvirt.Error{Code: libvirt.ERR_NO_DOMAIN})
+
+			domainSpec := expectIsolationDetectionForVMI(vmi)
+
+			xml, err := xml.MarshalIndent(domainSpec, "", "\t")
+			Expect(err).To(BeNil())
+			mockConn.EXPECT().DomainDefineXML(string(xml)).Return(mockDomain, nil)
+			mockDomain.EXPECT().GetState().Return(libvirt.DOMAIN_SHUTDOWN, 1, nil)
+			mockDomain.EXPECT().CreateWithFlags(libvirt.DOMAIN_START_PAUSED).Return(nil)
 			mockDomain.EXPECT().GetXMLDesc(libvirt.DomainXMLFlags(0)).MaxTimes(2).Return(string(xml), nil)
 			manager, _ := NewLibvirtDomainManager(mockConn, testVirtShareDir, nil, 0, nil, "/usr/share/OVMF")
 			newspec, err := manager.SyncVMI(vmi, true, &cmdv1.VirtualMachineOptions{VirtualMachineSMBios: &cmdv1.SMBios{}})
@@ -149,7 +171,7 @@ var _ = Describe("Manager", func() {
 			Expect(err).To(BeNil())
 			mockConn.EXPECT().DomainDefineXML(string(xml)).Return(mockDomain, nil)
 			mockDomain.EXPECT().GetState().Return(libvirt.DOMAIN_SHUTDOWN, 1, nil)
-			mockDomain.EXPECT().Create().Return(nil)
+			mockDomain.EXPECT().CreateWithFlags(libvirt.DOMAIN_NONE).Return(nil)
 			mockDomain.EXPECT().GetXMLDesc(libvirt.DomainXMLFlags(0)).MaxTimes(2).Return(string(xml), nil)
 			manager, _ := NewLibvirtDomainManager(mockConn, testVirtShareDir, nil, 0, nil, "/usr/share/OVMF")
 			newspec, err := manager.SyncVMI(vmi, true, &cmdv1.VirtualMachineOptions{VirtualMachineSMBios: &cmdv1.SMBios{}})
@@ -169,7 +191,7 @@ var _ = Describe("Manager", func() {
 			Expect(err).To(BeNil())
 			mockConn.EXPECT().DomainDefineXML(string(xml)).Return(mockDomain, nil)
 			mockDomain.EXPECT().GetState().Return(libvirt.DOMAIN_SHUTDOWN, 1, nil)
-			mockDomain.EXPECT().Create().Return(nil)
+			mockDomain.EXPECT().CreateWithFlags(libvirt.DOMAIN_NONE).Return(nil)
 			mockDomain.EXPECT().GetXMLDesc(libvirt.DomainXMLFlags(0)).MaxTimes(2).Return(string(xml), nil)
 			manager, _ := NewLibvirtDomainManager(mockConn, testVirtShareDir, nil, 0, nil, "/usr/share/OVMF")
 			newspec, err := manager.SyncVMI(vmi, true, &cmdv1.VirtualMachineOptions{VirtualMachineSMBios: &cmdv1.SMBios{}})
@@ -203,7 +225,7 @@ var _ = Describe("Manager", func() {
 
 				mockConn.EXPECT().LookupDomainByName(testDomainName).Return(mockDomain, nil)
 				mockDomain.EXPECT().GetState().Return(state, 1, nil)
-				mockDomain.EXPECT().Create().Return(nil)
+				mockDomain.EXPECT().CreateWithFlags(libvirt.DOMAIN_NONE).Return(nil)
 				mockDomain.EXPECT().GetXMLDesc(libvirt.DomainXMLFlags(0)).MaxTimes(2).Return(string(xml), nil)
 				manager, _ := NewLibvirtDomainManager(mockConn, testVirtShareDir, nil, 0, nil, "/usr/share/OVMF")
 				newspec, err := manager.SyncVMI(vmi, true, &cmdv1.VirtualMachineOptions{VirtualMachineSMBios: &cmdv1.SMBios{}})
@@ -399,7 +421,7 @@ var _ = Describe("Manager", func() {
 				return mockDomain, nil
 			})
 			mockDomain.EXPECT().GetState().Return(libvirt.DOMAIN_SHUTDOWN, 1, nil)
-			mockDomain.EXPECT().Create().Return(nil)
+			mockDomain.EXPECT().CreateWithFlags(libvirt.DOMAIN_NONE).Return(nil)
 			mockDomain.EXPECT().GetXMLDesc(libvirt.DomainXMLFlags(0)).MaxTimes(2).Return(string(xmlDomain), nil)
 			manager, _ := NewLibvirtDomainManager(mockConn, "fake", nil, 0, nil, "/usr/share/OVMF")
 			newspec, err := manager.SyncVMI(vmi, true, &cmdv1.VirtualMachineOptions{
@@ -530,7 +552,7 @@ var _ = Describe("Manager", func() {
 			Expect(err).ToNot(HaveOccurred())
 			mockConn.EXPECT().DomainDefineXML(string(xmlDomain)).Return(mockDomain, nil)
 			mockDomain.EXPECT().GetState().Return(libvirt.DOMAIN_SHUTDOWN, 1, nil)
-			mockDomain.EXPECT().Create().Return(nil)
+			mockDomain.EXPECT().CreateWithFlags(libvirt.DOMAIN_NONE).Return(nil)
 			mockDomain.EXPECT().AttachDevice(strings.ToLower(string(attachBytes)))
 			mockDomain.EXPECT().GetXMLDesc(libvirt.DomainXMLFlags(0)).MaxTimes(2).Return(string(xmlDomain2), nil)
 			manager, _ := NewLibvirtDomainManager(mockConn, testVirtShareDir, nil, 0, nil, "/usr/share/OVMF")
@@ -640,7 +662,7 @@ var _ = Describe("Manager", func() {
 
 			mockConn.EXPECT().DomainDefineXML(gomock.Any()).Return(mockDomain, nil)
 			mockDomain.EXPECT().GetState().Return(libvirt.DOMAIN_SHUTDOWN, 1, nil)
-			mockDomain.EXPECT().Create().Return(nil)
+			mockDomain.EXPECT().CreateWithFlags(libvirt.DOMAIN_NONE).Return(nil)
 			mockDomain.EXPECT().DetachDevice(strings.ToLower(string(detachBytes)))
 			mockDomain.EXPECT().GetXMLDesc(libvirt.DomainXMLFlags(0)).MaxTimes(2).Return(string(xmlDomain), nil)
 			manager, _ := NewLibvirtDomainManager(mockConn, testVirtShareDir, nil, 0, nil, "/usr/share/OVMF")
@@ -720,7 +742,7 @@ var _ = Describe("Manager", func() {
 			}
 			mockConn.EXPECT().DomainDefineXML(string(xmlDomain)).Return(mockDomain, nil)
 			mockDomain.EXPECT().GetState().Return(libvirt.DOMAIN_SHUTDOWN, 1, nil)
-			mockDomain.EXPECT().Create().Return(nil)
+			mockDomain.EXPECT().CreateWithFlags(libvirt.DOMAIN_NONE).Return(nil)
 			mockDomain.EXPECT().GetXMLDesc(libvirt.DomainXMLFlags(0)).MaxTimes(2).Return(string(xmlDomain), nil)
 			manager, _ := NewLibvirtDomainManager(mockConn, testVirtShareDir, nil, 0, nil, "/usr/share/OVMF")
 			newspec, err := manager.SyncVMI(vmi, true, &cmdv1.VirtualMachineOptions{VirtualMachineSMBios: &cmdv1.SMBios{}})
@@ -821,7 +843,7 @@ var _ = Describe("Manager", func() {
 			Expect(err).ToNot(HaveOccurred())
 			mockConn.EXPECT().DomainDefineXML(string(xmlDomain)).Return(mockDomain, nil)
 			mockDomain.EXPECT().GetState().Return(libvirt.DOMAIN_SHUTDOWN, 1, nil)
-			mockDomain.EXPECT().Create().Return(nil)
+			mockDomain.EXPECT().CreateWithFlags(libvirt.DOMAIN_NONE).Return(nil)
 			mockDomain.EXPECT().GetXMLDesc(libvirt.DomainXMLFlags(0)).MaxTimes(2).Return(string(xmlDomain2), nil)
 			manager, _ := NewLibvirtDomainManager(mockConn, testVirtShareDir, nil, 0, nil, "/usr/share/OVMF")
 			newspec, err := manager.SyncVMI(vmi, true, &cmdv1.VirtualMachineOptions{VirtualMachineSMBios: &cmdv1.SMBios{}})
@@ -893,7 +915,7 @@ var _ = Describe("Manager", func() {
 			mockDomain.EXPECT().GetState().AnyTimes().Return(libvirt.DOMAIN_RUNNING, 1, nil)
 			mockConn.EXPECT().LookupDomainByName(testDomainName).Return(mockDomain, nil)
 			mockConn.EXPECT().LookupDomainByName(testDomainName).Return(mockDomain, nil)
-			mockDomain.EXPECT().GetJobInfo().AnyTimes().Return(fake_jobinfo, nil)
+			mockDomain.EXPECT().GetJobStats(libvirt.DomainGetJobStatsFlags(0)).AnyTimes().Return(fake_jobinfo, nil)
 			mockDomain.EXPECT().AbortJob()
 			mockDomain.EXPECT().GetXMLDesc(gomock.Eq(libvirt.DomainXMLFlags(0))).AnyTimes().Return(string(xml), nil)
 			mockDomain.EXPECT().
@@ -940,7 +962,7 @@ var _ = Describe("Manager", func() {
 			mockDomain.EXPECT().GetState().AnyTimes().Return(libvirt.DOMAIN_RUNNING, 1, nil)
 			mockConn.EXPECT().LookupDomainByName(testDomainName).Return(mockDomain, nil)
 			mockConn.EXPECT().LookupDomainByName(testDomainName).Return(mockDomain, nil)
-			mockDomain.EXPECT().GetJobInfo().AnyTimes().Return(fake_jobinfo, nil)
+			mockDomain.EXPECT().GetJobStats(libvirt.DomainGetJobStatsFlags(0)).AnyTimes().Return(fake_jobinfo, nil)
 			mockDomain.EXPECT().AbortJob()
 			mockDomain.EXPECT().GetXMLDesc(gomock.Eq(libvirt.DomainXMLFlags(0))).AnyTimes().Return(string(xml), nil)
 			mockDomain.EXPECT().
@@ -994,7 +1016,7 @@ var _ = Describe("Manager", func() {
 			mockDomain.EXPECT().GetState().AnyTimes().Return(libvirt.DOMAIN_RUNNING, 1, nil)
 			mockConn.EXPECT().LookupDomainByName(testDomainName).Return(mockDomain, nil)
 			mockConn.EXPECT().LookupDomainByName(testDomainName).Return(mockDomain, nil)
-			mockDomain.EXPECT().GetJobInfo().AnyTimes().DoAndReturn(func() (*libvirt.DomainJobInfo, error) {
+			mockDomain.EXPECT().GetJobStats(libvirt.DomainGetJobStatsFlags(0)).AnyTimes().DoAndReturn(func(flag libvirt.DomainGetJobStatsFlags) (*libvirt.DomainJobInfo, error) {
 				return fake_jobinfo(), nil
 			})
 			mockDomain.EXPECT().GetXMLDesc(gomock.Eq(libvirt.DomainXMLFlags(0))).AnyTimes().DoAndReturn(func(_ libvirt.DomainXMLFlags) (string, error) {
@@ -1043,7 +1065,7 @@ var _ = Describe("Manager", func() {
 			Expect(err).To(BeNil())
 			mockDomain.EXPECT().GetState().AnyTimes().Return(libvirt.DOMAIN_RUNNING, 1, nil)
 			mockConn.EXPECT().LookupDomainByName(testDomainName).AnyTimes().Return(mockDomain, nil)
-			mockDomain.EXPECT().GetJobInfo().AnyTimes().Return(fake_jobinfo, nil)
+			mockDomain.EXPECT().GetJobStats(libvirt.DomainGetJobStatsFlags(0)).AnyTimes().Return(fake_jobinfo, nil)
 			mockDomain.EXPECT().AbortJob().MaxTimes(1)
 			mockDomain.EXPECT().GetXMLDesc(gomock.Eq(libvirt.DOMAIN_XML_MIGRATABLE)).AnyTimes().Return(string(xml), nil)
 			mockDomain.EXPECT().GetXMLDesc(gomock.Eq(libvirt.DOMAIN_XML_INACTIVE)).AnyTimes().Return(string(xml), nil)
@@ -1085,6 +1107,158 @@ var _ = Describe("Manager", func() {
 			manager, _ := NewLibvirtDomainManager(mockConn, testVirtShareDir, nil, 0, nil, "/usr/share/OVMF")
 			err = manager.CancelVMIMigration(vmi)
 			Expect(err).To(BeNil())
+		})
+		It("migration cancellation should be finilized even if we missed status update", func() {
+			isMigrationAbortSet := make(chan bool, 1)
+			defer close(isMigrationAbortSet)
+
+			migrationErrorChan := make(chan error)
+			defer close(migrationErrorChan)
+			// Make sure that we always free the domain after use
+			mockDomain.EXPECT().Free().AnyTimes()
+			fake_jobinfo := func() *libvirt.DomainJobInfo {
+				return &libvirt.DomainJobInfo{
+					Type:          libvirt.DOMAIN_JOB_NONE,
+					DataRemaining: uint64(0),
+				}
+			}()
+			fake_jobinfo_running := func() *libvirt.DomainJobInfo {
+				return &libvirt.DomainJobInfo{
+					Type:          libvirt.DOMAIN_JOB_UNBOUNDED,
+					DataRemaining: uint64(32479827777),
+				}
+			}()
+
+			options := &cmdclient.MigrationOptions{
+				Bandwidth:               resource.MustParse("64Mi"),
+				ProgressTimeout:         3,
+				CompletionTimeoutPerGiB: 150,
+			}
+			vmi := newVMI(testNamespace, testVmName)
+			vmi.Status.MigrationState = &v1.VirtualMachineInstanceMigrationState{
+				MigrationUID: "111222333",
+			}
+
+			domainSpec := expectIsolationDetectionForVMI(vmi)
+			domainSpec.Metadata.KubeVirt.Migration = &api.MigrationMetadata{
+
+				UID:         vmi.Status.MigrationState.MigrationUID,
+				AbortStatus: string(v1.MigrationAbortInProgress),
+			}
+
+			domainXml, err := xml.MarshalIndent(domainSpec, "", "\t")
+			Expect(err).To(BeNil())
+			metadataXml, err := xml.MarshalIndent(domainSpec.Metadata.KubeVirt, "", "\t")
+			Expect(err).NotTo(HaveOccurred())
+			mockDomain.EXPECT().GetXMLDesc(gomock.Any()).AnyTimes().Return(string(domainXml), nil)
+			mockDomain.EXPECT().
+				GetMetadata(libvirt.DOMAIN_METADATA_ELEMENT, "http://kubevirt.io", libvirt.DOMAIN_AFFECT_CONFIG).
+				AnyTimes().
+				Return(string(metadataXml), nil)
+			manager := &LibvirtDomainManager{
+				virConn:                mockConn,
+				virtShareDir:           testVirtShareDir,
+				notifier:               nil,
+				lessPVCSpaceToleration: 0,
+			}
+			mockDomain.EXPECT().GetState().AnyTimes().Return(libvirt.DOMAIN_RUNNING, 1, nil)
+			mockConn.EXPECT().LookupDomainByName(testDomainName).Return(mockDomain, nil)
+			mockConn.EXPECT().LookupDomainByName(testDomainName).Return(mockDomain, nil)
+			gomock.InOrder(
+				mockDomain.EXPECT().GetJobStats(libvirt.DomainGetJobStatsFlags(0)).Return(fake_jobinfo_running, nil),
+				mockDomain.EXPECT().GetJobStats(libvirt.DomainGetJobStatsFlags(0)).Return(fake_jobinfo, nil),
+			)
+			mockConn.EXPECT().DomainDefineXML(gomock.Any()).DoAndReturn(func(domainXml string) (cli.VirDomain, error) {
+				Expect(strings.Contains(domainXml, string(v1.MigrationAbortSucceeded))).To(BeTrue())
+				isMigrationAbortSet <- true
+				return mockDomain, nil
+			})
+
+			monitor := newMigrationMonitor(vmi, manager, options, migrationErrorChan)
+			monitor.startMonitor()
+			Eventually(func() bool {
+				select {
+				case isSet := <-isMigrationAbortSet:
+					return isSet
+				default:
+				}
+				return false
+			}, 20*time.Second, 2).Should(BeTrue(), "migration cancelled result wasn't set")
+		})
+		It("migration failure should be finilized even if we missed status update", func() {
+			isMigrationFailedSet := make(chan bool, 1)
+			defer close(isMigrationFailedSet)
+
+			migrationErrorChan := make(chan error)
+			defer close(migrationErrorChan)
+			// Make sure that we always free the domain after use
+			mockDomain.EXPECT().Free().AnyTimes()
+			fake_jobinfo := func() *libvirt.DomainJobInfo {
+				return &libvirt.DomainJobInfo{
+					Type:          libvirt.DOMAIN_JOB_NONE,
+					DataRemaining: uint64(0),
+				}
+			}()
+			fake_jobinfo_running := func() *libvirt.DomainJobInfo {
+				return &libvirt.DomainJobInfo{
+					Type:          libvirt.DOMAIN_JOB_UNBOUNDED,
+					DataRemaining: uint64(32479827777),
+				}
+			}()
+
+			options := &cmdclient.MigrationOptions{
+				Bandwidth:               resource.MustParse("64Mi"),
+				ProgressTimeout:         3,
+				CompletionTimeoutPerGiB: 150,
+			}
+			vmi := newVMI(testNamespace, testVmName)
+			vmi.Status.MigrationState = &v1.VirtualMachineInstanceMigrationState{
+				MigrationUID: "111222333",
+			}
+
+			domainSpec := expectIsolationDetectionForVMI(vmi)
+			domainSpec.Metadata.KubeVirt.Migration = &api.MigrationMetadata{
+				UID: vmi.Status.MigrationState.MigrationUID,
+			}
+
+			domainXml, err := xml.MarshalIndent(domainSpec, "", "\t")
+			Expect(err).To(BeNil())
+			metadataXml, err := xml.MarshalIndent(domainSpec.Metadata.KubeVirt, "", "\t")
+			Expect(err).NotTo(HaveOccurred())
+			mockDomain.EXPECT().GetXMLDesc(gomock.Any()).AnyTimes().Return(string(domainXml), nil)
+			mockDomain.EXPECT().
+				GetMetadata(libvirt.DOMAIN_METADATA_ELEMENT, "http://kubevirt.io", libvirt.DOMAIN_AFFECT_CONFIG).
+				AnyTimes().
+				Return(string(metadataXml), nil)
+			manager := &LibvirtDomainManager{
+				virConn:                mockConn,
+				virtShareDir:           testVirtShareDir,
+				notifier:               nil,
+				lessPVCSpaceToleration: 0,
+			}
+			mockDomain.EXPECT().GetState().AnyTimes().Return(libvirt.DOMAIN_RUNNING, 1, nil)
+			mockConn.EXPECT().LookupDomainByName(testDomainName).Return(mockDomain, nil)
+			mockConn.EXPECT().LookupDomainByName(testDomainName).Return(mockDomain, nil)
+			gomock.InOrder(
+				mockDomain.EXPECT().GetJobStats(libvirt.DomainGetJobStatsFlags(0)).Return(fake_jobinfo_running, nil),
+				mockDomain.EXPECT().GetJobStats(libvirt.DomainGetJobStatsFlags(0)).Return(fake_jobinfo, nil),
+			)
+			mockConn.EXPECT().DomainDefineXML(gomock.Any()).DoAndReturn(func(domainXml string) (cli.VirDomain, error) {
+				Expect(strings.Contains(domainXml, "<failed>true</failed>")).To(BeTrue())
+				isMigrationFailedSet <- true
+				return mockDomain, nil
+			})
+
+			monitor := newMigrationMonitor(vmi, manager, options, migrationErrorChan)
+			monitor.startMonitor()
+			Eventually(func() bool {
+				select {
+				case isSet := <-isMigrationFailedSet:
+					return isSet
+				default:
+				}
+				return false
+			}, 20*time.Second, 2).Should(BeTrue(), "migration failed result wasn't set")
 		})
 
 	})
@@ -1144,7 +1318,7 @@ var _ = Describe("Manager", func() {
 
 			domainXml, err := xml.MarshalIndent(domainSpec, "", "\t")
 			Expect(err).To(BeNil())
-			mockDomain.EXPECT().GetJobInfo().AnyTimes().Return(fake_jobinfo, nil)
+			mockDomain.EXPECT().GetJobStats(libvirt.DomainGetJobStatsFlags(0)).AnyTimes().Return(fake_jobinfo, nil)
 			gomock.InOrder(
 				mockConn.EXPECT().DomainDefineXML(gomock.Any()).Return(mockDomain, nil),
 				mockConn.EXPECT().DomainDefineXML(gomock.Any()).DoAndReturn(func(domainXml string) (cli.VirDomain, error) {
@@ -1448,6 +1622,92 @@ var _ = Describe("Manager", func() {
 			domSpec, err := libvirtmanager.getDomainSpec(mockDomain)
 			Expect(err).ToNot(HaveOccurred())
 			Expect(domSpec).ToNot(BeNil())
+		})
+
+		Context("on call to GetGuestOSInfo", func() {
+			var libvirtmanager DomainManager
+			var agentStore agentpoller.AsyncAgentStore
+
+			BeforeEach(func() {
+				agentStore = agentpoller.NewAsyncAgentStore()
+				libvirtmanager, _ = NewLibvirtDomainManager(mockConn, testVirtShareDir, nil, 0, &agentStore, "/usr/share/OVMF")
+			})
+
+			It("should report nil when no OS info exists in the cache", func() {
+				Expect(libvirtmanager.GetGuestOSInfo()).To(BeNil())
+			})
+
+			It("should report OS info when it exists in the cache", func() {
+				fakeInfo := api.GuestOSInfo{
+					Name: "TestGuestOSName",
+				}
+				agentStore.Store(agentpoller.GET_OSINFO, fakeInfo)
+
+				osInfo := libvirtmanager.GetGuestOSInfo()
+				Expect(*osInfo).To(Equal(fakeInfo))
+			})
+		})
+
+		Context("on call to InterfacesStatus", func() {
+			var libvirtmanager DomainManager
+			var agentStore agentpoller.AsyncAgentStore
+			fakeDomInterfaces := []api.Interface{
+				{
+					MAC: &api.MAC{
+						MAC: "00:00:00:00:00:01",
+					},
+					Alias: api.NewUserDefinedAlias("eth1"),
+				},
+			}
+			fakeInterfaces := []api.InterfaceStatus{
+				{
+					Name: "eth2",
+					Mac:  "00:00:00:00:00:02",
+				},
+			}
+
+			BeforeEach(func() {
+				agentStore = agentpoller.NewAsyncAgentStore()
+				libvirtmanager, _ = NewLibvirtDomainManager(mockConn, testVirtShareDir, nil, 0, &agentStore, "/usr/share/OVMF")
+			})
+
+			It("should return nil when no interfaces exists in the cache, nor as argument", func() {
+				Expect(libvirtmanager.InterfacesStatus(nil)).To(BeNil())
+			})
+
+			It("should return nil when no interfaces exists in the cache", func() {
+				Expect(libvirtmanager.InterfacesStatus(fakeDomInterfaces)).To(BeNil())
+			})
+
+			It("should return merged list when interfaces exists on both the cache and argument", func() {
+				expectedResult := []api.InterfaceStatus{
+					{
+						Name: fakeInterfaces[0].Name,
+						Mac:  fakeInterfaces[0].Mac,
+					},
+					{
+						Name: fakeDomInterfaces[0].Alias.GetName(),
+						Mac:  fakeDomInterfaces[0].MAC.MAC,
+					},
+				}
+				agentStore.Store(agentpoller.GET_INTERFACES, fakeInterfaces)
+
+				interfaces := libvirtmanager.InterfacesStatus(fakeDomInterfaces)
+				Expect(interfaces).To(Equal(expectedResult))
+			})
+
+			It("should return merged list when interfaces exists on the cache only", func() {
+				expectedResult := []api.InterfaceStatus{
+					{
+						Name: fakeInterfaces[0].Name,
+						Mac:  fakeInterfaces[0].Mac,
+					},
+				}
+				agentStore.Store(agentpoller.GET_INTERFACES, fakeInterfaces)
+
+				interfaces := libvirtmanager.InterfacesStatus(nil)
+				Expect(interfaces).To(Equal(expectedResult))
+			})
 		})
 	})
 

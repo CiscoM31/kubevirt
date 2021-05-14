@@ -83,7 +83,7 @@ var _ = SIGDescribe("[Serial]DataVolume Integration", func() {
 					Skip("HonorWaitForFirstConsumer is disabled in CDI, skipping tests relying on it")
 				}
 			})
-			It("[test_id:3189]should be successfully started and stopped multiple times", func() {
+			It("[QUARANTINE][test_id:3189]should be successfully started and stopped multiple times", func() {
 
 				dataVolume := tests.NewRandomDataVolumeWithHttpImport(tests.GetUrl(tests.AlpineHttpUrl), tests.NamespaceTestDefault, k8sv1.ReadWriteOnce)
 				vmi := tests.NewRandomVMIWithDataVolume(dataVolume.Name)
@@ -115,7 +115,7 @@ var _ = SIGDescribe("[Serial]DataVolume Integration", func() {
 				Expect(err).To(BeNil())
 			})
 
-			It("[test_id:5252]should be successfully started when using a PVC volume owned by a DataVolume", func() {
+			It("[QUARANTINE][test_id:5252]should be successfully started when using a PVC volume owned by a DataVolume", func() {
 				dataVolume := tests.NewRandomDataVolumeWithHttpImport(tests.GetUrl(tests.AlpineHttpUrl), tests.NamespaceTestDefault, k8sv1.ReadWriteOnce)
 				vmi := tests.NewRandomVMIWithPVC(dataVolume.Name)
 
@@ -685,8 +685,9 @@ var _ = SIGDescribe("[Serial]DataVolume Integration", func() {
 
 			table.DescribeTable("deny then allow clone request on rook-ceph", func(role *rbacv1.Role, allServiceAccounts, allServiceAccountsInNamespace bool) {
 				vm := tests.NewRandomVMWithCloneDataVolume(dataVolume.Namespace, dataVolume.Name, tests.NamespaceTestDefault)
+				const volumeName = "sa"
 				saVol := v1.Volume{
-					Name: "sa",
+					Name: volumeName,
 					VolumeSource: v1.VolumeSource{
 						ServiceAccount: &v1.ServiceAccountVolumeSource{
 							ServiceAccountName: tests.AdminServiceAccountName,
@@ -695,6 +696,7 @@ var _ = SIGDescribe("[Serial]DataVolume Integration", func() {
 				}
 				vm.Spec.DataVolumeTemplates[0].Spec.PVC.StorageClassName = pointer.StringPtr(storageClass)
 				vm.Spec.Template.Spec.Volumes = append(vm.Spec.Template.Spec.Volumes, saVol)
+				vm.Spec.Template.Spec.Domain.Devices.Disks = append(vm.Spec.Template.Spec.Domain.Devices.Disks, v1.Disk{Name: volumeName})
 
 				vmBytes, err := json.Marshal(vm)
 				Expect(err).ToNot(HaveOccurred())

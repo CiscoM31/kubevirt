@@ -17,7 +17,7 @@
  *
  */
 
-package tests_test
+package storage
 
 import (
 	"context"
@@ -62,7 +62,7 @@ const (
 
 type VMICreationFunc func(string) *v1.VirtualMachineInstance
 
-var _ = Describe("Storage", func() {
+var _ = SIGDescribe("Storage", func() {
 	var err error
 	var virtClient kubecli.KubevirtClient
 
@@ -82,8 +82,6 @@ var _ = Describe("Storage", func() {
 		})
 
 		initNFS := func(targetImage string) *k8sv1.Pod {
-			tests.SkipNFSTestIfRunnigOnKindInfra()
-
 			// Prepare a NFS backed PV
 			By("Starting an NFS POD")
 			nfsPod := storageframework.RenderNFSServer("nfsserver", targetImage)
@@ -154,7 +152,6 @@ var _ = Describe("Storage", func() {
 					}
 				})
 				table.DescribeTable("started", func(newVMI VMICreationFunc, storageEngine string, family k8sv1.IPFamily, imageOwnedByQEMU bool) {
-					tests.SkipPVCTestIfRunnigOnKindInfra()
 					if family == k8sv1.IPv6Protocol {
 						libnet.SkipWhenNotDualStackCluster(virtClient)
 					}
@@ -189,8 +186,6 @@ var _ = Describe("Storage", func() {
 			})
 
 			table.DescribeTable("should be successfully started and stopped multiple times", func(newVMI VMICreationFunc) {
-				tests.SkipPVCTestIfRunnigOnKindInfra()
-
 				vmi = newVMI(tests.DiskAlpineHostPath)
 
 				num := 3
@@ -308,8 +303,6 @@ var _ = Describe("Storage", func() {
 			}, 120)
 
 			It("should be successfully started and virtiofs could be accessed", func() {
-				tests.SkipPVCTestIfRunnigOnKindInfra()
-
 				pvcName := fmt.Sprintf("disk-%s", pvc)
 				vmi := tests.NewRandomVMIWithPVCFS(pvcName)
 				vmi.Spec.Domain.Resources.Requests[k8sv1.ResourceMemory] = resource.MustParse("512Mi")
@@ -361,8 +354,6 @@ var _ = Describe("Storage", func() {
 			})
 
 			It("should be successfully started and virtiofs could be accessed", func() {
-				tests.SkipPVCTestIfRunnigOnKindInfra()
-
 				vmi := tests.NewRandomVMIWithFSFromDataVolume(dataVolume.Name)
 				_, err := virtClient.CdiClient().CdiV1alpha1().DataVolumes(dataVolume.Namespace).Create(context.Background(), dataVolume, metav1.CreateOptions{})
 				Expect(err).ToNot(HaveOccurred())
@@ -454,7 +445,6 @@ var _ = Describe("Storage", func() {
 
 				// The following case is mostly similar to the alpine PVC test above, except using different VirtualMachineInstance.
 				table.DescribeTable("started", func(newVMI VMICreationFunc, storageEngine string, family k8sv1.IPFamily) {
-					tests.SkipPVCTestIfRunnigOnKindInfra()
 					if family == k8sv1.IPv6Protocol {
 						libnet.SkipWhenNotDualStackCluster(virtClient)
 					}
@@ -475,14 +465,12 @@ var _ = Describe("Storage", func() {
 				},
 					table.Entry("[test_id:3136]with Ephemeral PVC", tests.NewRandomVMIWithEphemeralPVC, "", nil),
 					table.Entry("[test_id:4619]with Ephemeral PVC from NFS using ipv4 address of the NFS pod", tests.NewRandomVMIWithEphemeralPVC, "nfs", k8sv1.IPv4Protocol),
-					table.Entry("[QUARANTINE][owner:@sig-storage]with Ephemeral PVC from NFS using ipv6 address of the NFS pod", tests.NewRandomVMIWithEphemeralPVC, "nfs", k8sv1.IPv6Protocol),
+					table.Entry("[QUARANTINE]with Ephemeral PVC from NFS using ipv6 address of the NFS pod", tests.NewRandomVMIWithEphemeralPVC, "nfs", k8sv1.IPv6Protocol),
 				)
 			})
 
 			// Not a candidate for testing on NFS because the VMI is restarted and NFS PVC can't be re-used
 			It("[test_id:3137]should not persist data", func() {
-				tests.SkipPVCTestIfRunnigOnKindInfra()
-
 				vmi = tests.NewRandomVMIWithEphemeralPVC(tests.DiskAlpineHostPath)
 
 				By("Starting the VirtualMachineInstance")
@@ -547,8 +535,6 @@ var _ = Describe("Storage", func() {
 
 			// Not a candidate for testing on NFS because the VMI is restarted and NFS PVC can't be re-used
 			It("[test_id:3138]should start vmi multiple times", func() {
-				tests.SkipPVCTestIfRunnigOnKindInfra()
-
 				vmi = tests.NewRandomVMIWithPVC(tests.DiskAlpineHostPath)
 				tests.AddPVCDisk(vmi, "disk1", "virtio", tests.DiskCustomHostPath)
 
@@ -891,8 +877,7 @@ var _ = Describe("Storage", func() {
 			})
 
 			// Not a candidate for NFS because local volumes are used in test
-			It("[owner:@sig-storage][test_id:1015] should be successfully started", func() {
-				tests.SkipPVCTestIfRunnigOnKindInfra()
+			It("[test_id:1015]should be successfully started", func() {
 				// Start the VirtualMachineInstance with the PVC attached
 				vmi = tests.NewRandomVMIWithPVC(tests.BlockDiskForTest)
 				// Without userdata the hostname isn't set correctly and the login expecter fails...

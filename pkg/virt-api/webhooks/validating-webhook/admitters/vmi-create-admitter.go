@@ -139,6 +139,7 @@ func ValidateVirtualMachineInstanceSpec(field *k8sfield.Path, spec *v1.VirtualMa
 	causes = append(causes, validateCpuPinning(field, spec)...)
 	causes = append(causes, validateCPUIsolatorThread(field, spec)...)
 	causes = append(causes, validateCPUFeaturePolicies(field, spec)...)
+	causes = append(causes, validateStartStrategy(field, spec)...)
 
 	maxNumberOfInterfacesExceeded := len(spec.Domain.Devices.Interfaces) > arrayLenMax
 	if maxNumberOfInterfacesExceeded {
@@ -860,12 +861,14 @@ func validateNetworkHasOnlyOneType(field *k8sfield.Path, cniTypesCount int, caus
 func validateBootOrder(field *k8sfield.Path, spec *v1.VirtualMachineInstanceSpec, volumeNameMap map[string]*v1.Volume) (bootOrderMap map[uint]bool, causes []metav1.StatusCause) {
 	// used to validate uniqueness of boot orders among disks and interfaces
 	bootOrderMap = make(map[uint]bool)
+	// to perform as set of volume / fs names
+	diskAndFilesystemNames := make(map[string]struct{})
 
 	for i, volume := range spec.Volumes {
 		volumeNameMap[volume.Name] = &spec.Volumes[i]
 	}
 
-	// Validate disks and volumes match up correctly
+	// Validate disks match volumes correctly
 	for idx, disk := range spec.Domain.Devices.Disks {
 		var matchingVolume *v1.Volume
 
@@ -900,7 +903,26 @@ func validateBootOrder(field *k8sfield.Path, spec *v1.VirtualMachineInstanceSpec
 			}
 			bootOrderMap[order] = true
 		}
+
+		diskAndFilesystemNames[disk.Name] = struct{}{}
 	}
+
+	for _, fs := range spec.Domain.Devices.Filesystems {
+		diskAndFilesystemNames[fs.Name] = struct{}{}
+	}
+
+	// Validate that volumes match disks and filesystems correctly
+	for idx, volume := range spec.Volumes {
+		if _, matchingDiskExists := diskAndFilesystemNames[volume.Name]; !matchingDiskExists {
+			causes = append(causes, metav1.StatusCause{
+				Type:    metav1.CauseTypeFieldValueInvalid,
+				Message: fmt.Sprintf(nameOfTypeNotFoundMessagePattern, field.Child("domain", "volumes").Index(idx).Child("name").String(), volume.Name),
+				Field:   field.Child("domain", "volumes").Index(idx).Child("name").String(),
+			})
+		}
+
+	}
+
 	return bootOrderMap, causes
 }
 
@@ -1008,6 +1030,28 @@ func validateRequestLimitOrCoresProvidedOnDedicatedCPUPlacement(field *k8sfield.
 			),
 			Field: field.Child("domain", "cpu", "dedicatedCpuPlacement").String(),
 		})
+	}
+	return causes
+}
+
+func validateStartStrategy(field *k8sfield.Path, spec *v1.VirtualMachineInstanceSpec) (causes []metav1.StatusCause) {
+	if spec.StartStrategy != nil {
+		if *spec.StartStrategy != v1.StartStrategyPaused {
+			causes = append(causes, metav1.StatusCause{
+				Type:    metav1.CauseTypeFieldValueInvalid,
+				Message: fmt.Sprintf("%s is set with an unrecognized option: %s", field.Child("startStrategy").String(), *spec.StartStrategy),
+				Field:   field.Child("startStrategy").String(),
+			})
+		} else if spec.LivenessProbe != nil {
+			causes = append(causes, metav1.StatusCause{
+				Type: metav1.CauseTypeFieldValueInvalid,
+				Message: fmt.Sprintf("either %s or %s should be provided.Pausing VMI with LivenessProbe is not supported",
+					field.Child("startStrategy").String(),
+					field.Child("livenessProbe").String(),
+				),
+				Field: field.Child("startStrategy").String(),
+			})
+		}
 	}
 	return causes
 }

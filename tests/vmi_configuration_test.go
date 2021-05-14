@@ -299,7 +299,7 @@ var _ = Describe("[sig-compute]Configurations", func() {
 				}
 				vmi.Spec.Domain.Resources = v1.ResourceRequirements{
 					Requests: kubev1.ResourceList{
-						kubev1.ResourceMemory: resource.MustParse("64M"),
+						kubev1.ResourceMemory: resource.MustParse("80M"),
 					},
 				}
 
@@ -368,7 +368,7 @@ var _ = Describe("[sig-compute]Configurations", func() {
 				}, 60)).To(Succeed(), "should report number of sockets")
 			})
 
-			It("[test_id:1663]should report 4 vCPUs under guest OS", func() {
+			It("[QUARANTINE][test_id:1663]should report 4 vCPUs under guest OS", func() {
 				vmi.Spec.Domain.CPU = &v1.CPU{
 					Threads: 2,
 					Sockets: 2,
@@ -1471,7 +1471,7 @@ var _ = Describe("[sig-compute]Configurations", func() {
 
 		Context("with Clock and timezone", func() {
 
-			It("[QUARANTINE][sig-compute][test_id:5268]guest should see timezone", func() {
+			It("[sig-compute][test_id:5268]guest should see timezone", func() {
 				vmi := tests.NewRandomVMIWithEphemeralDiskAndUserdata(cd.ContainerDiskFor(cd.ContainerDiskCirros), "#!/bin/bash\necho 'hello'\n")
 				timezone := "America/New_York"
 				tz := v1.ClockOffsetTimezone(timezone)
@@ -1507,6 +1507,40 @@ var _ = Describe("[sig-compute]Configurations", func() {
 			})
 		})
 
+		Context("with volumes, disks and filesystem defined", func() {
+
+			var vmi *v1.VirtualMachineInstance
+
+			BeforeEach(func() {
+				vmi = tests.NewRandomVMI()
+			})
+
+			It("should reject disk with missing volume", func() {
+				const diskName = "testdisk"
+				vmi.Spec.Domain.Devices.Disks = append(vmi.Spec.Domain.Devices.Disks, v1.Disk{
+					Name: diskName,
+				})
+				vmi, err = virtClient.VirtualMachineInstance(tests.NamespaceTestDefault).Create(vmi)
+				Expect(err).To(HaveOccurred())
+				const expectedErrMessage = "denied the request: spec.domain.devices.disks[0].Name '" + diskName + "' not found."
+				Expect(err.Error()).To(ContainSubstring(expectedErrMessage))
+			})
+
+			It("should reject volume with missing disk / file system", func() {
+				const volumeName = "testvolume"
+				vmi.Spec.Volumes = append(vmi.Spec.Volumes, v1.Volume{
+					Name: volumeName,
+					VolumeSource: v1.VolumeSource{
+						CloudInitNoCloud: &v1.CloudInitNoCloudSource{UserData: " "},
+					},
+				})
+				vmi, err = virtClient.VirtualMachineInstance(tests.NamespaceTestDefault).Create(vmi)
+				Expect(err).To(HaveOccurred())
+				const expectedErrMessage = "denied the request: spec.domain.volumes[0].name '" + volumeName + "' not found."
+				Expect(err.Error()).To(ContainSubstring(expectedErrMessage))
+			})
+
+		})
 	})
 
 	Context("[rfe_id:140][crit:medium][vendor:cnv-qe@redhat.com][level:component]with CPU spec", func() {
@@ -1545,7 +1579,7 @@ var _ = Describe("[sig-compute]Configurations", func() {
 		})
 
 		Context("[rfe_id:140][crit:medium][vendor:cnv-qe@redhat.com][level:component]when CPU model defined", func() {
-			It("[QUARANTINE][test_id:1678]should report defined CPU model", func() {
+			It("[test_id:1678]should report defined CPU model", func() {
 				supportedCPUs := tests.GetSupportedCPUModels(*nodes)
 				Expect(len(supportedCPUs)).ToNot(Equal(0))
 				cpuVmi.Spec.Domain.CPU = &v1.CPU{
@@ -1755,8 +1789,6 @@ var _ = Describe("[sig-compute]Configurations", func() {
 		})
 
 		It("[test_id:1681]should set appropriate cache modes", func() {
-			tests.SkipPVCTestIfRunnigOnKindInfra()
-
 			vmi := tests.NewRandomVMI()
 
 			By("adding disks to a VMI")
@@ -1805,8 +1837,6 @@ var _ = Describe("[sig-compute]Configurations", func() {
 		})
 
 		It("[test_id:5360]should set appropriate IO modes", func() {
-			tests.SkipPVCTestIfRunnigOnKindInfra()
-
 			vmi := tests.NewRandomVMI()
 
 			By("adding disks to a VMI")
@@ -1867,8 +1897,6 @@ var _ = Describe("[sig-compute]Configurations", func() {
 	Context("Block size configuration set", func() {
 
 		It("Should set BlockIO when using custom block sizes", func() {
-			tests.SkipPVCTestIfRunnigOnKindInfra()
-
 			By("creating a block volume")
 			tests.CreateBlockVolumePvAndPvc("1Gi")
 
@@ -1901,8 +1929,6 @@ var _ = Describe("[sig-compute]Configurations", func() {
 		})
 
 		It("Should set BlockIO when set to match volume block sizes on block devices", func() {
-			tests.SkipPVCTestIfRunnigOnKindInfra()
-
 			By("creating a block volume")
 			tests.CreateBlockVolumePvAndPvc("1Gi")
 

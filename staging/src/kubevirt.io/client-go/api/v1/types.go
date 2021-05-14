@@ -38,8 +38,6 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 
-	operatorsv1 "github.com/openshift/api/operator/v1"
-
 	cdiv1 "kubevirt.io/containerized-data-importer/pkg/apis/core/v1alpha1"
 )
 
@@ -80,6 +78,13 @@ type VirtualMachineInstanceList struct {
 // +k8s:openapi-gen=true
 type EvictionStrategy string
 
+// +k8s:openapi-gen=true
+type StartStrategy string
+
+const (
+	StartStrategyPaused StartStrategy = "Paused"
+)
+
 // VirtualMachineInstanceSpec is a description of a VirtualMachineInstance.
 //
 // +k8s:openapi-gen=true
@@ -112,7 +117,10 @@ type VirtualMachineInstanceSpec struct {
 	//
 	// +optional
 	EvictionStrategy *EvictionStrategy `json:"evictionStrategy,omitempty"`
-
+	// StartStrategy can be set to "Paused" if Virtual Machine should be started in paused state.
+	//
+	// +optional
+	StartStrategy *StartStrategy `json:"startStrategy,omitempty"`
 	// Grace period observed after signalling a VirtualMachineInstance to stop after which the VirtualMachineInstance is force terminated.
 	TerminationGracePeriodSeconds *int64 `json:"terminationGracePeriodSeconds,omitempty"`
 	// List of volumes that can be mounted by disks belonging to the vmi.
@@ -304,6 +312,11 @@ func (v *VirtualMachineInstance) WantsToHaveQOSGuaranteed() bool {
 	resources := v.Spec.Domain.Resources
 	return !resources.Requests.Memory().IsZero() && resources.Requests.Memory().Cmp(*resources.Limits.Memory()) == 0 &&
 		!resources.Requests.Cpu().IsZero() && resources.Requests.Cpu().Cmp(*resources.Limits.Cpu()) == 0
+}
+
+// ShouldStartPaused returns true if VMI should be started in paused state
+func (v *VirtualMachineInstance) ShouldStartPaused() bool {
+	return v.Spec.StartStrategy != nil && *v.Spec.StartStrategy == StartStrategyPaused
 }
 
 //
@@ -1103,9 +1116,8 @@ type StateChangeRequestAction string
 
 // These are the currently defined state change requests
 const (
-	StartRequest  StateChangeRequestAction = "Start"
-	StopRequest   StateChangeRequestAction = "Stop"
-	RenameRequest                          = "Rename"
+	StartRequest StateChangeRequestAction = "Start"
+	StopRequest  StateChangeRequestAction = "Stop"
 )
 
 // VirtualMachineStatus represents the status returned by the
@@ -1194,9 +1206,6 @@ const (
 	// VirtualMachinePaused is added in a virtual machine when its vmi
 	// signals with its own condition that it is paused.
 	VirtualMachinePaused VirtualMachineConditionType = "Paused"
-
-	// This condition indicates that the VM was renamed
-	RenameConditionType VirtualMachineConditionType = "RenameOperation"
 )
 
 //
@@ -1460,6 +1469,21 @@ type KubeVirtSpec struct {
 type CustomizeComponents struct {
 	// +listType=atomic
 	Patches []CustomizeComponentsPatch `json:"patches,omitempty"`
+
+	// Configure the value used for deployment and daemonset resources
+	Flags *Flags `json:"flags,omitempty"`
+}
+
+// Flags will create a patch that will replace all flags for the container's
+// command field. The only flags that will be used are those define. There are no
+// guarantees around forward/backward compatibility.  If set incorrectly this will
+// cause the resource when rolled out to error until flags are updated.
+//
+// +k8s:openapi-gen=true
+type Flags struct {
+	API        map[string]string `json:"api,omitempty"`
+	Controller map[string]string `json:"controller,omitempty"`
+	Handler    map[string]string `json:"handler,omitempty"`
 }
 
 // +k8s:openapi-gen=true
@@ -1487,6 +1511,26 @@ const (
 	KubeVirtUninstallStrategyBlockUninstallIfWorkloadsExist KubeVirtUninstallStrategy = "BlockUninstallIfWorkloadsExist"
 )
 
+// GenerationStatus keeps track of the generation for a given resource so that decisions about forced updates can be made.
+//
+// +k8s:openapi-gen=true
+type GenerationStatus struct {
+	// group is the group of the thing you're tracking
+	Group string `json:"group"`
+	// resource is the resource type of the thing you're tracking
+	Resource string `json:"resource"`
+	// namespace is where the thing you're tracking is
+	// +optional
+	Namespace string `json:"namespace,omitempty" optional:"true"`
+	// name is the name of the thing you're tracking
+	Name string `json:"name"`
+	// lastGeneration is the last generation of the workload controller involved
+	LastGeneration int64 `json:"lastGeneration"`
+	// hash is an optional field set for resources without generation that are content sensitive like secrets and configmaps
+	// +optional
+	Hash string `json:"hash,omitempty" optional:"true"`
+}
+
 // KubeVirtStatus represents information pertaining to a KubeVirt deployment.
 //
 // +k8s:openapi-gen=true
@@ -1504,7 +1548,7 @@ type KubeVirtStatus struct {
 	ObservedDeploymentID                    string              `json:"observedDeploymentID,omitempty" optional:"true"`
 	OutdatedVirtualMachineInstanceWorkloads *int                `json:"outdatedVirtualMachineInstanceWorkloads,omitempty" optional:"true"`
 	// +listType=atomic
-	Generations []operatorsv1.GenerationStatus `json:"generations,omitempty" optional:"true"`
+	Generations []GenerationStatus `json:"generations,omitempty" optional:"true"`
 }
 
 // KubeVirtPhase is a label for the phase of a KubeVirt deployment at the current time.
@@ -1652,13 +1696,6 @@ type VirtualMachineInstanceFileSystem struct {
 	FileSystemType string `json:"fileSystemType"`
 	UsedBytes      int    `json:"usedBytes"`
 	TotalBytes     int    `json:"totalBytes"`
-}
-
-// Options for a rename operation
-type RenameOptions struct {
-	metav1.TypeMeta `json:",inline"`
-	NewName         string  `json:"newName"`
-	OldName         *string `json:"oldName,omitempty"`
 }
 
 // AddVolumeOptions is provided when dynamically hot plugging a volume and disk

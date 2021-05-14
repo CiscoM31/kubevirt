@@ -19,7 +19,7 @@
 
 //go:generate mockgen -source $GOFILE -package=$GOPACKAGE -destination=generated_mock_$GOFILE
 
-package network
+package driver
 
 import (
 	"fmt"
@@ -39,6 +39,7 @@ import (
 
 	v1 "kubevirt.io/client-go/api/v1"
 	"kubevirt.io/client-go/log"
+	"kubevirt.io/kubevirt/pkg/network/cache"
 	"kubevirt.io/kubevirt/pkg/virt-handler/selinux"
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/network/dhcp"
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/network/dhcpv6"
@@ -47,44 +48,13 @@ import (
 const (
 	randomMacGenerationAttempts = 10
 	allowForwarding             = 1
-	libvirtUserAndGroupId       = "0"
+	LibvirtUserAndGroupId       = "0"
 )
-
-type VIF struct {
-	Name         string
-	IP           netlink.Addr
-	IPv6         netlink.Addr
-	MAC          net.HardwareAddr
-	Gateway      net.IP
-	GatewayIpv6  net.IP
-	Routes       *[]netlink.Route
-	Mtu          uint16
-	IPAMDisabled bool
-}
-
-type CriticalNetworkError struct {
-	Msg string
-}
-
-func (e *CriticalNetworkError) Error() string { return e.Msg }
-
-func (vif VIF) String() string {
-	return fmt.Sprintf(
-		"VIF: { Name: %s, IP: %s, Mask: %s, IPv6: %s, MAC: %s, Gateway: %s, MTU: %d, IPAMDisabled: %t}",
-		vif.Name,
-		vif.IP.IP,
-		vif.IP.Mask,
-		vif.IPv6,
-		vif.MAC,
-		vif.Gateway,
-		vif.Mtu,
-		vif.IPAMDisabled,
-	)
-}
 
 type NetworkHandler interface {
 	LinkByName(name string) (netlink.Link, error)
 	AddrList(link netlink.Link, family int) ([]netlink.Addr, error)
+	ReadIPAddressesFromLink(interfaceName string) (string, string, error)
 	RouteList(link netlink.Link, family int) ([]netlink.Route, error)
 	AddrDel(link netlink.Link, addr *netlink.Addr) error
 	AddrAdd(link netlink.Link, addr *netlink.Addr) error
@@ -99,7 +69,7 @@ type NetworkHandler interface {
 	SetRandomMac(iface string) (net.HardwareAddr, error)
 	GetMacDetails(iface string) (net.HardwareAddr, error)
 	LinkSetMaster(link netlink.Link, master *netlink.Bridge) error
-	StartDHCP(nic *VIF, serverAddr net.IP, bridgeInterfaceName string, dhcpOptions *v1.DHCPOptions, filterByMAC bool) error
+	StartDHCP(nic *cache.DhcpConfig, serverAddr net.IP, bridgeInterfaceName string, dhcpOptions *v1.DHCPOptions, filterByMAC bool) error
 	HasNatIptables(proto iptables.Protocol) bool
 	IsIpv6Enabled(interfaceName string) (bool, error)
 	IsIpv4Primary() (bool, error)
@@ -288,6 +258,39 @@ func composeNftablesLoad(proto iptables.Protocol) *exec.Cmd {
 	return exec.Command("nft", "-f", fmt.Sprintf("/etc/nftables/%s.nft", fnName))
 }
 
+func (h *NetworkUtilsHandler) ReadIPAddressesFromLink(interfaceName string) (string, string, error) {
+	link, err := h.LinkByName(interfaceName)
+	if err != nil {
+		log.Log.Reason(err).Errorf("failed to get a link for interface: %s", interfaceName)
+		return "", "", err
+	}
+
+	// get IP address
+	addrList, err := h.AddrList(link, netlink.FAMILY_ALL)
+	if err != nil {
+		log.Log.Reason(err).Errorf("failed to get a address for interface: %s", interfaceName)
+		return "", "", err
+	}
+
+	// no ip assigned. ipam disabled
+	if len(addrList) == 0 {
+		return "", "", nil
+	}
+
+	var ipv4, ipv6 string
+	for _, addr := range addrList {
+		if addr.IP.IsGlobalUnicast() {
+			if netutils.IsIPv6(addr.IP) && ipv6 == "" {
+				ipv6 = addr.IP.String()
+			} else if !netutils.IsIPv6(addr.IP) && ipv4 == "" {
+				ipv4 = addr.IP.String()
+			}
+		}
+	}
+
+	return ipv4, ipv6, nil
+}
+
 func (h *NetworkUtilsHandler) GetHostAndGwAddressesFromCIDR(s string) (string, string, error) {
 	ip, ipnet, err := net.ParseCIDR(s)
 	if err != nil {
@@ -362,7 +365,7 @@ func (h *NetworkUtilsHandler) SetRandomMac(iface string) (net.HardwareAddr, erro
 	return currentMac, nil
 }
 
-func (h *NetworkUtilsHandler) StartDHCP(nic *VIF, serverAddr net.IP, bridgeInterfaceName string, dhcpOptions *v1.DHCPOptions, filterByMAC bool) error {
+func (h *NetworkUtilsHandler) StartDHCP(nic *cache.DhcpConfig, serverAddr net.IP, bridgeInterfaceName string, dhcpOptions *v1.DHCPOptions, filterByMAC bool) error {
 	log.Log.V(4).Infof("StartDHCP network Nic: %+v", nic)
 	nameservers, searchDomains, err := converter.GetResolvConfDetailsFromPod()
 	if err != nil {
@@ -472,7 +475,7 @@ var DHCPServer = dhcp.SingleClientDHCPServer
 var DHCPv6Server = dhcpv6.SingleClientDHCPv6Server
 
 // filter out irrelevant routes
-func filterPodNetworkRoutes(routes []netlink.Route, nic *VIF) (filteredRoutes []netlink.Route) {
+func FilterPodNetworkRoutes(routes []netlink.Route, nic *cache.DhcpConfig) (filteredRoutes []netlink.Route) {
 	for _, route := range routes {
 		// don't create empty static routes
 		if route.Dst == nil && route.Src.Equal(nil) && route.Gw.Equal(nil) {

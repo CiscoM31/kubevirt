@@ -36,10 +36,10 @@ import (
 	"sync"
 	"time"
 
+	"kubevirt.io/kubevirt/pkg/network/cache"
 	cmdclient "kubevirt.io/kubevirt/pkg/virt-handler/cmd-client"
 	eventsclient "kubevirt.io/kubevirt/pkg/virt-launcher/notify-client"
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/converter"
-	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/network/cache"
 
 	k8sv1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -101,7 +101,7 @@ type DomainManager interface {
 	GetFilesystems() ([]v1.VirtualMachineInstanceFileSystem, error)
 	FinalizeVirtualMachineMigration(*v1.VirtualMachineInstance) error
 	InterfacesStatus(domainInterfaces []api.Interface) []api.InterfaceStatus
-	GetGuestOSInfo() api.GuestOSInfo
+	GetGuestOSInfo() *api.GuestOSInfo
 }
 
 type LibvirtDomainManager struct {
@@ -449,7 +449,7 @@ func (l *LibvirtDomainManager) preStartHook(vmi *v1.VirtualMachineInstance, doma
 		}
 	}
 
-	err = network.SetupPodNetworkPhase2(vmi, domain, l.networkCacheStoreFactory)
+	err = network.NewVMNetworkConfigurator(vmi, l.networkCacheStoreFactory).SetupPodNetworkPhase2(domain)
 	if err != nil {
 		return domain, fmt.Errorf("preparing the pod network failed: %v", err)
 	}
@@ -781,12 +781,17 @@ func (l *LibvirtDomainManager) SyncVMI(vmi *v1.VirtualMachineInstance, useEmulat
 		if err != nil {
 			return nil, err
 		}
-		err = dom.Create()
+		createFlags := getDomainCreateFlags(vmi)
+		err = dom.CreateWithFlags(createFlags)
 		if err != nil {
-			logger.Reason(err).Error("Starting the VirtualMachineInstance failed.")
+			logger.Reason(err).
+				Errorf("Failed to start VirtualMachineInstance with flags %v.", createFlags)
 			return nil, err
 		}
 		logger.Info("Domain started.")
+		if vmi.ShouldStartPaused() {
+			l.paused.add(vmi.UID)
+		}
 	} else if cli.IsPaused(domState) && !l.paused.contains(vmi.UID) {
 		// TODO: if state change reason indicates a system error, we could try something smarter
 		err := dom.Resume()
@@ -1371,12 +1376,15 @@ func (l *LibvirtDomainManager) GetGuestInfo() (v1.VirtualMachineInstanceGuestAge
 
 // InterfacesStatus returns the interfaces Guest Agent reported
 func (l *LibvirtDomainManager) InterfacesStatus(domainInterfaces []api.Interface) []api.InterfaceStatus {
-	interfaces := l.agentData.GetInterfaceStatus()
-	return agentpoller.MergeAgentStatusesWithDomainData(domainInterfaces, interfaces)
+	if interfaces := l.agentData.GetInterfaceStatus(); interfaces != nil {
+		return agentpoller.MergeAgentStatusesWithDomainData(domainInterfaces, interfaces)
+	}
+
+	return nil
 }
 
 // GetGuestOSInfo returns the Guest OS version and architecture
-func (l *LibvirtDomainManager) GetGuestOSInfo() api.GuestOSInfo {
+func (l *LibvirtDomainManager) GetGuestOSInfo() *api.GuestOSInfo {
 	return l.agentData.GetGuestOSInfo()
 }
 
@@ -1435,4 +1443,13 @@ func isDomainPaused(dom cli.VirDomain) (bool, error) {
 	}
 	return util.ConvState(status) == api.Paused &&
 		util.ConvReason(status, reason) == api.ReasonPausedUser, nil
+}
+
+func getDomainCreateFlags(vmi *v1.VirtualMachineInstance) libvirt.DomainCreateFlags {
+	flags := libvirt.DOMAIN_NONE
+
+	if vmi.ShouldStartPaused() {
+		flags |= libvirt.DOMAIN_START_PAUSED
+	}
+	return flags
 }
