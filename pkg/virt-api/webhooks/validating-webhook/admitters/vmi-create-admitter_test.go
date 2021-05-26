@@ -25,6 +25,8 @@ import (
 	"strconv"
 	"strings"
 
+	"kubevirt.io/kubevirt/tools/vms-generator/utils"
+
 	"kubevirt.io/kubevirt/pkg/virt-operator/resource/generate/rbac"
 
 	. "github.com/onsi/ginkgo"
@@ -299,7 +301,7 @@ var _ = Describe("Validating VMICreate Admitter", func() {
 		vmi.Spec.Volumes = append(vmi.Spec.Volumes, v1.Volume{
 			Name: "testdisk",
 			VolumeSource: v1.VolumeSource{
-				ContainerDisk: &v1.ContainerDiskSource{},
+				ContainerDisk: testutils.NewFakeContainerDiskSource(),
 			},
 		})
 		vmiBytes, _ := json.Marshal(&vmi)
@@ -451,11 +453,11 @@ var _ = Describe("Validating VMICreate Admitter", func() {
 		It("should accept valid machine type", func() {
 			vmi := v1.NewMinimalVMI("testvmi")
 			if webhooks.IsPPC64() {
-				vmi.Spec.Domain.Machine.Type = "pseries"
+				vmi.Spec.Domain.Machine = &v1.Machine{Type: "pseries"}
 			} else if webhooks.IsARM64() {
-				vmi.Spec.Domain.Machine.Type = "virt"
+				vmi.Spec.Domain.Machine = &v1.Machine{Type: "virt"}
 			} else {
-				vmi.Spec.Domain.Machine.Type = "q35"
+				vmi.Spec.Domain.Machine = &v1.Machine{Type: "q35"}
 			}
 
 			causes := ValidateVirtualMachineInstanceSpec(k8sfield.NewPath("fake"), &vmi.Spec, config)
@@ -463,7 +465,7 @@ var _ = Describe("Validating VMICreate Admitter", func() {
 		})
 		It("should reject invalid machine type", func() {
 			vmi := v1.NewMinimalVMI("testvmi")
-			vmi.Spec.Domain.Machine.Type = "test"
+			vmi.Spec.Domain.Machine = &v1.Machine{Type: "test"}
 
 			causes := ValidateVirtualMachineInstanceSpec(k8sfield.NewPath("fake"), &vmi.Spec, config)
 			Expect(len(causes)).To(Equal(1))
@@ -515,7 +517,7 @@ var _ = Describe("Validating VMICreate Admitter", func() {
 				vmi.Spec.Volumes = append(vmi.Spec.Volumes, v1.Volume{
 					Name: diskName,
 					VolumeSource: v1.VolumeSource{
-						ContainerDisk: &v1.ContainerDiskSource{},
+						ContainerDisk: testutils.NewFakeContainerDiskSource(),
 					},
 				})
 			}
@@ -547,7 +549,7 @@ var _ = Describe("Validating VMICreate Admitter", func() {
 				vmi.Spec.Volumes = append(vmi.Spec.Volumes, v1.Volume{
 					Name: volumeName,
 					VolumeSource: v1.VolumeSource{
-						ContainerDisk: &v1.ContainerDiskSource{},
+						ContainerDisk: testutils.NewFakeContainerDiskSource(),
 					},
 				})
 			}
@@ -558,7 +560,6 @@ var _ = Describe("Validating VMICreate Admitter", func() {
 			Expect(len(causes)).To(Equal(1))
 			Expect(causes[0].Field).To(Equal("fake.volumes"))
 		})
-
 		It("should reject disk with missing volume", func() {
 			vmi := v1.NewMinimalVMI("testvmi")
 
@@ -569,6 +570,20 @@ var _ = Describe("Validating VMICreate Admitter", func() {
 			causes := ValidateVirtualMachineInstanceSpec(k8sfield.NewPath("fake"), &vmi.Spec, config)
 			Expect(len(causes)).To(Equal(1))
 			Expect(causes[0].Field).To(Equal("fake.domain.devices.disks[0].name"))
+		})
+		It("should reject volume with missing disk / file system", func() {
+			vmi := v1.NewMinimalVMI("testvmi")
+
+			vmi.Spec.Volumes = append(vmi.Spec.Volumes, v1.Volume{
+				Name: "testvolume",
+				VolumeSource: v1.VolumeSource{
+					CloudInitNoCloud: &v1.CloudInitNoCloudSource{UserData: " "},
+				},
+			})
+
+			causes := ValidateVirtualMachineInstanceSpec(k8sfield.NewPath("fake"), &vmi.Spec, config)
+			Expect(len(causes)).To(Equal(1))
+			Expect(causes[0].Field).To(Equal("fake.domain.volumes[0].name"))
 		})
 		It("should reject multiple disks referencing same volume", func() {
 			vmi := v1.NewMinimalVMI("testvmi")
@@ -584,7 +599,7 @@ var _ = Describe("Validating VMICreate Admitter", func() {
 			vmi.Spec.Volumes = append(vmi.Spec.Volumes, v1.Volume{
 				Name: "testdisk",
 				VolumeSource: v1.VolumeSource{
-					ContainerDisk: &v1.ContainerDiskSource{},
+					ContainerDisk: testutils.NewFakeContainerDiskSource(),
 				},
 			})
 			causes := ValidateVirtualMachineInstanceSpec(k8sfield.NewPath("fake"), &vmi.Spec, config)
@@ -926,7 +941,7 @@ var _ = Describe("Validating VMICreate Admitter", func() {
 				&v1.Volume{
 					Name: "testdisk",
 					VolumeSource: v1.VolumeSource{
-						ContainerDisk: &v1.ContainerDiskSource{},
+						ContainerDisk: testutils.NewFakeContainerDiskSource(),
 					},
 				}, 1),
 			table.Entry("and accept PVC sources",
@@ -1002,7 +1017,7 @@ var _ = Describe("Validating VMICreate Admitter", func() {
 				vmi.Spec.Volumes = append(vmi.Spec.Volumes, v1.Volume{
 					Name: volumeName,
 					VolumeSource: v1.VolumeSource{
-						ContainerDisk: &v1.ContainerDiskSource{},
+						ContainerDisk: testutils.NewFakeContainerDiskSource(),
 					},
 				})
 			}
@@ -1024,9 +1039,9 @@ var _ = Describe("Validating VMICreate Admitter", func() {
 
 			vmi.Spec.Volumes = append(vmi.Spec.Volumes, []v1.Volume{
 				{Name: "testvolume1", VolumeSource: v1.VolumeSource{
-					ContainerDisk: &v1.ContainerDiskSource{}}},
+					ContainerDisk: testutils.NewFakeContainerDiskSource()}},
 				{Name: "testvolume2", VolumeSource: v1.VolumeSource{
-					ContainerDisk: &v1.ContainerDiskSource{}}}}...)
+					ContainerDisk: testutils.NewFakeContainerDiskSource()}}}...)
 
 			causes := ValidateVirtualMachineInstanceSpec(k8sfield.NewPath("fake"), &vmi.Spec, config)
 			Expect(len(causes)).To(Equal(1))
@@ -1451,6 +1466,28 @@ var _ = Describe("Validating VMICreate Admitter", func() {
 			causes := ValidateVirtualMachineInstanceSpec(k8sfield.NewPath("fake"), &vm.Spec, config)
 			Expect(len(causes)).To(Equal(1))
 			Expect(causes[0].Field).To(Equal("fake.domain.devices.interfaces[0].name"))
+		})
+		It("should reject a masquerade interface with a specified MAC address which is reserved by the BindMechanism", func() {
+			vmi := v1.NewMinimalVMI("testvm")
+			vmi.Spec.Domain.Devices.Interfaces = []v1.Interface{v1.Interface{
+				Name: "default",
+				InterfaceBindingMethod: v1.InterfaceBindingMethod{
+					Masquerade: &v1.InterfaceMasquerade{},
+				},
+				MacAddress: "02:00:00:00:00:00",
+			}}
+
+			vmi.Spec.Networks = []v1.Network{
+				v1.Network{
+					Name:          "default",
+					NetworkSource: v1.NetworkSource{Pod: &v1.PodNetwork{}},
+				},
+			}
+
+			causes := ValidateVirtualMachineInstanceSpec(k8sfield.NewPath("fake"), &vmi.Spec, config)
+			Expect(len(causes)).To(Equal(1))
+			Expect(causes[0].Message).To(Equal("The requested MAC address is reserved for the in-pod bridge. Please choose another one."))
+			Expect(causes[0].Field).To(Equal("fake.domain.devices.interfaces[0].macAddress"))
 		})
 		It("should accept a bridge interface on a pod network when it is permitted", func() {
 			vm := v1.NewMinimalVMI("testvm")
@@ -2177,6 +2214,57 @@ var _ = Describe("Validating VMICreate Admitter", func() {
 			Expect(string(causes[0].Type)).To(Equal("FieldValueInvalid"))
 			Expect(causes[0].Field).To(Equal("fake.startStrategy"))
 			Expect(causes[0].Message).To(Equal("either fake.startStrategy or fake.livenessProbe should be provided.Pausing VMI with LivenessProbe is not supported"))
+		})
+		Context("with kernel boot defined", func() {
+
+			const (
+				fakeKernelArgs = "args"
+				fakeImage      = "image"
+				fakeInitrd     = "initrd"
+				fakeKernel     = "kernel"
+			)
+
+			table.DescribeTable("", func(kernelArgs, initrdPath, kernelPath, image string, defineContainerNil bool, shouldBeValid bool) {
+				vmi := utils.GetVMIKernelBoot()
+
+				kb := vmi.Spec.Domain.Firmware.KernelBoot
+
+				if defineContainerNil {
+					kb.Container = nil
+				} else {
+					kb.KernelArgs = kernelArgs
+					kb.Container.KernelPath = kernelPath
+					kb.Container.InitrdPath = initrdPath
+					kb.Container.Image = image
+				}
+
+				kernelBootField := k8sfield.NewPath("spec").Child("domain").Child("firmware").Child("kernelBoot")
+				causes := validateKernelBoot(kernelBootField, kb)
+
+				if shouldBeValid {
+					Expect(causes).To(BeEmpty())
+				} else {
+					Expect(causes).ToNot(BeEmpty())
+				}
+			},
+				table.Entry("without kernel args and null container - should approve",
+					"", "", "", "", true, true),
+				table.Entry("with kernel args and null container - should approve",
+					fakeKernelArgs, "", "", "", true, true),
+				table.Entry("without kernel args, with container that has image & kernel & initrd defined - should approve",
+					"", fakeInitrd, fakeKernel, fakeImage, false, true),
+				table.Entry("with kernel args, with container that has image & kernel & initrd defined - should approve",
+					fakeKernelArgs, fakeInitrd, fakeKernel, fakeImage, false, true),
+				table.Entry("with kernel args, with container that has image & kernel defined - should approve",
+					fakeKernelArgs, "", fakeKernel, fakeImage, false, true),
+				table.Entry("with kernel args, with container that has image & initrd defined - should approve",
+					fakeKernelArgs, fakeInitrd, "", fakeImage, false, true),
+				table.Entry("with kernel args, with container that has only image defined - should reject",
+					fakeKernelArgs, "", "", fakeImage, false, false),
+				table.Entry("with kernel args, with container that has initrd and kernel defined but without image - should reject",
+					fakeKernelArgs, fakeInitrd, fakeKernel, "", false, false),
+				table.Entry("with kernel args, with container that has nothing defined", "", "", "", "", false, false),
+			)
 		})
 	})
 	Context("with cpu pinning", func() {
@@ -3025,6 +3113,56 @@ var _ = Describe("Validating VMICreate Admitter", func() {
 	})
 
 	Context("with volume", func() {
+		It("should accept a single downwardmetrics volume", func() {
+			enableFeatureGate(virtconfig.DownwardMetricsFeatureGate)
+			vmi := v1.NewMinimalVMI("testvmi")
+
+			vmi.Spec.Volumes = append(vmi.Spec.Volumes, v1.Volume{
+				Name: "testDownwardMetrics",
+				VolumeSource: v1.VolumeSource{
+					DownwardMetrics: &v1.DownwardMetricsVolumeSource{},
+				},
+			})
+
+			causes := validateVolumes(k8sfield.NewPath("fake"), vmi.Spec.Volumes, config)
+			Expect(causes).To(BeEmpty())
+		})
+		It("should reject downwardMetrics volumes if the feature gate is not enabled", func() {
+			vmi := v1.NewMinimalVMI("testvmi")
+
+			vmi.Spec.Volumes = append(vmi.Spec.Volumes, v1.Volume{
+				Name: "testDownwardMetrics",
+				VolumeSource: v1.VolumeSource{
+					DownwardMetrics: &v1.DownwardMetricsVolumeSource{},
+				},
+			})
+
+			causes := validateVolumes(k8sfield.NewPath("fake"), vmi.Spec.Volumes, config)
+			Expect(causes).To(HaveLen(1))
+			Expect(causes[0].Message).To(ContainSubstring("downwardMetrics disks are not allowed: DownwardMetrics feature gate is not enabled."))
+		})
+		It("should reject downwardMetrics volumes if more than one exist", func() {
+			enableFeatureGate(virtconfig.DownwardMetricsFeatureGate)
+			vmi := v1.NewMinimalVMI("testvmi")
+
+			vmi.Spec.Volumes = append(vmi.Spec.Volumes,
+				v1.Volume{
+					Name: "testDownwardMetrics",
+					VolumeSource: v1.VolumeSource{
+						DownwardMetrics: &v1.DownwardMetricsVolumeSource{},
+					},
+				},
+				v1.Volume{
+					Name: "testDownwardMetrics1",
+					VolumeSource: v1.VolumeSource{
+						DownwardMetrics: &v1.DownwardMetricsVolumeSource{},
+					},
+				},
+			)
+			causes := validateVolumes(k8sfield.NewPath("fake"), vmi.Spec.Volumes, config)
+			Expect(causes).To(HaveLen(1))
+			Expect(causes[0].Message).To(ContainSubstring("fake must have max one downwardMetric volume set"))
+		})
 		It("should reject hostDisk volumes if the feature gate is not enabled", func() {
 			vmi := v1.NewMinimalVMI("testvmi")
 
@@ -3461,7 +3599,7 @@ var _ = Describe("Function getNumberOfPodInterfaces()", func() {
 		volume := v1.Volume{
 			Name: "testdisk",
 			VolumeSource: v1.VolumeSource{
-				ContainerDisk: &v1.ContainerDiskSource{},
+				ContainerDisk: testutils.NewFakeContainerDiskSource(),
 			},
 		}
 
@@ -3494,7 +3632,7 @@ var _ = Describe("Function getNumberOfPodInterfaces()", func() {
 		volume := v1.Volume{
 			Name: "testdisk",
 			VolumeSource: v1.VolumeSource{
-				ContainerDisk: &v1.ContainerDiskSource{},
+				ContainerDisk: testutils.NewFakeContainerDiskSource(),
 			},
 		}
 		spec.Volumes = []v1.Volume{volume}

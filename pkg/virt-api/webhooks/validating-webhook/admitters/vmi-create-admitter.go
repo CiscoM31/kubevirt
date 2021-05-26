@@ -35,6 +35,7 @@ import (
 
 	v1 "kubevirt.io/client-go/api/v1"
 	"kubevirt.io/kubevirt/pkg/hooks"
+	"kubevirt.io/kubevirt/pkg/network"
 	hwutil "kubevirt.io/kubevirt/pkg/util/hardware"
 	webhookutils "kubevirt.io/kubevirt/pkg/util/webhooks"
 	"kubevirt.io/kubevirt/pkg/virt-api/webhooks"
@@ -258,6 +259,8 @@ func validateInterfaceNetworkBasics(field *k8sfield.Path, networkExists bool, id
 		causes = appendStatusCauseForSlirpNotEnabled(field, causes, idx)
 	} else if iface.Masquerade != nil && networkData.Pod == nil {
 		causes = appendStatusCauseForMasqueradeWithourPodNetwork(field, causes, idx)
+	} else if iface.Masquerade != nil && network.IsReserved(iface.MacAddress) {
+		causes = appendStatusCauseForInvalidMasqueradeMacAddress(field, causes, idx)
 	} else if iface.InterfaceBindingMethod.Bridge != nil && networkData.NetworkSource.Pod != nil && !config.IsBridgeInterfaceOnPodNetworkEnabled() {
 		causes = appendStatusCauseForBridgeNotEnabled(field, causes, idx)
 	} else if iface.InterfaceBindingMethod.Macvtap != nil && !config.MacvtapEnabled() {
@@ -524,6 +527,15 @@ func appendStatusCauseForNetworkNotFound(field *k8sfield.Path, causes []metav1.S
 		Type:    metav1.CauseTypeFieldValueInvalid,
 		Message: fmt.Sprintf(nameOfTypeNotFoundMessagePattern, field.Child("domain", "devices", "interfaces").Index(idx).Child("name").String(), iface.Name),
 		Field:   field.Child("domain", "devices", "interfaces").Index(idx).Child("name").String(),
+	})
+	return causes
+}
+
+func appendStatusCauseForInvalidMasqueradeMacAddress(field *k8sfield.Path, causes []metav1.StatusCause, idx int) []metav1.StatusCause {
+	causes = append(causes, metav1.StatusCause{
+		Type:    metav1.CauseTypeFieldValueInvalid,
+		Message: "The requested MAC address is reserved for the in-pod bridge. Please choose another one.",
+		Field:   field.Child("domain", "devices", "interfaces").Index(idx).Child("macAddress").String(),
 	})
 	return causes
 }
@@ -861,12 +873,14 @@ func validateNetworkHasOnlyOneType(field *k8sfield.Path, cniTypesCount int, caus
 func validateBootOrder(field *k8sfield.Path, spec *v1.VirtualMachineInstanceSpec, volumeNameMap map[string]*v1.Volume) (bootOrderMap map[uint]bool, causes []metav1.StatusCause) {
 	// used to validate uniqueness of boot orders among disks and interfaces
 	bootOrderMap = make(map[uint]bool)
+	// to perform as set of volume / fs names
+	diskAndFilesystemNames := make(map[string]struct{})
 
 	for i, volume := range spec.Volumes {
 		volumeNameMap[volume.Name] = &spec.Volumes[i]
 	}
 
-	// Validate disks and volumes match up correctly
+	// Validate disks match volumes correctly
 	for idx, disk := range spec.Domain.Devices.Disks {
 		var matchingVolume *v1.Volume
 
@@ -889,6 +903,23 @@ func validateBootOrder(field *k8sfield.Path, spec *v1.VirtualMachineInstanceSpec
 			})
 		}
 
+		// Verify that DownwardMetrics is mapped to disk
+		if volumeExists && matchingVolume.DownwardMetrics != nil {
+			if disk.Disk == nil {
+				causes = append(causes, metav1.StatusCause{
+					Type:    metav1.CauseTypeFieldValueRequired,
+					Message: fmt.Sprintf("DownwardMetrics volume must be mapped to a disk, but disk is not set on %v.", field.Child("domain", "devices", "disks").Index(idx).Child("disk").String()),
+					Field:   field.Child("domain", "devices", "disks").Index(idx).Child("disk").String(),
+				})
+			} else if disk.Disk != nil && disk.Disk.Bus != "virtio" && disk.Disk.Bus != "" {
+				causes = append(causes, metav1.StatusCause{
+					Type:    metav1.CauseTypeFieldValueInvalid,
+					Message: fmt.Sprintf("DownwardMetrics volume must be mapped to virtio bus, but %v is set to %v", field.Child("domain", "devices", "disks").Index(idx).Child("disk").Child("bus").String(), disk.Disk.Bus),
+					Field:   field.Child("domain", "devices", "disks").Index(idx).Child("disk").Child("bus").String(),
+				})
+			}
+		}
+
 		// verify that there are no duplicate boot orders
 		if disk.BootOrder != nil {
 			order := *disk.BootOrder
@@ -901,7 +932,26 @@ func validateBootOrder(field *k8sfield.Path, spec *v1.VirtualMachineInstanceSpec
 			}
 			bootOrderMap[order] = true
 		}
+
+		diskAndFilesystemNames[disk.Name] = struct{}{}
 	}
+
+	for _, fs := range spec.Domain.Devices.Filesystems {
+		diskAndFilesystemNames[fs.Name] = struct{}{}
+	}
+
+	// Validate that volumes match disks and filesystems correctly
+	for idx, volume := range spec.Volumes {
+		if _, matchingDiskExists := diskAndFilesystemNames[volume.Name]; !matchingDiskExists {
+			causes = append(causes, metav1.StatusCause{
+				Type:    metav1.CauseTypeFieldValueInvalid,
+				Message: fmt.Sprintf(nameOfTypeNotFoundMessagePattern, field.Child("domain", "volumes").Index(idx).Child("name").String(), volume.Name),
+				Field:   field.Child("domain", "volumes").Index(idx).Child("name").String(),
+			})
+		}
+
+	}
+
 	return bootOrderMap, causes
 }
 
@@ -1151,12 +1201,11 @@ func validateFirmwareSerial(field *k8sfield.Path, spec *v1.VirtualMachineInstanc
 }
 
 func validateEmulatedMachine(field *k8sfield.Path, spec *v1.VirtualMachineInstanceSpec, config *virtconfig.ClusterConfig) (causes []metav1.StatusCause) {
-	if len(spec.Domain.Machine.Type) > 0 {
-		machine := spec.Domain.Machine.Type
+	if machine := spec.Domain.Machine; machine != nil && len(machine.Type) > 0 {
 		supportedMachines := config.GetEmulatedMachines()
 		var match = false
 		for _, val := range supportedMachines {
-			if regexp.MustCompile(val).MatchString(machine) {
+			if regexp.MustCompile(val).MatchString(machine.Type) {
 				match = true
 			}
 		}
@@ -1165,7 +1214,7 @@ func validateEmulatedMachine(field *k8sfield.Path, spec *v1.VirtualMachineInstan
 				Type: metav1.CauseTypeFieldValueInvalid,
 				Message: fmt.Sprintf("%s is not supported: %s (allowed values: %v)",
 					field.Child("domain", "machine", "type").String(),
-					machine,
+					machine.Type,
 					supportedMachines,
 				),
 				Field: field.Child("domain", "machine", "type").String(),
@@ -1519,6 +1568,7 @@ func validateFirmware(field *k8sfield.Path, firmware *v1.Firmware) []metav1.Stat
 
 	if firmware != nil {
 		causes = append(causes, validateBootloader(field.Child("bootloader"), firmware.Bootloader)...)
+		causes = append(causes, validateKernelBoot(field.Child("kernelBoot"), firmware.KernelBoot)...)
 	}
 
 	return causes
@@ -1673,8 +1723,9 @@ func validateVolumes(field *k8sfield.Path, volumes []v1.Volume, config *virtconf
 		return causes
 	}
 
-	// check that we have max 1 serviceAccount volume
+	// check that we have max 1 instance of below disks
 	serviceAccountVolumeCount := 0
+	downwardMetricVolumeCount := 0
 
 	for idx, volume := range volumes {
 		// verify name is unique
@@ -1745,6 +1796,10 @@ func validateVolumes(field *k8sfield.Path, volumes []v1.Volume, config *virtconf
 		if volume.ServiceAccount != nil {
 			volumeSourceSetCount++
 			serviceAccountVolumeCount++
+		}
+		if volume.DownwardMetrics != nil {
+			downwardMetricVolumeCount++
+			volumeSourceSetCount++
 		}
 
 		if volumeSourceSetCount != 1 {
@@ -1863,6 +1918,14 @@ func validateVolumes(field *k8sfield.Path, volumes []v1.Volume, config *virtconf
 			}
 		}
 
+		if volume.DownwardMetrics != nil && !config.DownwardMetricsEnabled() {
+			causes = append(causes, metav1.StatusCause{
+				Type:    metav1.CauseTypeFieldValueInvalid,
+				Message: "downwardMetrics disks are not allowed: DownwardMetrics feature gate is not enabled.",
+				Field:   field.Index(idx).String(),
+			})
+		}
+
 		// validate HostDisk data
 		if hostDisk := volume.HostDisk; hostDisk != nil {
 			if !config.HostDiskEnabled() {
@@ -1933,6 +1996,14 @@ func validateVolumes(field *k8sfield.Path, volumes []v1.Volume, config *virtconf
 		causes = append(causes, metav1.StatusCause{
 			Type:    metav1.CauseTypeFieldValueInvalid,
 			Message: fmt.Sprintf("%s must have max one serviceAccount volume set", field.String()),
+			Field:   field.String(),
+		})
+	}
+
+	if downwardMetricVolumeCount > 1 {
+		causes = append(causes, metav1.StatusCause{
+			Type:    metav1.CauseTypeFieldValueInvalid,
+			Message: fmt.Sprintf("%s must have max one downwardMetric volume set", field.String()),
 			Field:   field.String(),
 		})
 	}
@@ -2203,4 +2274,32 @@ func validateDisks(field *k8sfield.Path, disks []v1.Disk) []metav1.StatusCause {
 	}
 
 	return causes
+}
+
+// Rejects kernel boot defined with initrd/kernel path but without an image
+func validateKernelBoot(field *k8sfield.Path, kernelBoot *v1.KernelBoot) (causes []metav1.StatusCause) {
+	if kernelBoot == nil || kernelBoot.Container == nil {
+		return
+	}
+
+	container := kernelBoot.Container
+	containerField := field.Child("container").String()
+
+	if container.Image == "" {
+		causes = append(causes, metav1.StatusCause{
+			Type:    metav1.CauseTypeFieldValueRequired,
+			Message: fmt.Sprintf("%s must be defined with an image", containerField),
+			Field:   containerField,
+		})
+	}
+
+	if container.InitrdPath == "" && container.KernelPath == "" {
+		causes = append(causes, metav1.StatusCause{
+			Type:    metav1.CauseTypeFieldValueRequired,
+			Message: fmt.Sprintf("%s must be defined with at least one of the following: kernelPath, initrdPath", containerField),
+			Field:   containerField,
+		})
+	}
+
+	return
 }

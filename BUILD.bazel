@@ -74,7 +74,8 @@ nogo(
         "@org_golang_x_tools//go/analysis/passes/structtag:go_tool_library",
         "@org_golang_x_tools//go/analysis/passes/tests:go_tool_library",
         "@org_golang_x_tools//go/analysis/passes/unreachable:go_tool_library",
-        "@org_golang_x_tools//go/analysis/passes/unsafeptr:go_tool_library",
+        # FIXME: Nogo fails analysis although configured to be disabled on nogo_config.json.
+        # "@org_golang_x_tools//go/analysis/passes/unsafeptr:go_tool_library",
         "@org_golang_x_tools//go/analysis/passes/unusedresult:go_tool_library",
     ],
 )
@@ -195,6 +196,8 @@ container_bundle(
         "$(container_prefix)/$(image_prefix)fedora-cloud-container-disk-demo:$(container_tag)": "//containerimages:fedora-cloud-container-disk-image",
         "$(container_prefix)/$(image_prefix)microlivecd-container-disk-demo:$(container_tag)": "//containerimages:microlivecd-container-disk-image",
         "$(container_prefix)/$(image_prefix)virtio-container-disk:$(container_tag)": "//containerimages:virtio-container-disk-image",
+        # Kernel boot container
+        "$(container_prefix)/$(image_prefix)alpine-ext-kernel-boot-demo:$(container_tag)": "//containerimages:alpine-ext-kernel-boot-demo-container",
         # Customized container-disk images
         "$(container_prefix)/$(image_prefix)fedora-sriov-lane-container-disk:$(container_tag)": "//containerimages:fedora-sriov-lane-container-disk-image",
         "$(container_prefix)/$(image_prefix)fedora-with-test-tooling-container-disk:$(container_tag)": "//containerimages:fedora-with-test-tooling",

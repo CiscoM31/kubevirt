@@ -28,12 +28,15 @@ import (
 	"os"
 	"time"
 
+	storagev1 "k8s.io/api/storage/v1"
+
 	. "github.com/onsi/ginkgo"
 	"github.com/onsi/ginkgo/extensions/table"
 	. "github.com/onsi/gomega"
 	k8sv1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/pointer"
 
@@ -115,7 +118,7 @@ var _ = SIGDescribe("[Serial]DataVolume Integration", func() {
 				Expect(err).To(BeNil())
 			})
 
-			It("[test_id:5252]should be successfully started when using a PVC volume owned by a DataVolume", func() {
+			It("[QUARANTINE][test_id:5252]should be successfully started when using a PVC volume owned by a DataVolume", func() {
 				dataVolume := tests.NewRandomDataVolumeWithHttpImport(tests.GetUrl(tests.AlpineHttpUrl), tests.NamespaceTestDefault, k8sv1.ReadWriteOnce)
 				vmi := tests.NewRandomVMIWithPVC(dataVolume.Name)
 
@@ -138,6 +141,126 @@ var _ = SIGDescribe("[Serial]DataVolume Integration", func() {
 
 				err = virtClient.CdiClient().CdiV1alpha1().DataVolumes(dataVolume.Namespace).Delete(context.Background(), dataVolume.Name, metav1.DeleteOptions{})
 				Expect(err).To(BeNil())
+			})
+		})
+
+		Context("with a PVC from a Datavolume", func() {
+			var storageClass *storagev1.StorageClass
+			BeforeEach(func() {
+				// ensure that we always use a storage class which binds immediately,
+				// otherwise we will never see a PVC appear for the datavolume
+				bindMode := storagev1.VolumeBindingImmediate
+				storageClass = &storagev1.StorageClass{
+					ObjectMeta: metav1.ObjectMeta{
+						GenerateName: "fake",
+					},
+					Provisioner:       "afakeone",
+					VolumeBindingMode: &bindMode,
+				}
+				storageClass, err = virtClient.StorageV1().StorageClasses().Create(context.Background(), storageClass, metav1.CreateOptions{})
+				Expect(err).ToNot(HaveOccurred())
+			})
+			AfterEach(func() {
+				if storageClass != nil && storageClass.Name != "" {
+					err := virtClient.StorageV1().StorageClasses().Delete(context.Background(), storageClass.Name, metav1.DeleteOptions{})
+					Expect(err).ToNot(HaveOccurred())
+				}
+			})
+
+			It("[test_id:4643]should NOT be rejected when VM template lists a DataVolume, but VM lists PVC VolumeSource", func() {
+
+				dv := tests.NewRandomDataVolumeWithHttpImportInStorageClass(tests.GetUrl(tests.AlpineHttpUrl), tests.NamespaceTestDefault, storageClass.Name, k8sv1.ReadWriteOnce)
+				_, err = virtClient.CdiClient().CdiV1alpha1().DataVolumes(dv.Namespace).Create(context.Background(), dv, metav1.CreateOptions{})
+				Expect(err).To(BeNil())
+
+				defer func(dv *cdiv1.DataVolume) {
+					By("Deleting the DataVolume")
+					ExpectWithOffset(1, virtClient.CdiClient().CdiV1alpha1().DataVolumes(dv.Namespace).Delete(context.Background(), dv.Name, metav1.DeleteOptions{})).To(Succeed(), metav1.DeleteOptions{})
+				}(dv)
+
+				Eventually(func() (*k8sv1.PersistentVolumeClaim, error) {
+					return virtClient.CoreV1().PersistentVolumeClaims(dv.Namespace).Get(context.Background(), dv.Name, metav1.GetOptions{})
+				}, 30).Should(Not(BeNil()))
+
+				vmi := tests.NewRandomVMI()
+
+				diskName := "disk0"
+				bus := "virtio"
+				vmi.Spec.Domain.Devices.Disks = append(vmi.Spec.Domain.Devices.Disks, v1.Disk{
+					Name: diskName,
+					DiskDevice: v1.DiskDevice{
+						Disk: &v1.DiskTarget{
+							Bus: bus,
+						},
+					},
+				})
+				vmi.Spec.Volumes = append(vmi.Spec.Volumes, v1.Volume{
+					Name: diskName,
+					VolumeSource: v1.VolumeSource{
+						PersistentVolumeClaim: &k8sv1.PersistentVolumeClaimVolumeSource{
+							ClaimName: dv.ObjectMeta.Name,
+						},
+					},
+				})
+
+				vmi.Spec.Domain.Resources.Requests[k8sv1.ResourceMemory] = resource.MustParse("512M")
+
+				vm := tests.NewRandomVirtualMachine(vmi, true)
+				dvt := &v1.DataVolumeTemplateSpec{
+					ObjectMeta: dv.ObjectMeta,
+					Spec:       dv.Spec,
+				}
+				vm.Spec.DataVolumeTemplates = append(vm.Spec.DataVolumeTemplates, *dvt)
+				_, err = virtClient.VirtualMachine(tests.NamespaceTestDefault).Create(vm)
+				Expect(err).ToNot(HaveOccurred())
+			})
+			It("[Serial][test_id:4644]should fail to start when a volume is backed by PVC created by DataVolume instead of the DataVolume itself", func() {
+				dv := tests.NewRandomDataVolumeWithHttpImportInStorageClass(tests.GetUrl(tests.AlpineHttpUrl), tests.NamespaceTestDefault, storageClass.Name, k8sv1.ReadWriteOnce)
+				_, err := virtClient.CdiClient().CdiV1alpha1().DataVolumes(dv.Namespace).Create(context.Background(), dv, metav1.CreateOptions{})
+				Expect(err).To(BeNil())
+
+				defer func(dv *cdiv1.DataVolume) {
+					By("Deleting the DataVolume")
+					ExpectWithOffset(1, virtClient.CdiClient().CdiV1alpha1().DataVolumes(dv.Namespace).Delete(context.Background(), dv.Name, metav1.DeleteOptions{})).To(Succeed(), metav1.DeleteOptions{})
+				}(dv)
+				Eventually(func() error {
+					_, err := virtClient.CoreV1().PersistentVolumeClaims(dv.Namespace).Get(context.Background(), dv.Name, metav1.GetOptions{})
+					return err
+				}, 30*time.Second, 1*time.Second).Should(BeNil())
+
+				vmi := tests.NewRandomVMI()
+
+				diskName := "disk0"
+				bus := "virtio"
+				vmi.Spec.Domain.Devices.Disks = append(vmi.Spec.Domain.Devices.Disks, v1.Disk{
+					Name: diskName,
+					DiskDevice: v1.DiskDevice{
+						Disk: &v1.DiskTarget{
+							Bus: bus,
+						},
+					},
+				})
+				vmi.Spec.Volumes = append(vmi.Spec.Volumes, v1.Volume{
+					Name: diskName,
+					VolumeSource: v1.VolumeSource{
+						PersistentVolumeClaim: &k8sv1.PersistentVolumeClaimVolumeSource{
+							ClaimName: dv.ObjectMeta.Name,
+						},
+					},
+				})
+
+				vmi.Spec.Domain.Resources.Requests[k8sv1.ResourceMemory] = resource.MustParse("512M")
+
+				vm := tests.NewRandomVirtualMachine(vmi, true)
+				_, err = virtClient.VirtualMachine(tests.NamespaceTestDefault).Create(vm)
+				Expect(err).ShouldNot(HaveOccurred())
+
+				Eventually(func() bool {
+					vm, err := virtClient.VirtualMachine(vm.Namespace).Get(vm.Name, &metav1.GetOptions{})
+					Expect(err).ToNot(HaveOccurred())
+
+					return vm.Status.Created
+				}, 30*time.Second, 1*time.Second).Should(Equal(false))
 			})
 		})
 	})
@@ -685,8 +808,9 @@ var _ = SIGDescribe("[Serial]DataVolume Integration", func() {
 
 			table.DescribeTable("deny then allow clone request on rook-ceph", func(role *rbacv1.Role, allServiceAccounts, allServiceAccountsInNamespace bool) {
 				vm := tests.NewRandomVMWithCloneDataVolume(dataVolume.Namespace, dataVolume.Name, tests.NamespaceTestDefault)
+				const volumeName = "sa"
 				saVol := v1.Volume{
-					Name: "sa",
+					Name: volumeName,
 					VolumeSource: v1.VolumeSource{
 						ServiceAccount: &v1.ServiceAccountVolumeSource{
 							ServiceAccountName: tests.AdminServiceAccountName,
@@ -695,6 +819,7 @@ var _ = SIGDescribe("[Serial]DataVolume Integration", func() {
 				}
 				vm.Spec.DataVolumeTemplates[0].Spec.PVC.StorageClassName = pointer.StringPtr(storageClass)
 				vm.Spec.Template.Spec.Volumes = append(vm.Spec.Template.Spec.Volumes, saVol)
+				vm.Spec.Template.Spec.Domain.Devices.Disks = append(vm.Spec.Template.Spec.Domain.Devices.Disks, v1.Disk{Name: volumeName})
 
 				vmBytes, err := json.Marshal(vm)
 				Expect(err).ToNot(HaveOccurred())

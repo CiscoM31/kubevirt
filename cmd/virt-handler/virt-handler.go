@@ -45,6 +45,8 @@ import (
 	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/certificate"
 
+	"kubevirt.io/kubevirt/pkg/monitoring/vms/downwardmetrics"
+
 	"kubevirt.io/kubevirt/pkg/healthz"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -149,7 +151,10 @@ type virtHandlerApp struct {
 	clusterConfig     *virtconfig.ClusterConfig
 }
 
-var _ service.Service = &virtHandlerApp{}
+var (
+	_                service.Service = &virtHandlerApp{}
+	apiHealthVersion                 = new(healthz.KubeApiHealthzVersion)
+)
 
 func (app *virtHandlerApp) prepareCertManager() (err error) {
 	app.clientcertmanager = bootstrap.NewFileCertificateManager(app.clientCertFilePath, app.clientKeyFilePath)
@@ -321,6 +326,9 @@ func (app *virtHandlerApp) Run() {
 	)
 
 	promvm.SetupCollector(app.virtCli, app.VirtShareDir, app.HostOverride, app.MaxRequestsInFlight, vmiSourceInformer)
+	if err := downwardmetrics.RunDownwardMetricsCollector(context.Background(), app.HostOverride, vmiSourceInformer, podIsolationDetector); err != nil {
+		panic(fmt.Errorf("failed to set up the downwardMetrics collector: %v", err))
+	}
 
 	go app.clientcertmanager.Start()
 	go app.servercertmanager.Start()
@@ -434,7 +442,7 @@ func (app *virtHandlerApp) runPrometheusServer(errCh chan error) {
 	mux := restful.NewContainer()
 	webService := new(restful.WebService)
 	webService.Path("/").Consumes(restful.MIME_JSON).Produces(restful.MIME_JSON)
-	webService.Route(webService.GET("/healthz").To(healthz.KubeConnectionHealthzFuncFactory(app.clusterConfig)).Doc("Health endpoint"))
+	webService.Route(webService.GET("/healthz").To(healthz.KubeConnectionHealthzFuncFactory(app.clusterConfig, apiHealthVersion)).Doc("Health endpoint"))
 	mux.Add(webService)
 	log.Log.V(1).Infof("metrics: max concurrent requests=%d", app.MaxRequestsInFlight)
 	mux.Handle("/metrics", promvm.Handler(app.MaxRequestsInFlight))
@@ -533,6 +541,10 @@ func (app *virtHandlerApp) AddFlags() {
 
 func (app *virtHandlerApp) setupTLS(factory controller.KubeInformerFactory) error {
 	kubevirtCAConfigInformer := factory.KubeVirtCAConfigMap()
+	kubevirtCAConfigInformer.SetWatchErrorHandler(func(r *cache.Reflector, err error) {
+		apiHealthVersion.Clear()
+		cache.DefaultWatchErrorHandler(r, err)
+	})
 	caManager := webhooks.NewCAManager(kubevirtCAConfigInformer.GetStore(), app.namespace, app.caConfigMapName)
 
 	app.promTLSConfig = webhooks.SetupPromTLS(app.servercertmanager)

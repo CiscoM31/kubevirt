@@ -45,8 +45,8 @@ import (
 	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/workqueue"
 
+	netcache "kubevirt.io/kubevirt/pkg/network/cache"
 	"kubevirt.io/kubevirt/pkg/util"
-	netcache "kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/network/cache"
 
 	"kubevirt.io/kubevirt/pkg/virt-handler/heartbeat"
 
@@ -63,6 +63,7 @@ import (
 	diskutils "kubevirt.io/kubevirt/pkg/ephemeral-disk-utils"
 	cmdv1 "kubevirt.io/kubevirt/pkg/handler-launcher-com/cmd/v1"
 	hostdisk "kubevirt.io/kubevirt/pkg/host-disk"
+	neterrors "kubevirt.io/kubevirt/pkg/network/errors"
 	pvcutils "kubevirt.io/kubevirt/pkg/util/types"
 	virtconfig "kubevirt.io/kubevirt/pkg/virt-config"
 	virtcache "kubevirt.io/kubevirt/pkg/virt-handler/cache"
@@ -515,7 +516,7 @@ func (d *VirtualMachineController) setPodNetworkPhase1(vmi *v1.VirtualMachineIns
 		return network.NewVMNetworkConfigurator(vmi, d.networkCacheStoreFactory).SetupPodNetworkPhase1(pid)
 	})
 	if err != nil {
-		_, critical := err.(*network.CriticalNetworkError)
+		_, critical := err.(*neterrors.CriticalNetworkError)
 		if critical {
 			return true, err
 		} else {
@@ -1798,6 +1799,9 @@ func (d *VirtualMachineController) processVmCleanup(vmi *v1.VirtualMachineInstan
 	d.migrationProxy.StopSourceListener(vmiId)
 
 	// Unmount container disks and clean up remaining files
+	if err := d.containerDiskMounter.UnmountKernelArtifacts(vmi); err != nil {
+		return err
+	}
 	if err := d.containerDiskMounter.Unmount(vmi); err != nil {
 		return err
 	}
@@ -2387,6 +2391,10 @@ func (d *VirtualMachineController) vmUpdateHelperMigrationTarget(origVMI *v1.Vir
 		return err
 	}
 
+	if err := d.containerDiskMounter.MountKernelArtifacts(vmi, false); err != nil {
+		return fmt.Errorf("failed to mount kernel artifacts: %v", err)
+	}
+
 	// configure network inside virt-launcher compute container
 	criticalNetworkError, err := d.setPodNetworkPhase1(vmi)
 	if err != nil {
@@ -2458,6 +2466,11 @@ func (d *VirtualMachineController) vmUpdateHelperDefault(origVMI *v1.VirtualMach
 		if err := d.containerDiskMounter.Mount(vmi, true); err != nil {
 			return err
 		}
+
+		if err := d.containerDiskMounter.MountKernelArtifacts(vmi, true); err != nil {
+			return fmt.Errorf("failed to mount kernel artifacts: %v", err)
+		}
+
 		criticalNetworkError, err := d.setPodNetworkPhase1(vmi)
 		if err != nil {
 			if criticalNetworkError {

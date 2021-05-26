@@ -105,6 +105,7 @@ type ConverterContext struct {
 	OVMFPath              string
 	MemBalloonStatsPeriod uint
 	UseVirtioTransitional bool
+	EphemeraldiskCreator  ephemeraldisk.EphemeralDiskCreatorInterface
 	VolumesDiscardIgnore  []string
 }
 
@@ -490,7 +491,7 @@ func FormatDeviceName(prefix string, index int) string {
 	name := ""
 
 	for index >= 0 {
-		name = string('a'+(index%base)) + name
+		name = string(rune('a'+(index%base))) + name
 		index = (index / base) - 1
 	}
 	return prefix + name
@@ -559,6 +560,9 @@ func Convert_v1_Volume_To_api_Disk(source *v1.Volume, disk *api.Disk, c *Convert
 	}
 	if source.ServiceAccount != nil {
 		return Convert_v1_Config_To_api_Disk(source.Name, disk, config.ServiceAccount)
+	}
+	if source.DownwardMetrics != nil {
+		return Convert_v1_DownwardMetricSource_To_api_Disk(disk, c)
 	}
 
 	return fmt.Errorf("disk %s references an unsupported source", disk.Alias.GetName())
@@ -741,6 +745,21 @@ func Convert_v1_CloudInitSource_To_api_Disk(source v1.VolumeSource, disk *api.Di
 	return nil
 }
 
+func Convert_v1_DownwardMetricSource_To_api_Disk(disk *api.Disk, c *ConverterContext) error {
+	disk.Type = "file"
+	disk.ReadOnly = toApiReadOnly(true)
+	disk.Driver = &api.DiskDriver{
+		Type: "raw",
+		Name: "qemu",
+	}
+	// This disk always needs `virtio`. Validation ensures that bus is unset or is already virtio
+	disk.Model = translateModel(c, "virtio")
+	disk.Source = api.DiskSource{
+		File: config.DownwardMetricDisk,
+	}
+	return nil
+}
+
 func Convert_v1_EmptyDiskSource_To_api_Disk(volumeName string, _ *v1.EmptyDiskSource, disk *api.Disk) error {
 	if disk.Type == "lun" {
 		return fmt.Errorf("device %s is of type lun. Not compatible with a file based disk", disk.Alias.GetName())
@@ -749,7 +768,7 @@ func Convert_v1_EmptyDiskSource_To_api_Disk(volumeName string, _ *v1.EmptyDiskSo
 	disk.Type = "file"
 	disk.Driver.Type = "qcow2"
 	disk.Driver.Discard = "unmap"
-	disk.Source.File = emptydisk.FilePathForVolumeName(volumeName)
+	disk.Source.File = emptydisk.NewEmptyDiskCreator().FilePathForVolumeName(volumeName)
 	disk.Driver.ErrorPolicy = "stop"
 
 	return nil
@@ -763,7 +782,7 @@ func Convert_v1_ContainerDiskSource_To_api_Disk(volumeName string, _ *v1.Contain
 	disk.Driver.Type = "qcow2"
 	disk.Driver.ErrorPolicy = "stop"
 	disk.Driver.Discard = "unmap"
-	disk.Source.File = ephemeraldisk.GetFilePath(volumeName)
+	disk.Source.File = c.EphemeraldiskCreator.GetFilePath(volumeName)
 	disk.BackingStore = &api.BackingStore{
 		Format: &api.BackingStoreFormat{},
 		Source: &api.DiskSource{},
@@ -783,7 +802,7 @@ func Convert_v1_EphemeralVolumeSource_To_api_Disk(volumeName string, disk *api.D
 	disk.Driver.Type = "qcow2"
 	disk.Driver.ErrorPolicy = "stop"
 	disk.Driver.Discard = "unmap"
-	disk.Source.File = ephemeraldisk.GetFilePath(volumeName)
+	disk.Source.File = c.EphemeraldiskCreator.GetFilePath(volumeName)
 	disk.BackingStore = &api.BackingStore{
 		Format: &api.BackingStoreFormat{},
 		Source: &api.DiskSource{},
@@ -944,12 +963,6 @@ func Convert_v1_Features_To_api_Features(source *v1.Features, features *api.Feat
 			State: boolToOnOff(source.Pvspinlock.Enabled, true),
 		}
 	}
-	return nil
-}
-
-func Convert_v1_Machine_To_api_OSType(source *v1.Machine, ost *api.OSType) error {
-	ost.Machine = source.Type
-
 	return nil
 }
 
@@ -1140,6 +1153,31 @@ func Convert_v1_VirtualMachineInstance_To_api_Domain(vmi *v1.VirtualMachineInsta
 		if len(vmi.Spec.Domain.Firmware.Serial) > 0 {
 			domain.Spec.SysInfo.System = append(domain.Spec.SysInfo.System, api.Entry{Name: "serial", Value: string(vmi.Spec.Domain.Firmware.Serial)})
 		}
+
+		if util.HasKernelBootContainerImage(vmi) {
+			kb := vmi.Spec.Domain.Firmware.KernelBoot
+
+			log.Log.Object(vmi).Infof("kernel boot defined for VMI. Converting to domain XML")
+			if kb.Container.KernelPath != "" {
+				kernelPath := containerdisk.GetKernelBootArtifactPathFromLauncherView(kb.Container.KernelPath)
+				log.Log.Object(vmi).Infof("setting kernel path for kernel boot: " + kernelPath)
+				domain.Spec.OS.Kernel = kernelPath
+			}
+
+			if kb.Container.InitrdPath != "" {
+				initrdPath := containerdisk.GetKernelBootArtifactPathFromLauncherView(kb.Container.InitrdPath)
+				log.Log.Object(vmi).Infof("setting initrd path for kernel boot: " + initrdPath)
+				domain.Spec.OS.Initrd = initrdPath
+			}
+
+		}
+
+		// Define custom command-line arguments even if kernel-boot container is not defined
+		if f := vmi.Spec.Domain.Firmware; f != nil && f.KernelBoot != nil {
+			log.Log.Object(vmi).Infof("setting custom kernel arguments: " + f.KernelBoot.KernelArgs)
+			domain.Spec.OS.KernelArgs = f.KernelBoot.KernelArgs
+		}
+
 	}
 	if c.SMBios != nil {
 		domain.Spec.SysInfo.System = append(domain.Spec.SysInfo.System,
@@ -1489,10 +1527,9 @@ func Convert_v1_VirtualMachineInstance_To_api_Domain(vmi *v1.VirtualMachineInsta
 			return err
 		}
 	}
-	apiOst := &vmi.Spec.Domain.Machine
-	err = Convert_v1_Machine_To_api_OSType(apiOst, &domain.Spec.OS.Type)
-	if err != nil {
-		return err
+
+	if machine := vmi.Spec.Domain.Machine; machine != nil {
+		domain.Spec.OS.Type.Machine = machine.Type
 	}
 
 	if vmi.Spec.Domain.CPU != nil {

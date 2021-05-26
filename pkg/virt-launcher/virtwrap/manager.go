@@ -36,10 +36,11 @@ import (
 	"sync"
 	"time"
 
+	"kubevirt.io/kubevirt/pkg/downwardmetrics"
+	"kubevirt.io/kubevirt/pkg/network/cache"
 	cmdclient "kubevirt.io/kubevirt/pkg/virt-handler/cmd-client"
 	eventsclient "kubevirt.io/kubevirt/pkg/virt-launcher/notify-client"
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/converter"
-	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/network/cache"
 
 	k8sv1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -100,6 +101,8 @@ type DomainManager interface {
 	GetUsers() ([]v1.VirtualMachineInstanceGuestOSUser, error)
 	GetFilesystems() ([]v1.VirtualMachineInstanceFileSystem, error)
 	FinalizeVirtualMachineMigration(*v1.VirtualMachineInstance) error
+	InterfacesStatus(domainInterfaces []api.Interface) []api.InterfaceStatus
+	GetGuestOSInfo() *api.GuestOSInfo
 }
 
 type LibvirtDomainManager struct {
@@ -121,6 +124,7 @@ type LibvirtDomainManager struct {
 	setGuestTimeContextPtr   *contextStore
 	ovmfPath                 string
 	networkCacheStoreFactory cache.InterfaceCacheFactory
+	ephemeralDiskCreator     ephemeraldisk.EphemeralDiskCreatorInterface
 }
 
 type hostDeviceTypePrefix struct {
@@ -151,7 +155,7 @@ func (s pausedVMIs) contains(uid types.UID) bool {
 	return ok
 }
 
-func NewLibvirtDomainManager(connection cli.Connection, virtShareDir string, notifier *eventsclient.Notifier, lessPVCSpaceToleration int, agentStore *agentpoller.AsyncAgentStore, ovmfPath string) (DomainManager, error) {
+func NewLibvirtDomainManager(connection cli.Connection, virtShareDir string, notifier *eventsclient.Notifier, lessPVCSpaceToleration int, agentStore *agentpoller.AsyncAgentStore, ovmfPath string, ephemeralDiskCreator ephemeraldisk.EphemeralDiskCreatorInterface) (DomainManager, error) {
 	manager := LibvirtDomainManager{
 		virConn:                connection,
 		virtShareDir:           virtShareDir,
@@ -163,6 +167,7 @@ func NewLibvirtDomainManager(connection cli.Connection, virtShareDir string, not
 		agentData:                agentStore,
 		ovmfPath:                 ovmfPath,
 		networkCacheStoreFactory: cache.NewInterfaceCacheFactory(),
+		ephemeralDiskCreator:     ephemeralDiskCreator,
 	}
 	manager.credManager = accesscredentials.NewManager(connection, &manager.domainModifyLock)
 
@@ -461,17 +466,17 @@ func (l *LibvirtDomainManager) preStartHook(vmi *v1.VirtualMachineInstance, doma
 	}
 
 	// Create ephemeral disk for container disks
-	err = containerdisk.CreateEphemeralImages(vmi)
+	err = containerdisk.CreateEphemeralImages(vmi, l.ephemeralDiskCreator)
 	if err != nil {
 		return domain, fmt.Errorf("preparing ephemeral container disk images failed: %v", err)
 	}
 	// Create images for volumes that are marked ephemeral.
-	err = ephemeraldisk.CreateEphemeralImages(vmi)
+	err = l.ephemeralDiskCreator.CreateEphemeralImages(vmi)
 	if err != nil {
 		return domain, fmt.Errorf("preparing ephemeral images failed: %v", err)
 	}
 	// create empty disks if they exist
-	if err := emptydisk.CreateTemporaryDisks(vmi); err != nil {
+	if err := emptydisk.NewEmptyDiskCreator().CreateTemporaryDisks(vmi); err != nil {
 		return domain, fmt.Errorf("creating empty disks failed: %v", err)
 	}
 	// create ConfigMap disks if they exists
@@ -495,6 +500,10 @@ func (l *LibvirtDomainManager) preStartHook(vmi *v1.VirtualMachineInstance, doma
 	// create ServiceAccount disk if exists
 	if err := config.CreateServiceAccountDisk(vmi); err != nil {
 		return domain, fmt.Errorf("creating service account disk failed: %v", err)
+	}
+	// create downwardMetric disk if exists
+	if err := downwardmetrics.CreateDownwardMetricDisk(vmi); err != nil {
+		return domain, fmt.Errorf("failed to craete downwardMetric disk: %v", err)
 	}
 
 	// set drivers cache mode
@@ -691,6 +700,7 @@ func (l *LibvirtDomainManager) generateConverterContext(vmi *v1.VirtualMachineIn
 		OVMFPath:              l.ovmfPath,
 		UseVirtioTransitional: vmi.Spec.Domain.Devices.UseVirtioTransitional != nil && *vmi.Spec.Domain.Devices.UseVirtioTransitional,
 		PermanentVolumes:      permanentVolumes,
+		EphemeraldiskCreator:  l.ephemeralDiskCreator,
 	}
 
 	if options != nil {
@@ -1370,6 +1380,20 @@ func (l *LibvirtDomainManager) GetGuestInfo() (v1.VirtualMachineInstanceGuestAge
 	}
 
 	return guestInfo, nil
+}
+
+// InterfacesStatus returns the interfaces Guest Agent reported
+func (l *LibvirtDomainManager) InterfacesStatus(domainInterfaces []api.Interface) []api.InterfaceStatus {
+	if interfaces := l.agentData.GetInterfaceStatus(); interfaces != nil {
+		return agentpoller.MergeAgentStatusesWithDomainData(domainInterfaces, interfaces)
+	}
+
+	return nil
+}
+
+// GetGuestOSInfo returns the Guest OS version and architecture
+func (l *LibvirtDomainManager) GetGuestOSInfo() *api.GuestOSInfo {
+	return l.agentData.GetGuestOSInfo()
 }
 
 // GetUsers return the full list of users on the guest machine

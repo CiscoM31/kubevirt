@@ -32,6 +32,8 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/tools/cache"
 
+	"kubevirt.io/kubevirt/pkg/downwardmetrics"
+
 	hostdisk "kubevirt.io/kubevirt/pkg/host-disk"
 
 	networkv1 "github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/apis/k8s.cni.cncf.io/v1"
@@ -608,6 +610,23 @@ func (t *templateService) renderLaunchManifest(vmi *v1.VirtualMachineInstance, t
 			serviceAccountName = volume.ServiceAccount.ServiceAccountName
 		}
 
+		if volume.DownwardMetrics != nil {
+			sizeLimit := resource.MustParse("1Mi")
+			volumes = append(volumes, k8sv1.Volume{
+				Name: volume.Name,
+				VolumeSource: k8sv1.VolumeSource{
+					EmptyDir: &k8sv1.EmptyDirVolumeSource{
+						Medium:    "Memory",
+						SizeLimit: &sizeLimit,
+					},
+				},
+			})
+			volumeMounts = append(volumeMounts, k8sv1.VolumeMount{
+				Name:      volume.Name,
+				MountPath: config.DownwardMetricDisksDir,
+			})
+		}
+
 		if volume.CloudInitNoCloud != nil {
 			if volume.CloudInitNoCloud.UserDataSecretRef != nil {
 				// attach a secret referenced by the user
@@ -1078,6 +1097,12 @@ func (t *templateService) renderLaunchManifest(vmi *v1.VirtualMachineInstance, t
 	containersDisks := containerdisk.GenerateContainers(vmi, "container-disks", "virt-bin-share-dir")
 	containers = append(containers, containersDisks...)
 
+	kernelBootContainer := containerdisk.GenerateKernelBootContainer(vmi, "container-disks", "virt-bin-share-dir")
+	if kernelBootContainer != nil {
+		log.Log.Object(vmi).Infof("kernel boot container generated")
+		containers = append(containers, *kernelBootContainer)
+	}
+
 	volumes = append(volumes,
 		k8sv1.Volume{
 			Name: "virt-bin-share-dir",
@@ -1187,7 +1212,7 @@ func (t *templateService) renderLaunchManifest(vmi *v1.VirtualMachineInstance, t
 
 	var initContainers []k8sv1.Container
 
-	if HaveContainerDiskVolume(vmi.Spec.Volumes) {
+	if HaveContainerDiskVolume(vmi.Spec.Volumes) || util.HasKernelBootContainerImage(vmi) {
 
 		initContainerVolumeMounts := []k8sv1.VolumeMount{
 			{
@@ -1545,6 +1570,12 @@ func getMemoryOverhead(vmi *v1.VirtualMachineInstance, cpuArch string) *resource
 	// Additial information can be found here: https://www.redhat.com/archives/libvir-list/2015-November/msg00329.html
 	if util.IsVFIOVMI(vmi) {
 		overhead.Add(resource.MustParse("1Gi"))
+	}
+
+	// DownardMetrics volumes are using emptyDirs backed by memory.
+	// the max. disk size is only 256Ki.
+	if downwardmetrics.HasDownwardMetricDisk(vmi) {
+		overhead.Add(resource.MustParse("1Mi"))
 	}
 
 	return overhead

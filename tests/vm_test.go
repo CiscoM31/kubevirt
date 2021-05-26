@@ -36,7 +36,6 @@ import (
 	"github.com/pborman/uuid"
 	corev1 "k8s.io/api/core/v1"
 	k8sv1 "k8s.io/api/core/v1"
-	storagev1 "k8s.io/api/storage/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	k8smetav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -118,124 +117,6 @@ var _ = Describe("[rfe_id:1177][crit:medium][vendor:cnv-qe@redhat.com][level:com
 			Expect(len(reviewResponse.Details.Causes)).To(Equal(1))
 			Expect(reviewResponse.Details.Causes[0].Field).To(Equal("spec.template.spec.domain.devices.disks[2].name"))
 		})
-		Context("with a PVC from a Datavolume", func() {
-			var storageClass *storagev1.StorageClass
-			BeforeEach(func() {
-				// ensure that we always use a storage class which binds immediately,
-				// otherwise we will never see a PVC appear for the datavolume
-				bindMode := storagev1.VolumeBindingImmediate
-				storageClass = &storagev1.StorageClass{
-					ObjectMeta: k8smetav1.ObjectMeta{
-						GenerateName: "fake",
-					},
-					Provisioner:       "afakeone",
-					VolumeBindingMode: &bindMode,
-				}
-				storageClass, err = virtClient.StorageV1().StorageClasses().Create(context.Background(), storageClass, metav1.CreateOptions{})
-				Expect(err).ToNot(HaveOccurred())
-			})
-			AfterEach(func() {
-				if storageClass != nil && storageClass.Name != "" {
-					err := virtClient.StorageV1().StorageClasses().Delete(context.Background(), storageClass.Name, metav1.DeleteOptions{})
-					Expect(err).ToNot(HaveOccurred())
-				}
-			})
-
-			It("[sig-storage][test_id:4643]should NOT be rejected when VM template lists a DataVolume, but VM lists PVC VolumeSource", func() {
-
-				dv := tests.NewRandomDataVolumeWithHttpImportInStorageClass(tests.GetUrl(tests.AlpineHttpUrl), tests.NamespaceTestDefault, storageClass.Name, k8sv1.ReadWriteOnce)
-				_, err = virtClient.CdiClient().CdiV1alpha1().DataVolumes(dv.Namespace).Create(context.Background(), dv, metav1.CreateOptions{})
-				Expect(err).To(BeNil())
-
-				defer func(dv *cdiv1.DataVolume) {
-					By("Deleting the DataVolume")
-					ExpectWithOffset(1, virtClient.CdiClient().CdiV1alpha1().DataVolumes(dv.Namespace).Delete(context.Background(), dv.Name, metav1.DeleteOptions{})).To(Succeed(), metav1.DeleteOptions{})
-				}(dv)
-
-				Eventually(func() (*corev1.PersistentVolumeClaim, error) {
-					return virtClient.CoreV1().PersistentVolumeClaims(dv.Namespace).Get(context.Background(), dv.Name, metav1.GetOptions{})
-				}, 30).Should(Not(BeNil()))
-
-				vmi := tests.NewRandomVMI()
-
-				diskName := "disk0"
-				bus := "virtio"
-				vmi.Spec.Domain.Devices.Disks = append(vmi.Spec.Domain.Devices.Disks, v1.Disk{
-					Name: diskName,
-					DiskDevice: v1.DiskDevice{
-						Disk: &v1.DiskTarget{
-							Bus: bus,
-						},
-					},
-				})
-				vmi.Spec.Volumes = append(vmi.Spec.Volumes, v1.Volume{
-					Name: diskName,
-					VolumeSource: v1.VolumeSource{
-						PersistentVolumeClaim: &k8sv1.PersistentVolumeClaimVolumeSource{
-							ClaimName: dv.ObjectMeta.Name,
-						},
-					},
-				})
-
-				vmi.Spec.Domain.Resources.Requests[k8sv1.ResourceMemory] = resource.MustParse("512M")
-
-				vm := tests.NewRandomVirtualMachine(vmi, true)
-				dvt := &v1.DataVolumeTemplateSpec{
-					ObjectMeta: dv.ObjectMeta,
-					Spec:       dv.Spec,
-				}
-				vm.Spec.DataVolumeTemplates = append(vm.Spec.DataVolumeTemplates, *dvt)
-				_, err = virtClient.VirtualMachine(tests.NamespaceTestDefault).Create(vm)
-				Expect(err).ToNot(HaveOccurred())
-			})
-			It("[Serial][test_id:4644]should fail to start when a volume is backed by PVC created by DataVolume instead of the DataVolume itself", func() {
-				dv := tests.NewRandomDataVolumeWithHttpImportInStorageClass(tests.GetUrl(tests.AlpineHttpUrl), tests.NamespaceTestDefault, storageClass.Name, k8sv1.ReadWriteOnce)
-				_, err := virtClient.CdiClient().CdiV1alpha1().DataVolumes(dv.Namespace).Create(context.Background(), dv, metav1.CreateOptions{})
-				Expect(err).To(BeNil())
-
-				defer func(dv *cdiv1.DataVolume) {
-					By("Deleting the DataVolume")
-					ExpectWithOffset(1, virtClient.CdiClient().CdiV1alpha1().DataVolumes(dv.Namespace).Delete(context.Background(), dv.Name, metav1.DeleteOptions{})).To(Succeed(), metav1.DeleteOptions{})
-				}(dv)
-				Eventually(func() (*corev1.PersistentVolumeClaim, error) {
-					return virtClient.CoreV1().PersistentVolumeClaims(dv.Namespace).Get(context.Background(), dv.Name, metav1.GetOptions{})
-				}).Should(Not(BeNil()), 30)
-
-				vmi := tests.NewRandomVMI()
-
-				diskName := "disk0"
-				bus := "virtio"
-				vmi.Spec.Domain.Devices.Disks = append(vmi.Spec.Domain.Devices.Disks, v1.Disk{
-					Name: diskName,
-					DiskDevice: v1.DiskDevice{
-						Disk: &v1.DiskTarget{
-							Bus: bus,
-						},
-					},
-				})
-				vmi.Spec.Volumes = append(vmi.Spec.Volumes, v1.Volume{
-					Name: diskName,
-					VolumeSource: v1.VolumeSource{
-						PersistentVolumeClaim: &k8sv1.PersistentVolumeClaimVolumeSource{
-							ClaimName: dv.ObjectMeta.Name,
-						},
-					},
-				})
-
-				vmi.Spec.Domain.Resources.Requests[k8sv1.ResourceMemory] = resource.MustParse("512M")
-
-				vm := tests.NewRandomVirtualMachine(vmi, true)
-				_, err = virtClient.VirtualMachine(tests.NamespaceTestDefault).Create(vm)
-				Expect(err).ShouldNot(HaveOccurred())
-
-				Eventually(func() bool {
-					vm, err := virtClient.VirtualMachine(vm.Namespace).Get(vm.Name, &k8smetav1.GetOptions{})
-					Expect(err).ToNot(HaveOccurred())
-
-					return vm.Status.Created
-				}, 30*time.Second, 1*time.Second).Should(Equal(false))
-			})
-		})
 	})
 
 	Context("[Serial]A mutated VirtualMachine given", func() {
@@ -266,7 +147,7 @@ var _ = Describe("[rfe_id:1177][crit:medium][vendor:cnv-qe@redhat.com][level:com
 		It("[test_id:3312]should set the default MachineType when created without explicit value", func() {
 			By("Creating VirtualMachine")
 			template, _ := newVirtualMachineInstanceWithContainerDisk()
-			template.Spec.Domain.Machine.Type = ""
+			template.Spec.Domain.Machine = nil
 			vm := createVirtualMachine(false, template)
 
 			createdVM, err := virtClient.VirtualMachine(vm.Namespace).Get(vm.Name, &k8smetav1.GetOptions{})
@@ -279,7 +160,7 @@ var _ = Describe("[rfe_id:1177][crit:medium][vendor:cnv-qe@redhat.com][level:com
 			By("Creating VirtualMachine")
 			explicitMachineType := "pc-q35-3.0"
 			template, _ := newVirtualMachineInstanceWithContainerDisk()
-			template.Spec.Domain.Machine.Type = explicitMachineType
+			template.Spec.Domain.Machine = &v1.Machine{Type: explicitMachineType}
 			vm := createVirtualMachine(false, template)
 
 			createdVM, err := virtClient.VirtualMachine(vm.Namespace).Get(vm.Name, &k8smetav1.GetOptions{})
@@ -1437,61 +1318,6 @@ var _ = Describe("[rfe_id:1177][crit:medium][vendor:cnv-qe@redhat.com][level:com
 				})
 			})
 		})
-
-		Context("VM rename", func() {
-			var vm1 *v1.VirtualMachine
-
-			BeforeEach(func() {
-				vm1 = newVirtualMachine(false)
-			})
-
-			It("[test_id:4646]should rename a stopped VM only once", func() {
-				renameCommand := tests.NewRepeatableVirtctlCommand(vm.COMMAND_RENAME, vm1.Name, vm1.Name+"new",
-					"--namespace", vm1.Namespace)
-				Expect(renameCommand()).To(Succeed())
-				Expect(renameCommand()).ToNot(Succeed())
-			})
-
-			It("[test_id:4647]should rename a stopped VM", func() {
-				renameCommand := tests.NewRepeatableVirtctlCommand(vm.COMMAND_RENAME, vm1.Name, vm1.Name+"new",
-					"--namespace", vm1.Namespace)
-				Expect(renameCommand()).To(Succeed())
-			})
-
-			It("[test_id:4648]should reject renaming a running VM", func() {
-				vm2 := newVirtualMachine(true)
-
-				renameCommand := tests.NewRepeatableVirtctlCommand(vm.COMMAND_RENAME, vm2.Name, vm2.Name+"new",
-					"--namespace", vm2.Namespace)
-				Expect(renameCommand()).ToNot(Succeed())
-			})
-
-			It("[test_id:4649]should reject renaming a VM to the same name", func() {
-				renameCommand := tests.NewRepeatableVirtctlCommand(vm.COMMAND_RENAME, vm1.Name, vm1.Name,
-					"--namespace", vm1.Namespace)
-				Expect(renameCommand()).ToNot(Succeed())
-			})
-
-			It("[test_id:4650]should reject renaming a VM with an empty name", func() {
-				renameCommand := tests.NewRepeatableVirtctlCommand(vm.COMMAND_RENAME, vm1.Name, "",
-					"--namespace", vm1.Namespace)
-				Expect(renameCommand()).ToNot(Succeed())
-			})
-
-			It("[test_id:4651]should reject renaming a VM with invalid name", func() {
-				renameCommand := tests.NewRepeatableVirtctlCommand(vm.COMMAND_RENAME, vm1.Name, "invalid name <>?:;",
-					"--namespace", vm1.Namespace)
-				Expect(renameCommand()).ToNot(Succeed())
-			})
-
-			It("[test_id:4652]should reject renaming a VM if the new name is taken", func() {
-				vm2 := newVirtualMachine(true)
-
-				renameCommand := tests.NewRepeatableVirtctlCommand(vm.COMMAND_RENAME, vm1.Name, vm2.Name,
-					"--namespace", vm1.Namespace)
-				Expect(renameCommand()).ToNot(Succeed())
-			})
-		})
 	})
 
 	Context("[rfe_id:273]with oc/kubectl", func() {
@@ -1729,86 +1555,6 @@ var _ = Describe("[rfe_id:1177][crit:medium][vendor:cnv-qe@redhat.com][level:com
 			})
 		})
 
-	})
-
-	Context("VM rename", func() {
-		var (
-			cli kubecli.VirtualMachineInterface
-		)
-
-		BeforeEach(func() {
-			cli = virtClient.VirtualMachine(tests.NamespaceTestDefault)
-		})
-
-		Context("VM update", func() {
-			var (
-				vm1 *v1.VirtualMachine
-			)
-
-			BeforeEach(func() {
-				vm1 = tests.NewRandomVMWithEphemeralDisk(cd.ContainerDiskFor(cd.ContainerDiskCirros))
-				cli.Create(vm1)
-			})
-
-			It("[test_id:4654]should fail if the new name is already taken", func() {
-				vm2 := tests.NewRandomVMWithEphemeralDisk(cd.ContainerDiskFor(cd.ContainerDiskCirros))
-				cli.Create(vm2)
-
-				err := cli.Rename(vm1.Name, &v1.RenameOptions{NewName: vm2.Name})
-				Expect(err).To(HaveOccurred())
-				Expect(err.Error()).To(ContainSubstring("name already exists"))
-			})
-
-			It("[test_id:4655]should fail if the new name is empty", func() {
-				err := cli.Rename(vm1.Name, &v1.RenameOptions{})
-				Expect(err).To(HaveOccurred())
-				Expect(err.Error()).To(ContainSubstring("Please provide a new name for the VM"))
-			})
-
-			It("[test_id:4656]should fail if the new name is invalid", func() {
-				err := cli.Rename(vm1.Name, &v1.RenameOptions{NewName: "invalid name <>?:;"})
-				Expect(err).To(HaveOccurred())
-				Expect(err.Error()).To(ContainSubstring("The VM's new name is not valid"))
-			})
-
-			It("[test_id:4657]should fail if the new name is identical to the current name", func() {
-				err := cli.Rename(vm1.Name, &v1.RenameOptions{NewName: vm1.Name})
-				Expect(err).To(HaveOccurred())
-				Expect(err.Error()).To(ContainSubstring("identical"))
-			})
-
-			It("[test_id:4658]should fail if the VM is running", func() {
-				err := cli.Start(vm1.Name)
-				Expect(err).ToNot(HaveOccurred())
-
-				err = cli.Rename(vm1.Name, &v1.RenameOptions{NewName: vm1.Name + "new"})
-				Expect(err).To(HaveOccurred())
-				Expect(err.Error()).To(ContainSubstring("running"))
-			})
-
-			It("[test_id:4659]should succeed", func() {
-				shouldSkip, err := isKubemacpoolDeployed(virtClient)
-				Expect(err).ToNot(HaveOccurred())
-				if shouldSkip {
-					Skip("rename VM is broken when Kubemacpool is deployed. Tracking issue: https://bugzilla.redhat.com/show_bug.cgi?id=1954014")
-				}
-				err = cli.Rename(vm1.Name, &v1.RenameOptions{NewName: vm1.Name + "new"})
-				Expect(err).ToNot(HaveOccurred())
-
-				Eventually(func() error {
-					_, err := cli.Get(vm1.Name+"new", &k8smetav1.GetOptions{})
-
-					return err
-				}, 10*time.Second, 1*time.Second).Should(BeNil())
-
-				Eventually(func() error {
-					_, err = cli.Get(vm1.Name, &k8smetav1.GetOptions{})
-
-					return err
-				}, 10*time.Second, 1*time.Second).Should(HaveOccurred())
-				Expect(errors.IsNotFound(err)).To(BeTrue())
-			})
-		})
 	})
 })
 

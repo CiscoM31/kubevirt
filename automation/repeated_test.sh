@@ -1,6 +1,24 @@
 #!/bin/bash
-
+#
+# This file is part of the KubeVirt project
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Copyright 2019 Red Hat, Inc.
+#
 set -euo pipefail
+
+export TIMESTAMP=${TIMESTAMP:-1}
 
 function usage {
     cat <<EOF
@@ -131,7 +149,7 @@ for lane in "${TEST_LANES[@]}"; do
     for i in $(seq 1 "$NUM_TESTS"); do
         echo "test lane: $lane, run: $i"
         make cluster-sync
-        ginko_params="-noColor -succinct -slowSpecThreshold=30 -focus=${NEW_TESTS} -regexScansFilePath=true"
+        ginko_params="-noColor -succinct -slowSpecThreshold=30 -focus=${NEW_TESTS} -skip=QUARANTINE -regexScansFilePath=true"
         FUNC_TEST_ARGS="$ginko_params" make functest
         if [[ $? -ne 0 ]]; then
             echo "test lane: $lane, run: $i, tests failed!"

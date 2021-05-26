@@ -47,6 +47,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	aggregatorclient "k8s.io/kube-aggregator/pkg/client/clientset_generated/clientset"
 	"k8s.io/utils/pointer"
@@ -923,6 +924,7 @@ spec:
 	Describe("should reconcile components", func() {
 
 		deploymentName := "virt-controller"
+		daemonSetName := "virt-handler"
 		envVarDeploymentKeyToUpdate := "USER_ADDED_ENV"
 
 		crdName := "virtualmachines.kubevirt.io"
@@ -958,7 +960,7 @@ spec:
 			}, 30*time.Second, 5*time.Second).Should(Equal(generation))
 		},
 
-			table.Entry("[QUARANTINE] deployments",
+			table.Entry("[QUARANTINE] [test_id:6254] deployments",
 
 				func() {
 
@@ -996,7 +998,7 @@ spec:
 					return true
 				}),
 
-			table.Entry("customresourcedefinitions",
+			table.Entry("[test_id:6255] customresourcedefinitions",
 				func() {
 					vmcrd, err := virtClient.ExtensionsClient().ApiextensionsV1().CustomResourceDefinitions().Get(context.Background(), crdName, metav1.GetOptions{})
 					Expect(err).ToNot(HaveOccurred())
@@ -1026,7 +1028,7 @@ spec:
 
 					return true
 				}),
-			table.Entry("poddisruptionbudgets",
+			table.Entry("[test_id:6256] poddisruptionbudgets",
 				func() {
 					pdb, err := virtClient.PolicyV1beta1().PodDisruptionBudgets(originalKv.Namespace).Get(context.Background(), "virt-controller-pdb", metav1.GetOptions{})
 					Expect(err).ToNot(HaveOccurred())
@@ -1052,7 +1054,71 @@ spec:
 
 					return pdb.Spec.Selector.MatchLabels["kubevirt.io"] != "dne"
 				}),
+			table.Entry("daemonsets",
+				func() {
+					vc, err := virtClient.AppsV1().DaemonSets(originalKv.Namespace).Get(context.Background(), daemonSetName, metav1.GetOptions{})
+					Expect(err).ToNot(HaveOccurred())
+
+					vc.Spec.Template.Spec.Containers[0].Env = []k8sv1.EnvVar{
+						{
+							Name:  envVarDeploymentKeyToUpdate,
+							Value: "value",
+						},
+					}
+
+					vc, err = virtClient.AppsV1().DaemonSets(originalKv.Namespace).Update(context.Background(), vc, metav1.UpdateOptions{})
+					Expect(err).ToNot(HaveOccurred())
+					Expect(vc.Spec.Template.Spec.Containers[0].Env[0].Name).To(Equal(envVarDeploymentKeyToUpdate))
+				},
+
+				func() runtime.Object {
+					vc, err := virtClient.AppsV1().DaemonSets(originalKv.Namespace).Get(context.Background(), daemonSetName, metav1.GetOptions{})
+					Expect(err).ToNot(HaveOccurred())
+					return vc
+				},
+
+				func() bool {
+					vc, err := virtClient.AppsV1().DaemonSets(originalKv.Namespace).Get(context.Background(), daemonSetName, metav1.GetOptions{})
+					Expect(err).ToNot(HaveOccurred())
+
+					for _, env := range vc.Spec.Template.Spec.Containers[0].Env {
+						if env.Name == envVarDeploymentKeyToUpdate {
+							return false
+						}
+					}
+
+					return true
+				}),
 		)
+
+		It("checking updating service is reverted to original state", func() {
+			service, err := virtClient.CoreV1().Services(originalKv.Namespace).Get(context.Background(), "virt-api", metav1.GetOptions{})
+			Expect(err).ToNot(HaveOccurred())
+
+			originalPort := service.Spec.Ports[0].Port
+			service.Spec.Ports[0].Port = 123
+
+			By("Update service with undesired port")
+			service, err = virtClient.CoreV1().Services(originalKv.Namespace).Update(context.Background(), service, metav1.UpdateOptions{})
+			Expect(err).ToNot(HaveOccurred())
+			Expect(service.Spec.Ports[0].Port).To(Equal(int32(123)))
+
+			By("Test that the port is revered to the original")
+			Eventually(func() bool {
+				service, err := virtClient.CoreV1().Services(originalKv.Namespace).Get(context.Background(), "virt-api", metav1.GetOptions{})
+				Expect(err).ToNot(HaveOccurred())
+
+				return service.Spec.Ports[0].Port == originalPort
+			}, 120*time.Second, 5*time.Second).Should(BeTrue(), "waiting for service to revert to original state")
+
+			By("Test that the revert of the service stays consistent")
+			Consistently(func() int32 {
+				service, err = virtClient.CoreV1().Services(originalKv.Namespace).Get(context.Background(), "virt-api", metav1.GetOptions{})
+				Expect(err).ToNot(HaveOccurred())
+
+				return service.Spec.Ports[0].Port
+			}, 20*time.Second, 5*time.Second).Should(Equal(originalPort))
+		})
 	})
 
 	Describe("[rfe_id:2291][crit:high][vendor:cnv-qe@redhat.com][level:component]should start a VM", func() {
@@ -1699,10 +1765,23 @@ spec:
 		})
 
 		It("[test_id:4613]should remove owner references on non-namespaces resources when updating a resource", func() {
+			By("getting existing resource to reference")
+			cm, err := virtClient.CoreV1().ConfigMaps(originalKv.Namespace).Get(context.Background(), "kubevirt-ca", metav1.GetOptions{})
+			Expect(err).ToNot(HaveOccurred())
+			ownerRef := []metav1.OwnerReference{
+				*metav1.NewControllerRef(&k8sv1.ConfigMap{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: cm.Name,
+						UID:  cm.UID,
+					},
+				}, schema.GroupVersionKind{Version: "v1", Kind: "ConfigMap", Group: ""}),
+			}
+
 			By("adding an owner reference")
 			origCRD, err := virtClient.ExtensionsClient().ApiextensionsV1().CustomResourceDefinitions().Get(context.Background(), "virtualmachineinstances.kubevirt.io", metav1.GetOptions{})
+			Expect(err).ToNot(HaveOccurred())
 			crd := origCRD.DeepCopy()
-			crd.OwnerReferences = []metav1.OwnerReference{*metav1.NewControllerRef(&v1.KubeVirt{ObjectMeta: metav1.ObjectMeta{Name: "kubevirt", UID: "a185f8c3-3f38-4b89-a8cc-80f3731f7ff9"}}, v1.KubeVirtGroupVersionKind)}
+			crd.OwnerReferences = ownerRef
 			patch := patchCRD(origCRD, crd)
 			_, err = virtClient.ExtensionsClient().ApiextensionsV1().CustomResourceDefinitions().Patch(context.Background(), "virtualmachineinstances.kubevirt.io", types.MergePatchType, patch, metav1.PatchOptions{})
 			Expect(err).ToNot(HaveOccurred())
@@ -1717,12 +1796,13 @@ spec:
 			patch = patchCRD(origCRD, crd)
 			_, err = virtClient.ExtensionsClient().ApiextensionsV1().CustomResourceDefinitions().Patch(context.Background(), "virtualmachineinstances.kubevirt.io", types.MergePatchType, patch, metav1.PatchOptions{})
 			Expect(err).ToNot(HaveOccurred())
+
 			By("waiting until the owner reference disappears again")
 			Eventually(func() []metav1.OwnerReference {
 				crd, err = virtClient.ExtensionsClient().ApiextensionsV1().CustomResourceDefinitions().Get(context.Background(), "virtualmachineinstances.kubevirt.io", metav1.GetOptions{})
 				Expect(err).ToNot(HaveOccurred())
 				return crd.OwnerReferences
-			}, 10*time.Second, 1*time.Second).Should(BeEmpty())
+			}, 20*time.Second, 1*time.Second).Should(BeEmpty())
 			Expect(crd.ObjectMeta.OwnerReferences).To(HaveLen(0))
 		})
 
@@ -2090,30 +2170,30 @@ spec:
 			}
 		})
 
-		It("should accept valid cert rotation parameters", func() {
+		It("[test_id:6257]should accept valid cert rotation parameters", func() {
 			kv := copyOriginalKv()
 			patchKvCertConfig(kv.Name, certConfig)
 		})
 
-		It("should reject combining deprecated and new cert rotation parameters", func() {
+		It("[test_id:6258]should reject combining deprecated and new cert rotation parameters", func() {
 			kv := copyOriginalKv()
 			certConfig.CAOverlapInterval = &metav1.Duration{Duration: 8 * time.Hour}
 			patchKvCertConfigExpectError(kv.Name, certConfig)
 		})
 
-		It("should reject CA expires before rotation", func() {
+		It("[test_id:6259]should reject CA expires before rotation", func() {
 			kv := copyOriginalKv()
 			certConfig.CA.Duration = &metav1.Duration{Duration: 14 * time.Hour}
 			patchKvCertConfigExpectError(kv.Name, certConfig)
 		})
 
-		It("should reject Cert expires before rotation", func() {
+		It("[test_id:6260]should reject Cert expires before rotation", func() {
 			kv := copyOriginalKv()
 			certConfig.Server.Duration = &metav1.Duration{Duration: 8 * time.Hour}
 			patchKvCertConfigExpectError(kv.Name, certConfig)
 		})
 
-		It("should reject Cert rotates after CA expires", func() {
+		It("[test_id:6261]should reject Cert rotates after CA expires", func() {
 			kv := copyOriginalKv()
 			certConfig.Server.Duration = &metav1.Duration{Duration: 48 * time.Hour}
 			certConfig.Server.RenewBefore = &metav1.Duration{Duration: 36 * time.Hour}

@@ -22,7 +22,10 @@ package services
 import (
 	"errors"
 	"runtime"
+	"strings"
 	"testing"
+
+	"kubevirt.io/kubevirt/tools/vms-generator/utils"
 
 	"github.com/golang/mock/gomock"
 	networkv1 "github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/apis/k8s.cni.cncf.io/v1"
@@ -36,6 +39,8 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/tools/cache"
+
+	k6tconfig "kubevirt.io/kubevirt/pkg/config"
 
 	testutils2 "kubevirt.io/client-go/testutils"
 
@@ -2219,6 +2224,63 @@ var _ = Describe("Template", func() {
 			})
 		})
 
+		Context("with a downwardMetrics volume source", func() {
+
+			var vmi *v1.VirtualMachineInstance
+
+			BeforeEach(func() {
+				vmi = &v1.VirtualMachineInstance{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "testvmi", Namespace: "default", UID: "1234",
+					},
+					Spec: v1.VirtualMachineInstanceSpec{Domain: v1.DomainSpec{
+						Devices: v1.Devices{
+							DisableHotplug: true,
+						},
+					}},
+				}
+			})
+
+			It("Should add an empytDir backed by Memory", func() {
+				vmi.Spec.Volumes = []v1.Volume{
+					{
+						Name: "downardMetrics",
+						VolumeSource: v1.VolumeSource{
+							DownwardMetrics: &v1.DownwardMetricsVolumeSource{},
+						},
+					},
+				}
+
+				pod, err := svc.RenderLaunchManifest(vmi)
+				Expect(err).ToNot(HaveOccurred())
+				Expect(pod.Spec.Volumes).ToNot(BeEmpty())
+				Expect(len(pod.Spec.Volumes)).To(Equal(6))
+				Expect(pod.Spec.Volumes[1].EmptyDir).ToNot(BeNil())
+				Expect(pod.Spec.Volumes[1].EmptyDir.Medium).To(Equal(kubev1.StorageMediumMemory))
+				Expect(pod.Spec.Volumes[1].EmptyDir.SizeLimit.Equal(resource.MustParse("1Mi"))).To(BeTrue())
+				Expect(pod.Spec.Containers[0].VolumeMounts[4].MountPath).To(Equal(k6tconfig.DownwardMetricDisksDir))
+			})
+
+			It("Should add 1Mi memory overhead", func() {
+				pod, err := svc.RenderLaunchManifest(vmi)
+				Expect(err).ToNot(HaveOccurred())
+				overhead := pod.Spec.Containers[0].Resources.Requests.Memory()
+				vmi.Spec.Volumes = []v1.Volume{
+					{
+						Name: "downardMetrics",
+						VolumeSource: v1.VolumeSource{
+							DownwardMetrics: &v1.DownwardMetricsVolumeSource{},
+						},
+					},
+				}
+				pod, err = svc.RenderLaunchManifest(vmi)
+				Expect(err).ToNot(HaveOccurred())
+				newOverhead := pod.Spec.Containers[0].Resources.Requests.Memory()
+				overhead.Add(resource.MustParse("1Mi"))
+				Expect(newOverhead.Equal(*overhead)).To(BeTrue())
+			})
+		})
+
 		Context("with a configMap volume source", func() {
 			It("Should add the ConfigMap to template", func() {
 				volumes := []v1.Volume{
@@ -2668,6 +2730,34 @@ var _ = Describe("Template", func() {
 				table.Entry("request and limit is increased to consist non-user ephemeral storage", true),
 			)
 
+		})
+
+		Context("with kernel boot", func() {
+			hasContainerWithName := func(containers []kubev1.Container, name string) bool {
+				for _, container := range containers {
+					if strings.Contains(container.Name, name) {
+						return true
+					}
+				}
+				return false
+			}
+
+			It("should define containers and volumes properly", func() {
+				vmi := utils.GetVMIKernelBoot()
+				vmi.ObjectMeta = metav1.ObjectMeta{
+					Name: "testvmi-kernel-boot", Namespace: "default", UID: "1234",
+				}
+
+				pod, err := svc.RenderLaunchManifest(vmi)
+				Expect(err).To(BeNil())
+				Expect(pod).ToNot(BeNil())
+
+				containers := pod.Spec.Containers
+				Expect(containers).Should(HaveLen(2))
+
+				Expect(hasContainerWithName(containers, "kernel-boot")).To(BeTrue())
+				Expect(hasContainerWithName(pod.Spec.InitContainers, "container-disk-binary")).To(BeTrue())
+			})
 		})
 
 	})

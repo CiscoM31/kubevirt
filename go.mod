@@ -3,6 +3,7 @@ module kubevirt.io/kubevirt
 require (
 	github.com/Masterminds/semver v1.5.0
 	github.com/blang/semver v3.5.1+incompatible
+	github.com/c9s/goprocinfo v0.0.0-20210130143923-c95fcf8c64a8
 	github.com/containernetworking/plugins v0.8.2
 	github.com/coreos/go-iptables v0.4.3
 	github.com/coreos/go-semver v0.3.0
@@ -14,10 +15,10 @@ require (
 	github.com/fsnotify/fsnotify v1.4.9
 	github.com/ghodss/yaml v1.0.0
 	github.com/go-kit/kit v0.9.0
-	github.com/go-openapi/errors v0.19.2
-	github.com/go-openapi/spec v0.19.3
-	github.com/go-openapi/strfmt v0.19.0
-	github.com/go-openapi/validate v0.19.2
+	github.com/go-openapi/errors v0.19.9
+	github.com/go-openapi/spec v0.20.3
+	github.com/go-openapi/strfmt v0.20.0
+	github.com/go-openapi/validate v0.20.2
 	github.com/gogo/protobuf v1.3.2
 	github.com/golang/glog v0.0.0-20160126235308-23def4e6c14b
 	github.com/golang/mock v1.4.4
@@ -29,12 +30,14 @@ require (
 	github.com/google/uuid v1.1.2
 	github.com/gordonklaus/ineffassign v0.0.0-20210209182638-d0e41b2fc8ed
 	github.com/gorilla/websocket v1.4.2
+	github.com/imdario/mergo v0.3.9
 	github.com/insomniacslk/dhcp v0.0.0-20201112113307-4de412bc85d8
 	github.com/k8snetworkplumbingwg/network-attachment-definition-client v0.0.0-20191119172530-79f836b90111
 	github.com/krolaw/dhcp4 v0.0.0-20180925202202-7cead472c414
 	github.com/kubernetes-csi/external-snapshotter/v2 v2.1.1
 	github.com/mitchellh/go-ps v0.0.0-20190716172923-621e5597135b
 	github.com/mitchellh/go-vnc v0.0.0-20150629162542-723ed9867aed
+	github.com/moby/sys/mountinfo v0.4.1
 	github.com/onsi/ginkgo v1.12.1
 	github.com/onsi/gomega v1.10.1
 	github.com/opencontainers/runc v1.0.0-rc92
@@ -55,12 +58,12 @@ require (
 	github.com/vishvananda/netlink v1.1.1-0.20200914145417-7484f55b2263
 	github.com/wadey/gocovmerge v0.0.0-20160331181800-b5bfa59ec0ad
 	golang.org/x/crypto v0.0.0-20201216223049-8b5274cf687f
-	golang.org/x/net v0.0.0-20201110031124-69a78807bb2b
+	golang.org/x/net v0.0.0-20210119194325-5f4716e94777
 	golang.org/x/sys v0.0.0-20210119212857-b64e53b001e4
 	golang.org/x/time v0.0.0-20200630173020-3af7569d3a1e
 	google.golang.org/grpc v1.30.0
 	gopkg.in/cheggaaa/pb.v1 v1.0.28
-	gopkg.in/yaml.v2 v2.3.0
+	gopkg.in/yaml.v2 v2.4.0
 	k8s.io/api v0.20.4
 	k8s.io/apiextensions-apiserver v0.20.2
 	k8s.io/apimachinery v0.20.2
@@ -69,10 +72,10 @@ require (
 	k8s.io/kube-openapi v0.0.0-20210113233702-8566a335510f
 	k8s.io/utils v0.0.0-20201110183641-67b214c5f920
 	kubevirt.io/client-go v0.0.0-00010101000000-000000000000
-	kubevirt.io/containerized-data-importer v1.31.0
+	kubevirt.io/containerized-data-importer v1.34.0
 	kubevirt.io/controller-lifecycle-operator-sdk v0.1.2
 	kubevirt.io/qe-tools v0.1.6
-	libvirt.org/libvirt-go v6.6.0+incompatible
+	libvirt.org/libvirt-go v7.3.0+incompatible
 	mvdan.cc/sh/v3 v3.1.1
 	sigs.k8s.io/yaml v1.2.0
 )
@@ -114,7 +117,7 @@ replace (
 
 	kubevirt.io/client-go => ./staging/src/kubevirt.io/client-go
 
-	kubevirt.io/containerized-data-importer => kubevirt.io/containerized-data-importer v1.31.0
+	kubevirt.io/containerized-data-importer => kubevirt.io/containerized-data-importer v1.34.0
 )
 
 go 1.13

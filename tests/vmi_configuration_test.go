@@ -368,7 +368,7 @@ var _ = Describe("[sig-compute]Configurations", func() {
 				}, 60)).To(Succeed(), "should report number of sockets")
 			})
 
-			It("[test_id:1663]should report 4 vCPUs under guest OS", func() {
+			It("[QUARANTINE][test_id:1663]should report 4 vCPUs under guest OS", func() {
 				vmi.Spec.Domain.CPU = &v1.CPU{
 					Threads: 2,
 					Sockets: 2,
@@ -1471,7 +1471,7 @@ var _ = Describe("[sig-compute]Configurations", func() {
 
 		Context("with Clock and timezone", func() {
 
-			It("[QUARANTINE][sig-compute][test_id:5268]guest should see timezone", func() {
+			It("[sig-compute][test_id:5268]guest should see timezone", func() {
 				vmi := tests.NewRandomVMIWithEphemeralDiskAndUserdata(cd.ContainerDiskFor(cd.ContainerDiskCirros), "#!/bin/bash\necho 'hello'\n")
 				timezone := "America/New_York"
 				tz := v1.ClockOffsetTimezone(timezone)
@@ -1507,6 +1507,40 @@ var _ = Describe("[sig-compute]Configurations", func() {
 			})
 		})
 
+		Context("with volumes, disks and filesystem defined", func() {
+
+			var vmi *v1.VirtualMachineInstance
+
+			BeforeEach(func() {
+				vmi = tests.NewRandomVMI()
+			})
+
+			It("should reject disk with missing volume", func() {
+				const diskName = "testdisk"
+				vmi.Spec.Domain.Devices.Disks = append(vmi.Spec.Domain.Devices.Disks, v1.Disk{
+					Name: diskName,
+				})
+				vmi, err = virtClient.VirtualMachineInstance(tests.NamespaceTestDefault).Create(vmi)
+				Expect(err).To(HaveOccurred())
+				const expectedErrMessage = "denied the request: spec.domain.devices.disks[0].Name '" + diskName + "' not found."
+				Expect(err.Error()).To(ContainSubstring(expectedErrMessage))
+			})
+
+			It("should reject volume with missing disk / file system", func() {
+				const volumeName = "testvolume"
+				vmi.Spec.Volumes = append(vmi.Spec.Volumes, v1.Volume{
+					Name: volumeName,
+					VolumeSource: v1.VolumeSource{
+						CloudInitNoCloud: &v1.CloudInitNoCloudSource{UserData: " "},
+					},
+				})
+				vmi, err = virtClient.VirtualMachineInstance(tests.NamespaceTestDefault).Create(vmi)
+				Expect(err).To(HaveOccurred())
+				const expectedErrMessage = "denied the request: spec.domain.volumes[0].name '" + volumeName + "' not found."
+				Expect(err.Error()).To(ContainSubstring(expectedErrMessage))
+			})
+
+		})
 	})
 
 	Context("[rfe_id:140][crit:medium][vendor:cnv-qe@redhat.com][level:component]with CPU spec", func() {
@@ -1652,7 +1686,7 @@ var _ = Describe("[sig-compute]Configurations", func() {
 
 		It("[test_id:3124]should set machine type from VMI spec", func() {
 			vmi := tests.NewRandomVMI()
-			vmi.Spec.Domain.Machine.Type = "pc"
+			vmi.Spec.Domain.Machine = &v1.Machine{Type: "pc"}
 			tests.RunVMIAndExpectLaunch(vmi, 30)
 			runningVMISpec, err := tests.GetRunningVMIDomainSpec(vmi)
 
@@ -1660,9 +1694,20 @@ var _ = Describe("[sig-compute]Configurations", func() {
 			Expect(runningVMISpec.OS.Type.Machine).To(ContainSubstring("pc-i440"))
 		})
 
-		It("[test_id:3125]should set default machine type when it is not provided", func() {
+		It("[test_id:3125]should allow creating VM without Machine defined", func() {
 			vmi := tests.NewRandomVMI()
-			vmi.Spec.Domain.Machine.Type = ""
+			vmi.Spec.Domain.Machine = nil
+			tests.RunVMIAndExpectLaunch(vmi, 30)
+			runningVMISpec, err := tests.GetRunningVMIDomainSpec(vmi)
+
+			Expect(err).ToNot(HaveOccurred())
+			Expect(runningVMISpec.OS.Type.Machine).To(ContainSubstring("q35"))
+		})
+
+		It("should allow creating VM defined with Machine with an empty Type", func() {
+			// This is needed to provide backward compatibility since our example VMIs used to be defined in this way
+			vmi := tests.NewRandomVMI()
+			vmi.Spec.Domain.Machine = &v1.Machine{Type: ""}
 			tests.RunVMIAndExpectLaunch(vmi, 30)
 			runningVMISpec, err := tests.GetRunningVMIDomainSpec(vmi)
 
@@ -1678,7 +1723,7 @@ var _ = Describe("[sig-compute]Configurations", func() {
 			tests.UpdateKubeVirtConfigValueAndWait(config)
 
 			vmi := tests.NewRandomVMI()
-			vmi.Spec.Domain.Machine.Type = ""
+			vmi.Spec.Domain.Machine = nil
 			tests.RunVMIAndExpectLaunch(vmi, 30)
 			runningVMISpec, err := tests.GetRunningVMIDomainSpec(vmi)
 
@@ -1755,8 +1800,6 @@ var _ = Describe("[sig-compute]Configurations", func() {
 		})
 
 		It("[test_id:1681]should set appropriate cache modes", func() {
-			tests.SkipPVCTestIfRunnigOnKindInfra()
-
 			vmi := tests.NewRandomVMI()
 
 			By("adding disks to a VMI")
@@ -1805,8 +1848,6 @@ var _ = Describe("[sig-compute]Configurations", func() {
 		})
 
 		It("[test_id:5360]should set appropriate IO modes", func() {
-			tests.SkipPVCTestIfRunnigOnKindInfra()
-
 			vmi := tests.NewRandomVMI()
 
 			By("adding disks to a VMI")
@@ -1867,8 +1908,6 @@ var _ = Describe("[sig-compute]Configurations", func() {
 	Context("Block size configuration set", func() {
 
 		It("Should set BlockIO when using custom block sizes", func() {
-			tests.SkipPVCTestIfRunnigOnKindInfra()
-
 			By("creating a block volume")
 			tests.CreateBlockVolumePvAndPvc("1Gi")
 
@@ -1901,8 +1940,6 @@ var _ = Describe("[sig-compute]Configurations", func() {
 		})
 
 		It("Should set BlockIO when set to match volume block sizes on block devices", func() {
-			tests.SkipPVCTestIfRunnigOnKindInfra()
-
 			By("creating a block volume")
 			tests.CreateBlockVolumePvAndPvc("1Gi")
 

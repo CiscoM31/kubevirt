@@ -222,8 +222,8 @@ func (c *DeviceController) refreshPermittedDevices() {
 	c.devicePluginsMutex.Unlock()
 
 	logger.Info("refreshed device plugins for permitted/forbidden host devices")
-	logger.Infof("enabled device-pluings for: %v", debugDevAdded)
-	logger.Infof("disabled device-pluings for: %v", debugDevRemoved)
+	logger.Infof("enabled device-plugins for: %v", debugDevAdded)
+	logger.Infof("disabled device-plugins for: %v", debugDevRemoved)
 }
 
 func (c *DeviceController) Run(stop chan struct{}) error {
@@ -249,6 +249,8 @@ func (c *DeviceController) Run(stop chan struct{}) error {
 }
 
 func (c *DeviceController) Initialized() bool {
+	c.devicePluginsMutex.Lock()
+	defer c.devicePluginsMutex.Unlock()
 	for _, dev := range c.devicePlugins {
 		if !dev.devicePlugin.GetInitialized() {
 			return false

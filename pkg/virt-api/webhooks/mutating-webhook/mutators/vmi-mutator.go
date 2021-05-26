@@ -59,7 +59,7 @@ func (mutator *VMIsMutator) Mutate(ar *admissionv1.AdmissionReview) *admissionv1
 
 	var patch []patchOperation
 
-	// Patch the spec with defaults if we deal with a create operation
+	// Patch the spec, metadata and status with defaults if we deal with a create operation
 	if ar.Request.Operation == admissionv1.Create {
 		informers := webhooks.GetInformers()
 
@@ -115,6 +115,9 @@ func (mutator *VMIsMutator) Mutate(ar *admissionv1.AdmissionReview) *admissionv1
 		// Add foreground finalizer
 		newVMI.Finalizers = append(newVMI.Finalizers, v1.VirtualMachineInstanceFinalizer)
 
+		// Set the phase to pending to avoid blank status
+		newVMI.Status.Phase = v1.Pending
+
 		var value interface{}
 		value = newVMI.Spec
 		patch = append(patch, patchOperation{
@@ -127,6 +130,13 @@ func (mutator *VMIsMutator) Mutate(ar *admissionv1.AdmissionReview) *admissionv1
 		patch = append(patch, patchOperation{
 			Op:    "replace",
 			Path:  "/metadata",
+			Value: value,
+		})
+
+		value = newVMI.Status
+		patch = append(patch, patchOperation{
+			Op:    "replace",
+			Path:  "/status",
 			Value: value,
 		})
 	} else if ar.Request.Operation == admissionv1.Update {
@@ -228,8 +238,14 @@ func (mutator *VMIsMutator) setDefaultGuestCPUTopology(vmi *v1.VirtualMachineIns
 }
 
 func (mutator *VMIsMutator) setDefaultMachineType(vmi *v1.VirtualMachineInstance) {
-	if vmi.Spec.Domain.Machine.Type == "" {
-		vmi.Spec.Domain.Machine.Type = mutator.ClusterConfig.GetMachineType()
+	machineType := mutator.ClusterConfig.GetMachineType()
+
+	if machine := vmi.Spec.Domain.Machine; machine != nil {
+		if machine.Type == "" {
+			machine.Type = machineType
+		}
+	} else {
+		vmi.Spec.Domain.Machine = &v1.Machine{Type: machineType}
 	}
 }
 

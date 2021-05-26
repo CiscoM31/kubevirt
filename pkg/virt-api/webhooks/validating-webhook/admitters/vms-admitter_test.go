@@ -25,8 +25,6 @@ import (
 	"fmt"
 	"strconv"
 
-	"kubevirt.io/kubevirt/pkg/virt-operator/resource/generate/rbac"
-
 	"github.com/golang/mock/gomock"
 	. "github.com/onsi/ginkgo"
 	"github.com/onsi/ginkgo/extensions/table"
@@ -38,8 +36,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	k8sfield "k8s.io/apimachinery/pkg/util/validation/field"
-
-	authv1 "k8s.io/api/authentication/v1"
 
 	v1 "kubevirt.io/client-go/api/v1"
 	"kubevirt.io/client-go/kubecli"
@@ -124,7 +120,7 @@ var _ = Describe("Validating VM Admitter", func() {
 		vmi.Spec.Volumes = append(vmi.Spec.Volumes, v1.Volume{
 			Name: "testdisk",
 			VolumeSource: v1.VolumeSource{
-				ContainerDisk: &v1.ContainerDiskSource{},
+				ContainerDisk: testutils.NewFakeContainerDiskSource(),
 			},
 		})
 
@@ -162,7 +158,7 @@ var _ = Describe("Validating VM Admitter", func() {
 		vmi.Spec.Volumes = append(vmi.Spec.Volumes, v1.Volume{
 			Name: "testdisk",
 			VolumeSource: v1.VolumeSource{
-				ContainerDisk: &v1.ContainerDiskSource{},
+				ContainerDisk: testutils.NewFakeContainerDiskSource(),
 			},
 		})
 		vmi.Spec.Volumes = append(vmi.Spec.Volumes, v1.Volume{
@@ -387,7 +383,7 @@ var _ = Describe("Validating VM Admitter", func() {
 		vmi.Spec.Volumes = append(vmi.Spec.Volumes, v1.Volume{
 			Name: "testdisk",
 			VolumeSource: v1.VolumeSource{
-				ContainerDisk: &v1.ContainerDiskSource{},
+				ContainerDisk: testutils.NewFakeContainerDiskSource(),
 			},
 		})
 		vmi.Spec.Volumes = append(vmi.Spec.Volumes, v1.Volume{
@@ -678,316 +674,6 @@ var _ = Describe("Validating VM Admitter", func() {
 		Expect(resp.Result.Details.Causes[0].Field).To(Equal("spec.dataVolumeTemplate[0]"))
 	})
 
-	Context("VM rename", func() {
-		var (
-			vm         *v1.VirtualMachine
-			ar         *admissionv1.AdmissionReview
-			running    bool
-			notRunning bool
-		)
-
-		BeforeEach(func() {
-			running = true
-			notRunning = false
-			vmName := "testvm"
-			vmi := v1.NewMinimalVMI(vmName)
-			vm = &v1.VirtualMachine{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      vmName,
-					Namespace: metav1.NamespaceDefault,
-				},
-				Spec: v1.VirtualMachineSpec{
-					RunStrategy: nil,
-					Template: &v1.VirtualMachineInstanceTemplateSpec{
-						Spec: vmi.Spec,
-					},
-				},
-			}
-		})
-
-		Context("vm creation", func() {
-			BeforeEach(func() {
-				ar = &admissionv1.AdmissionReview{
-					Request: &admissionv1.AdmissionRequest{
-						Operation: admissionv1.Create,
-						Resource:  webhooks.VirtualMachineGroupVersionResource,
-					},
-				}
-			})
-
-			It("should reject a VM with rename request", func() {
-				vm.Spec.Running = &notRunning
-				vm.Status = v1.VirtualMachineStatus{
-					StateChangeRequests: []v1.VirtualMachineStateChangeRequest{
-						{
-							Action: v1.RenameRequest,
-							Data: map[string]string{
-								"newName": "new-name",
-							},
-						},
-					},
-				}
-
-				rawObject, err := json.Marshal(vm)
-				Expect(err).ToNot(HaveOccurred())
-
-				ar.Request.Object.Raw = rawObject
-
-				resp := vmsAdmitter.Admit(ar)
-				Expect(resp.Allowed).To(BeFalse())
-				Expect(len(resp.Result.Details.Causes)).To(Equal(1))
-				Expect(resp.Result.Details.Causes[0].Field).
-					To(Equal("Status.stateChangeRequests"))
-			})
-
-			It("should accept a VM with no rename requests", func() {
-				vm.Spec.Running = &notRunning
-				rawObject, err := json.Marshal(vm)
-				Expect(err).ToNot(HaveOccurred())
-
-				ar.Request.Object.Raw = rawObject
-
-				resp := vmsAdmitter.Admit(ar)
-				Expect(resp.Allowed).To(BeTrue())
-			})
-		})
-
-		Context("vm update/patch", func() {
-			BeforeEach(func() {
-				ar = &admissionv1.AdmissionReview{
-					Request: &admissionv1.AdmissionRequest{
-						Operation: admissionv1.Update,
-						Resource:  webhooks.VirtualMachineGroupVersionResource,
-					},
-				}
-			})
-
-			It("should accept a VM with rename request", func() {
-				rawOldObject, err := json.Marshal(vm)
-				Expect(err).ToNot(HaveOccurred())
-
-				ar.Request.OldObject.Raw = rawOldObject
-
-				vm.Spec.Running = &notRunning
-				vm.Status = v1.VirtualMachineStatus{
-					StateChangeRequests: []v1.VirtualMachineStateChangeRequest{
-						{
-							Action: v1.RenameRequest,
-							Data: map[string]string{
-								"newName": "new-name",
-							},
-						},
-					},
-				}
-
-				rawObject, err := json.Marshal(vm)
-				Expect(err).ToNot(HaveOccurred())
-
-				ar.Request.Object.Raw = rawObject
-
-				resp := vmsAdmitter.Admit(ar)
-				Expect(resp.Allowed).To(BeTrue())
-			})
-
-			It("should reject a VM with invalid rename request", func() {
-				rawOldObject, err := json.Marshal(vm)
-				Expect(err).ToNot(HaveOccurred())
-
-				ar.Request.OldObject.Raw = rawOldObject
-
-				vm.Spec.Running = &notRunning
-				vm.Status = v1.VirtualMachineStatus{
-					StateChangeRequests: []v1.VirtualMachineStateChangeRequest{
-						{
-							Action: v1.RenameRequest,
-							Data: map[string]string{
-								"newName": "invalid name <>?:;",
-							},
-						},
-					},
-				}
-
-				rawObject, err := json.Marshal(vm)
-				Expect(err).ToNot(HaveOccurred())
-
-				ar.Request.Object.Raw = rawObject
-
-				resp := vmsAdmitter.Admit(ar)
-				Expect(resp.Allowed).To(BeFalse())
-				Expect(len(resp.Result.Details.Causes)).To(Equal(1))
-
-				cause := resp.Result.Details.Causes[0]
-				Expect(cause.Type).To(Equal(metav1.CauseTypeFieldValueInvalid))
-				Expect(cause.Field).To(Equal("status.stateChangeRequests"))
-			})
-
-			It("should reject a rename request when the VM is running", func() {
-				vm.Spec.Running = &running
-
-				rawOldObject, err := json.Marshal(vm)
-				Expect(err).ToNot(HaveOccurred())
-
-				ar.Request.OldObject.Raw = rawOldObject
-
-				vm.Status = v1.VirtualMachineStatus{
-					Created: true,
-					StateChangeRequests: []v1.VirtualMachineStateChangeRequest{
-						{
-							Action: v1.RenameRequest,
-							Data: map[string]string{
-								"newName": "new-name",
-							},
-						},
-					},
-				}
-
-				rawObject, err := json.Marshal(vm)
-				Expect(err).ToNot(HaveOccurred())
-
-				ar.Request.Object.Raw = rawObject
-
-				resp := vmsAdmitter.Admit(ar)
-				Expect(resp.Allowed).To(BeFalse())
-				Expect(len(resp.Result.Details.Causes)).To(Equal(1))
-				Expect(resp.Result.Details.Causes[0].Field).
-					To(Equal("spec.running"))
-			})
-
-			It("should accept a VM with no rename requests", func() {
-				rawOldObject, err := json.Marshal(vm)
-				Expect(err).ToNot(HaveOccurred())
-				ar.Request.OldObject.Raw = rawOldObject
-
-				vm.Spec.Running = &notRunning
-				rawObject, err := json.Marshal(vm)
-				Expect(err).ToNot(HaveOccurred())
-
-				ar.Request.Object.Raw = rawObject
-
-				resp := vmsAdmitter.Admit(ar)
-				Expect(resp.Allowed).To(BeTrue())
-			})
-
-			It("should accept a VM metadata update during rename process from KV service accounts", func() {
-				ar.Request.UserInfo = authv1.UserInfo{Username: "system:serviceaccount:kubevirt:" + rbac.ControllerServiceAccountName}
-				annotations := make(map[string]string)
-				vm.Spec.Running = &notRunning
-				vm.Status = v1.VirtualMachineStatus{
-					StateChangeRequests: []v1.VirtualMachineStateChangeRequest{
-						{
-							Action: v1.RenameRequest,
-							Data: map[string]string{
-								"newName": "new-name",
-							},
-						},
-					},
-				}
-				rawOldObject, err := json.Marshal(vm)
-				Expect(err).ToNot(HaveOccurred())
-				ar.Request.OldObject.Raw = rawOldObject
-
-				annotations["testKey"] = "testValue"
-				vm.ObjectMeta.Annotations = annotations
-
-				rawObject, err := json.Marshal(vm)
-				Expect(err).ToNot(HaveOccurred())
-				ar.Request.Object.Raw = rawObject
-
-				resp := vmsAdmitter.Admit(ar)
-				Expect(resp.Allowed).To(BeTrue())
-			})
-
-			It("should accept a VM status update during rename process from KV service accounts", func() {
-				ar.Request.UserInfo = authv1.UserInfo{Username: "system:serviceaccount:kubevirt:" + rbac.ControllerServiceAccountName}
-				vm.Spec.Running = &notRunning
-				vm.Status = v1.VirtualMachineStatus{
-					StateChangeRequests: []v1.VirtualMachineStateChangeRequest{
-						{
-							Action: v1.RenameRequest,
-							Data: map[string]string{
-								"newName": "new-name",
-							},
-						},
-					},
-				}
-				rawOldObject, err := json.Marshal(vm)
-				Expect(err).ToNot(HaveOccurred())
-				ar.Request.OldObject.Raw = rawOldObject
-
-				vm.Status.Ready = true
-
-				rawObject, err := json.Marshal(vm)
-				Expect(err).ToNot(HaveOccurred())
-				ar.Request.Object.Raw = rawObject
-
-				resp := vmsAdmitter.Admit(ar)
-				Expect(resp.Allowed).To(BeTrue())
-			})
-
-			It("should reject a VM spec update during rename process from KV service accounts", func() {
-				ar.Request.UserInfo = authv1.UserInfo{Username: "system:serviceaccount:kubevirt:" + rbac.ControllerServiceAccountName}
-				vm.Spec.Running = &notRunning
-				nodeSelection := make(map[string]string)
-				vm.Status = v1.VirtualMachineStatus{
-					StateChangeRequests: []v1.VirtualMachineStateChangeRequest{
-						{
-							Action: v1.RenameRequest,
-							Data: map[string]string{
-								"newName": "new-name",
-							},
-						},
-					},
-				}
-				rawOldObject, err := json.Marshal(vm)
-				Expect(err).ToNot(HaveOccurred())
-				ar.Request.OldObject.Raw = rawOldObject
-
-				nodeSelection["testKey"] = "testValue"
-				vm.Spec.Template.Spec.NodeSelector = nodeSelection
-
-				rawObject, err := json.Marshal(vm)
-				Expect(err).ToNot(HaveOccurred())
-				ar.Request.Object.Raw = rawObject
-
-				resp := vmsAdmitter.Admit(ar)
-				Expect(resp.Allowed).To(BeFalse())
-				Expect(len(resp.Result.Details.Causes)).To(Equal(1))
-				Expect(resp.Result.Details.Causes[0].Field).To(Equal("spec"))
-				Expect(resp.Result.Details.Causes[0].Message).To(Equal("Cannot update VM spec until rename process completes"))
-			})
-
-			It("should reject a VM modification during rename process from an arbitrary user", func() {
-				ar.Request.UserInfo = authv1.UserInfo{Username: "testuser"}
-				vm.Spec.Running = &notRunning
-				vm.Status = v1.VirtualMachineStatus{
-					StateChangeRequests: []v1.VirtualMachineStateChangeRequest{
-						{
-							Action: v1.RenameRequest,
-							Data: map[string]string{
-								"newName": "new-name",
-							},
-						},
-					},
-				}
-				rawOldObject, err := json.Marshal(vm)
-				Expect(err).ToNot(HaveOccurred())
-				ar.Request.OldObject.Raw = rawOldObject
-
-				vm.Status.Ready = true
-
-				rawObject, err := json.Marshal(vm)
-				Expect(err).ToNot(HaveOccurred())
-				ar.Request.Object.Raw = rawObject
-
-				resp := vmsAdmitter.Admit(ar)
-				Expect(resp.Allowed).To(BeFalse())
-				Expect(len(resp.Result.Details.Causes)).To(Equal(1))
-				Expect(resp.Result.Details.Causes[0].Message).To(Equal("Modifying a VM during a rename process is restricted to Kubevirt core components"))
-
-			})
-		})
-	})
-
 	Context("with Volume", func() {
 
 		BeforeEach(func() {
@@ -1012,7 +698,7 @@ var _ = Describe("Validating VM Admitter", func() {
 			},
 			table.Entry("with pvc volume source", v1.VolumeSource{PersistentVolumeClaim: &k8sv1.PersistentVolumeClaimVolumeSource{}}),
 			table.Entry("with cloud-init volume source", v1.VolumeSource{CloudInitNoCloud: &v1.CloudInitNoCloudSource{UserData: "fake", NetworkData: "fake"}}),
-			table.Entry("with containerDisk volume source", v1.VolumeSource{ContainerDisk: &v1.ContainerDiskSource{}}),
+			table.Entry("with containerDisk volume source", v1.VolumeSource{ContainerDisk: testutils.NewFakeContainerDiskSource()}),
 			table.Entry("with ephemeral volume source", v1.VolumeSource{Ephemeral: &v1.EphemeralVolumeSource{}}),
 			table.Entry("with emptyDisk volume source", v1.VolumeSource{EmptyDisk: &v1.EmptyDiskSource{}}),
 			table.Entry("with dataVolume volume source", v1.VolumeSource{DataVolume: &v1.DataVolumeSource{Name: "fake"}}),
@@ -1066,7 +752,7 @@ var _ = Describe("Validating VM Admitter", func() {
 			vmi.Spec.Volumes = append(vmi.Spec.Volumes, v1.Volume{
 				Name: "testvolume",
 				VolumeSource: v1.VolumeSource{
-					ContainerDisk:         &v1.ContainerDiskSource{},
+					ContainerDisk:         testutils.NewFakeContainerDiskSource(),
 					PersistentVolumeClaim: &k8sv1.PersistentVolumeClaimVolumeSource{},
 				},
 			})
@@ -1081,13 +767,13 @@ var _ = Describe("Validating VM Admitter", func() {
 			vmi.Spec.Volumes = append(vmi.Spec.Volumes, v1.Volume{
 				Name: "testvolume",
 				VolumeSource: v1.VolumeSource{
-					ContainerDisk: &v1.ContainerDiskSource{},
+					ContainerDisk: testutils.NewFakeContainerDiskSource(),
 				},
 			})
 			vmi.Spec.Volumes = append(vmi.Spec.Volumes, v1.Volume{
 				Name: "testvolume",
 				VolumeSource: v1.VolumeSource{
-					ContainerDisk: &v1.ContainerDiskSource{},
+					ContainerDisk: testutils.NewFakeContainerDiskSource(),
 				},
 			})
 
@@ -1103,7 +789,7 @@ var _ = Describe("Validating VM Admitter", func() {
 				vmi.Spec.Volumes = append(vmi.Spec.Volumes, v1.Volume{
 					Name: "testvolume" + name,
 					VolumeSource: v1.VolumeSource{
-						ContainerDisk: &v1.ContainerDiskSource{},
+						ContainerDisk: testutils.NewFakeContainerDiskSource(),
 					},
 				})
 			}

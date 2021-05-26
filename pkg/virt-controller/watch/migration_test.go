@@ -28,6 +28,7 @@ import (
 	"github.com/onsi/ginkgo/extensions/table"
 	. "github.com/onsi/gomega"
 	k8sv1 "k8s.io/api/core/v1"
+	"k8s.io/api/policy/v1beta1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -140,17 +141,10 @@ var _ = Describe("Migration watcher", func() {
 		})
 	}
 
-	shouldExpectVirtualMachineHandoff := func(vmi *v1.VirtualMachineInstance, migrationUid types.UID, targetNode string) {
-		vmiInterface.EXPECT().Update(gomock.Any()).DoAndReturn(func(arg interface{}) (interface{}, interface{}) {
-			Expect(arg.(*v1.VirtualMachineInstance).Status.MigrationState).ToNot(BeNil())
-			Expect(arg.(*v1.VirtualMachineInstance).Status.MigrationState.MigrationUID).To(Equal(migrationUid))
-
-			Expect(arg.(*v1.VirtualMachineInstance).Status.MigrationState.SourceNode).To(Equal(vmi.Status.NodeName))
-			Expect(arg.(*v1.VirtualMachineInstance).Status.MigrationState.TargetNode).To(Equal(targetNode))
-			Expect(arg.(*v1.VirtualMachineInstance).Labels[v1.MigrationTargetNodeNameLabel]).To(Equal(targetNode))
-			return arg, nil
-		})
+	shouldExpectVirtualMachineInstancePatch := func(vmi *v1.VirtualMachineInstance, patch string) {
+		vmiInterface.EXPECT().Patch(vmi.Name, types.JSONPatchType, []byte(patch)).Return(vmi, nil)
 	}
+
 	syncCaches := func(stop chan struct{}) {
 		go vmiInformer.Run(stop)
 		go podInformer.Run(stop)
@@ -204,6 +198,12 @@ var _ = Describe("Migration watcher", func() {
 			Expect(action).To(BeNil())
 			return true, nil, nil
 		})
+
+		virtClient.EXPECT().PolicyV1beta1().Return(kubeClient.PolicyV1beta1()).AnyTimes()
+		kubeClient.Fake.PrependReactor("create", "poddisruptionbudgets", func(action testing.Action) (handled bool, obj k8sruntime.Object, err error) {
+			return true, &v1beta1.PodDisruptionBudget{}, nil
+		})
+
 		syncCaches(stop)
 	})
 
@@ -237,7 +237,7 @@ var _ = Describe("Migration watcher", func() {
 
 			controller.Execute()
 
-			testutils.ExpectEvent(recorder, SuccessfulCreatePodReason)
+			testutils.ExpectEvents(recorder, SuccessfulCreatePodReason, successfulCreatePodDisruptionBudgetReason)
 		})
 		It("should not create target pod if multiple pods exist in a non finalized state for VMI", func() {
 			vmi := newVirtualMachine("testvmi", v1.Running)
@@ -286,7 +286,7 @@ var _ = Describe("Migration watcher", func() {
 
 			shouldExpectPodCreation(vmi.UID, migration.UID, 1, 0, 0)
 			controller.Execute()
-			testutils.ExpectEvent(recorder, SuccessfulCreatePodReason)
+			testutils.ExpectEvents(recorder, SuccessfulCreatePodReason, successfulCreatePodDisruptionBudgetReason)
 		})
 
 		It("should not overload the cluster and only run 5 migrations in parallel", func() {
@@ -362,7 +362,7 @@ var _ = Describe("Migration watcher", func() {
 
 			shouldExpectPodCreation(vmi.UID, migration.UID, 1, 0, 0)
 			controller.Execute()
-			testutils.ExpectEvent(recorder, SuccessfulCreatePodReason)
+			testutils.ExpectEvents(recorder, SuccessfulCreatePodReason, successfulCreatePodDisruptionBudgetReason)
 		})
 
 		It("should not overload the node and only run 2 outbound migrations in parallel", func() {
@@ -440,7 +440,7 @@ var _ = Describe("Migration watcher", func() {
 
 			controller.Execute()
 
-			testutils.ExpectEvent(recorder, SuccessfulCreatePodReason)
+			testutils.ExpectEvents(recorder, SuccessfulCreatePodReason, successfulCreatePodDisruptionBudgetReason)
 		})
 
 		It("should place migration in scheduling state if pod exists", func() {
@@ -546,35 +546,76 @@ var _ = Describe("Migration watcher", func() {
 	})
 	Context("Migration object ", func() {
 
-		It("should hand pod over to target virt-handler", func() {
+		table.DescribeTable("should hand pod over to target virt-handler if pod is ready and running", func(containerStatus []k8sv1.ContainerStatus) {
 			vmi := newVirtualMachine("testvmi", v1.Running)
 			vmi.Status.NodeName = "node02"
 			migration := newMigration("testmigration", vmi.Name, v1.MigrationScheduled)
-			pod := newTargetPodForVirtualMachine(vmi, migration, k8sv1.PodPending)
+			pod := newTargetPodForVirtualMachine(vmi, migration, k8sv1.PodRunning)
 			pod.Spec.NodeName = "node01"
+			pod.Status.ContainerStatuses = containerStatus
 
 			addMigration(migration)
 			addVirtualMachineInstance(vmi)
 			podFeeder.Add(pod)
 
-			shouldExpectVirtualMachineHandoff(vmi, migration.UID, "node01")
+			patch := fmt.Sprintf(`[{ "op": "add", "path": "/status/migrationState", "value": {"targetNode":"node01","targetPod":"%s","sourceNode":"node02","migrationUid":"testmigration"} }, { "op": "test", "path": "/metadata/labels", "value": {} }, { "op": "replace", "path": "/metadata/labels", "value": {"kubevirt.io/migrationTargetNodeName":"node01"} }]`, pod.Name)
+
+			shouldExpectVirtualMachineInstancePatch(vmi, patch)
 
 			controller.Execute()
 			testutils.ExpectEvent(recorder, SuccessfulHandOverPodReason)
-		})
+		},
+			table.Entry("with running compute container and no infra container",
+				[]k8sv1.ContainerStatus{{
+					Name: "compute", State: k8sv1.ContainerState{Running: &k8sv1.ContainerStateRunning{}},
+				}},
+			),
+			table.Entry("with running compute container and no ready istio-proxy container",
+				[]k8sv1.ContainerStatus{{
+					Name: "compute", State: k8sv1.ContainerState{Running: &k8sv1.ContainerStateRunning{}},
+				}, {Name: "istio-proxy", Ready: false}},
+			),
+		)
+
+		table.DescribeTable("should not hand pod over to target virt-handler if pod is not ready and running", func(containerStatus []k8sv1.ContainerStatus) {
+			vmi := newVirtualMachine("testvmi", v1.Running)
+			vmi.Status.NodeName = "node02"
+			migration := newMigration("testmigration", vmi.Name, v1.MigrationScheduled)
+			pod := newTargetPodForVirtualMachine(vmi, migration, k8sv1.PodRunning)
+			pod.Spec.NodeName = "node01"
+			pod.Status.ContainerStatuses = containerStatus
+
+			addMigration(migration)
+			addVirtualMachineInstance(vmi)
+			podFeeder.Add(pod)
+
+			controller.Execute()
+		},
+			table.Entry("with not ready infra container and not ready compute container",
+				[]k8sv1.ContainerStatus{{Name: "compute", Ready: false}, {Name: "kubevirt-infra", Ready: false}},
+			),
+			table.Entry("with not ready compute container and no infra container",
+				[]k8sv1.ContainerStatus{{Name: "compute", Ready: false}},
+			),
+		)
+
 		It("should hand pod over to target virt-handler with migration config", func() {
 			vmi := newVirtualMachine("testvmi", v1.Running)
 			vmi.Status.NodeName = "node02"
 			migration := newMigration("testmigration", vmi.Name, v1.MigrationScheduled)
 
-			pod := newTargetPodForVirtualMachine(vmi, migration, k8sv1.PodPending)
+			pod := newTargetPodForVirtualMachine(vmi, migration, k8sv1.PodRunning)
 			pod.Spec.NodeName = "node01"
+			pod.Status.ContainerStatuses = []k8sv1.ContainerStatus{{
+				Name: "compute", State: k8sv1.ContainerState{Running: &k8sv1.ContainerStateRunning{}},
+			}}
 
 			addMigration(migration)
 			addVirtualMachineInstance(vmi)
 			podFeeder.Add(pod)
 
-			shouldExpectVirtualMachineHandoff(vmi, migration.UID, "node01")
+			patch := fmt.Sprintf(`[{ "op": "add", "path": "/status/migrationState", "value": {"targetNode":"node01","targetPod":"%s","sourceNode":"node02","migrationUid":"testmigration"} }, { "op": "test", "path": "/metadata/labels", "value": {} }, { "op": "replace", "path": "/metadata/labels", "value": {"kubevirt.io/migrationTargetNodeName":"node01"} }]`, pod.Name)
+			shouldExpectVirtualMachineInstancePatch(vmi, patch)
 
 			controller.Execute()
 			testutils.ExpectEvent(recorder, SuccessfulHandOverPodReason)
@@ -587,14 +628,19 @@ var _ = Describe("Migration watcher", func() {
 				MigrationUID: "1111-2222-3333-4444",
 			}
 			migration := newMigration("testmigration", vmi.Name, v1.MigrationScheduled)
-			pod := newTargetPodForVirtualMachine(vmi, migration, k8sv1.PodPending)
+			pod := newTargetPodForVirtualMachine(vmi, migration, k8sv1.PodRunning)
 			pod.Spec.NodeName = "node01"
+			pod.Status.ContainerStatuses = []k8sv1.ContainerStatus{{
+				Name: "compute", State: k8sv1.ContainerState{Running: &k8sv1.ContainerStateRunning{}},
+			}}
 
 			addMigration(migration)
 			addVirtualMachineInstance(vmi)
 			podFeeder.Add(pod)
 
-			shouldExpectVirtualMachineHandoff(vmi, migration.UID, "node01")
+			patch := fmt.Sprintf(`[{ "op": "test", "path": "/status/migrationState", "value": {"migrationUid":"1111-2222-3333-4444"} }, { "op": "replace", "path": "/status/migrationState", "value": {"targetNode":"node01","targetPod":"%s","sourceNode":"node02","migrationUid":"testmigration"} }, { "op": "test", "path": "/metadata/labels", "value": {} }, { "op": "replace", "path": "/metadata/labels", "value": {"kubevirt.io/migrationTargetNodeName":"node01"} }]`, pod.Name)
+
+			shouldExpectVirtualMachineInstancePatch(vmi, patch)
 
 			controller.Execute()
 			testutils.ExpectEvent(recorder, SuccessfulHandOverPodReason)
@@ -604,7 +650,7 @@ var _ = Describe("Migration watcher", func() {
 			vmi := newVirtualMachine("testvmi", v1.Running)
 			vmi.Status.NodeName = "node02"
 			migration := newMigration("testmigration", vmi.Name, v1.MigrationScheduled)
-			pod := newTargetPodForVirtualMachine(vmi, migration, k8sv1.PodPending)
+			pod := newTargetPodForVirtualMachine(vmi, migration, k8sv1.PodRunning)
 			pod.Spec.NodeName = "node01"
 
 			vmi.Status.MigrationState = &v1.VirtualMachineInstanceMigrationState{
@@ -727,15 +773,18 @@ var _ = Describe("Migration watcher", func() {
 			controller.Execute()
 			testutils.ExpectEvent(recorder, SuccessfulAbortMigrationReason)
 		})
-		table.DescribeTable("should finalize migration on VMI if target pod fails before migration starts", func(phase v1.VirtualMachineInstanceMigrationPhase, hasPod bool, podPhase k8sv1.PodPhase) {
+		table.DescribeTable("should finalize migration on VMI if target pod fails before migration starts", func(phase v1.VirtualMachineInstanceMigrationPhase, hasPod bool, podPhase k8sv1.PodPhase, initializeMigrationState bool) {
 			vmi := newVirtualMachine("testvmi", v1.Running)
 			vmi.Status.NodeName = "node02"
 			migration := newMigration("testmigration", vmi.Name, phase)
 
-			vmi.Status.MigrationState = &v1.VirtualMachineInstanceMigrationState{
-				MigrationUID: migration.UID,
-				TargetNode:   "node01",
-				SourceNode:   "node02",
+			vmi.Status.MigrationState = nil
+			if initializeMigrationState {
+				vmi.Status.MigrationState = &v1.VirtualMachineInstanceMigrationState{
+					MigrationUID: migration.UID,
+					TargetNode:   "node01",
+					SourceNode:   "node02",
+				}
 			}
 			addMigration(migration)
 			addVirtualMachineInstance(vmi)
@@ -751,19 +800,25 @@ var _ = Describe("Migration watcher", func() {
 				shouldExpectMigrationFailedState(migration)
 			}
 
-			vmiInterface.EXPECT().Patch(vmi.Name, types.JSONPatchType, gomock.Any()).Return(vmi, nil)
+			if initializeMigrationState {
+				patch := `[{ "op": "test", "path": "/status/migrationState", "value": {"targetNode":"node01","sourceNode":"node02","migrationUid":"testmigration"} }, { "op": "replace", "path": "/status/migrationState", "value": {"startTimestamp":"2021-05-24T14:51:47Z","endTimestamp":"2021-05-24T14:51:47Z","targetNode":"node01","sourceNode":"node02","completed":true,"failed":true,"migrationUid":"testmigration"} }]`
+				shouldExpectVirtualMachineInstancePatch(vmi, patch)
+			}
 			controller.Execute()
 
 			// in this case, we have two failed events. one for the VMI and one on the Migration object.
-			testutils.ExpectEvent(recorder, FailedMigrationReason)
+			if initializeMigrationState {
+				testutils.ExpectEvent(recorder, FailedMigrationReason)
+			}
 			if phase != v1.MigrationFailed {
 				testutils.ExpectEvent(recorder, FailedMigrationReason)
 			}
 		},
-			table.Entry("in preparing target state", v1.MigrationPreparingTarget, true, k8sv1.PodFailed),
-			table.Entry("in target ready state", v1.MigrationTargetReady, true, k8sv1.PodFailed),
-			table.Entry("in failed state", v1.MigrationFailed, true, k8sv1.PodFailed),
-			table.Entry("in failed state and pod does not exist", v1.MigrationFailed, false, k8sv1.PodFailed),
+			table.Entry("in preparing target state", v1.MigrationPreparingTarget, true, k8sv1.PodFailed, true),
+			table.Entry("in target ready state", v1.MigrationTargetReady, true, k8sv1.PodFailed, true),
+			table.Entry("in failed state", v1.MigrationFailed, true, k8sv1.PodFailed, true),
+			table.Entry("in failed state before pod is created", v1.MigrationFailed, false, k8sv1.PodFailed, false),
+			table.Entry("in failed state and pod does not exist", v1.MigrationFailed, false, k8sv1.PodFailed, false),
 		)
 	})
 })
