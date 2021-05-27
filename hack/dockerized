@@ -49,6 +49,9 @@ if [ -z "$($KUBEVIRT_CRI volume list | grep ${BUILDER})" ]; then
     $KUBEVIRT_CRI volume create ${BUILDER}
 fi
 
+#ensure we create _out dir here and not as root inside the build container
+mkdir -p ${OUT_DIR}
+
 # Make sure that the output directory exists
 $KUBEVIRT_CRI run -v "${BUILDER}:/root:rw,z" --security-opt "label=disable" --rm ${KUBEVIRT_BUILDER_IMAGE} mkdir -p /root/go/src/kubevirt.io/kubevirt/_out
 
