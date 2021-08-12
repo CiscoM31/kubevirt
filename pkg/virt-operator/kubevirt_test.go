@@ -32,6 +32,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/client-go/util/workqueue"
 
 	"kubevirt.io/kubevirt/pkg/certificates/triple/cert"
 
@@ -159,6 +160,7 @@ func (k *KubeVirtTestData) BeforeTest() {
 
 	k.kvInformer, k.kvSource = testutils.NewFakeInformerFor(&v1.KubeVirt{})
 	k.recorder = record.NewFakeRecorder(100)
+	k.recorder.IncludeObject = true
 
 	k.informers.ServiceAccount, k.serviceAccountSource = testutils.NewFakeInformerFor(&k8sv1.ServiceAccount{})
 	k.stores.ServiceAccountCache = k.informers.ServiceAccount.GetStore()
@@ -234,6 +236,10 @@ func (k *KubeVirtTestData) BeforeTest() {
 	k.stores.ConfigMapCache = k.informers.ConfigMap.GetStore()
 
 	k.controller = NewKubeVirtController(k.virtClient, k.apiServiceClient, k.kvInformer, k.recorder, k.stores, k.informers, NAMESPACE)
+	k.controller.delayedQueueAdder = func(key interface{}, queue workqueue.RateLimitingInterface) {
+		// no delay to speed up tests
+		queue.Add(key)
+	}
 
 	// Wrap our workqueue to have a way to detect when we are done processing updates
 	k.mockQueue = testutils.NewMockWorkQueue(k.controller.queue)
@@ -269,6 +275,9 @@ func (k *KubeVirtTestData) BeforeTest() {
 		}
 		if action.GetVerb() == "get" && action.GetResource().Resource == "mutatingwebhookconfigurations" {
 			return true, nil, errors.NewNotFound(schema.GroupResource{Group: "", Resource: "mutatingwebhookconfigurations"}, "whatever")
+		}
+		if action.GetVerb() == "get" && action.GetResource().Resource == "serviceaccounts" {
+			return true, nil, errors.NewNotFound(schema.GroupResource{Group: "", Resource: "serviceaccounts"}, "whatever")
 		}
 		if action.GetVerb() != "get" || action.GetResource().Resource != "namespaces" {
 			Expect(action).To(BeNil())
@@ -1106,8 +1115,8 @@ func (k *KubeVirtTestData) addAll(config *util.KubeVirtDeploymentConfig, kv *v1.
 
 	all = append(all, apiDeployment, apiDeploymentPdb, controller, controllerPdb, handler)
 
-	all = append(all, rbac.GetAllServiceMonitor(NAMESPACE, config.GetMonitorNamespace(), config.GetMonitorServiceAccount())...)
-	all = append(all, components.NewServiceMonitorCR(NAMESPACE, config.GetMonitorNamespace(), true))
+	all = append(all, rbac.GetAllServiceMonitor(NAMESPACE, config.GetMonitorNamespaces()[0], config.GetMonitorServiceAccount())...)
+	all = append(all, components.NewServiceMonitorCR(NAMESPACE, config.GetMonitorNamespaces()[0], true))
 
 	// ca certificate
 	caSecret := components.NewCACertSecret(NAMESPACE)
@@ -1209,7 +1218,9 @@ func (k *KubeVirtTestData) makeApiAndControllerReady() {
 		}
 		deplNew.Status.Replicas = replicas
 		deplNew.Status.ReadyReplicas = replicas
+		k.mockQueue.ExpectAdds(1)
 		k.deploymentSource.Modify(deplNew)
+		k.mockQueue.Wait()
 	}
 
 	for _, name := range []string{"/virt-api", "/virt-controller"} {
@@ -1221,7 +1232,6 @@ func (k *KubeVirtTestData) makeApiAndControllerReady() {
 			if exists {
 				makeDeploymentReady(obj)
 			}
-			time.Sleep(time.Second)
 		}
 	}
 
@@ -1235,7 +1245,7 @@ func (k *KubeVirtTestData) makePodDisruptionBudgetsReady() {
 		for !exists {
 			_, exists, _ = k.stores.PodDisruptionBudgetCache.GetByKey(NAMESPACE + pdbname)
 			if !exists {
-				time.Sleep(time.Second)
+				time.Sleep(100 * time.Millisecond)
 			}
 		}
 	}
@@ -1252,9 +1262,10 @@ func (k *KubeVirtTestData) makeHandlerReady() {
 			handlerNew := handler.DeepCopy()
 			handlerNew.Status.DesiredNumberScheduled = 1
 			handlerNew.Status.NumberReady = 1
+			k.mockQueue.ExpectAdds(1)
 			k.daemonSetSource.Modify(handlerNew)
+			k.mockQueue.Wait()
 		}
-		time.Sleep(time.Second)
 	}
 }
 
@@ -1285,7 +1296,7 @@ func (k *KubeVirtTestData) addValidatingWebhook(wh *admissionregistrationv1.Vali
 
 func (k *KubeVirtTestData) addInstallStrategy(config *util.KubeVirtDeploymentConfig) {
 	// install strategy config
-	resource, _ := install.NewInstallStrategyConfigMap(config, true, NAMESPACE)
+	resource, _ := install.NewInstallStrategyConfigMap(config, "openshift-monitoring", NAMESPACE)
 
 	resource.Name = fmt.Sprintf("%s-%s", resource.Name, rand.String(10))
 
@@ -1457,7 +1468,6 @@ var _ = Describe("KubeVirt Operator", func() {
 			kvTestData.addInstallStrategy(kvTestData.defaultConfig)
 			kvTestData.addAll(kvTestData.defaultConfig, kv)
 			kvTestData.addPodsAndPodDisruptionBudgets(kvTestData.defaultConfig, kv)
-			kvTestData.makeHandlerReady()
 			kvTestData.makeApiAndControllerReady()
 			kvTestData.makeHandlerReady()
 			kvTestData.shouldExpectPatchesAndUpdates()
@@ -2545,7 +2555,7 @@ var _ = Describe("KubeVirt Operator", func() {
 			kvTestData.addKubeVirt(kv)
 
 			// install strategy config
-			resource, _ := install.NewInstallStrategyConfigMap(kvTestData.defaultConfig, false, NAMESPACE)
+			resource, _ := install.NewInstallStrategyConfigMap(kvTestData.defaultConfig, "", NAMESPACE)
 			resource.Name = fmt.Sprintf("%s-%s", resource.Name, rand.String(10))
 			kvTestData.addResource(resource, kvTestData.defaultConfig, nil)
 

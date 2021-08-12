@@ -1,4 +1,5 @@
 load("@io_bazel_rules_go//go:def.bzl", "go_library", "go_test")
+load("@kubevirt//tools/ginkgo:ginkgo.bzl", "ginkgo_test")
 
 go_library(
     name = "go_default_library",
@@ -18,6 +19,8 @@ go_library(
         "//pkg/container-disk:go_default_library",
         "//pkg/controller:go_default_library",
         "//pkg/healthz:go_default_library",
+        "//pkg/monitoring/perfscale:go_default_library",
+        "//pkg/monitoring/vmistats:go_default_library",
         "//pkg/service:go_default_library",
         "//pkg/util:go_default_library",
         "//pkg/util/lookup:go_default_library",
@@ -31,6 +34,7 @@ go_library(
         "//pkg/virt-controller/watch/drain/disruptionbudget:go_default_library",
         "//pkg/virt-controller/watch/drain/evacuation:go_default_library",
         "//pkg/virt-controller/watch/snapshot:go_default_library",
+        "//pkg/virt-controller/watch/topology:go_default_library",
         "//pkg/virt-controller/watch/workload-updater:go_default_library",
         "//staging/src/kubevirt.io/client-go/api/v1:go_default_library",
         "//staging/src/kubevirt.io/client-go/apis/snapshot/v1alpha1:go_default_library",
@@ -45,11 +49,13 @@ go_library(
         "//vendor/github.com/spf13/pflag:go_default_library",
         "//vendor/k8s.io/api/authorization/v1:go_default_library",
         "//vendor/k8s.io/api/core/v1:go_default_library",
+        "//vendor/k8s.io/api/policy/v1beta1:go_default_library",
         "//vendor/k8s.io/apimachinery/pkg/api/errors:go_default_library",
         "//vendor/k8s.io/apimachinery/pkg/apis/meta/v1:go_default_library",
         "//vendor/k8s.io/apimachinery/pkg/fields:go_default_library",
         "//vendor/k8s.io/apimachinery/pkg/labels:go_default_library",
         "//vendor/k8s.io/apimachinery/pkg/types:go_default_library",
+        "//vendor/k8s.io/apimachinery/pkg/util/intstr:go_default_library",
         "//vendor/k8s.io/apimachinery/pkg/util/wait:go_default_library",
         "//vendor/k8s.io/client-go/kubernetes/scheme:go_default_library",
         "//vendor/k8s.io/client-go/kubernetes/typed/core/v1:go_default_library",
@@ -59,7 +65,7 @@ go_library(
         "//vendor/k8s.io/client-go/tools/leaderelection/resourcelock:go_default_library",
         "//vendor/k8s.io/client-go/tools/record:go_default_library",
         "//vendor/k8s.io/client-go/util/workqueue:go_default_library",
-        "//vendor/kubevirt.io/containerized-data-importer/pkg/apis/core/v1alpha1:go_default_library",
+        "//vendor/kubevirt.io/containerized-data-importer/pkg/apis/core/v1beta1:go_default_library",
         "//vendor/kubevirt.io/containerized-data-importer/pkg/clone:go_default_library",
     ],
 )
@@ -76,14 +82,17 @@ go_test(
         "watch_suite_test.go",
     ],
     embed = [":go_default_library"],
+    tags = ["cov"],
     deps = [
         "//pkg/controller:go_default_library",
         "//pkg/rest:go_default_library",
         "//pkg/testutils:go_default_library",
+        "//pkg/util/types:go_default_library",
         "//pkg/virt-controller/services:go_default_library",
         "//pkg/virt-controller/watch/drain/disruptionbudget:go_default_library",
         "//pkg/virt-controller/watch/drain/evacuation:go_default_library",
         "//pkg/virt-controller/watch/snapshot:go_default_library",
+        "//pkg/virt-controller/watch/topology:go_default_library",
         "//staging/src/kubevirt.io/client-go/api/v1:go_default_library",
         "//staging/src/kubevirt.io/client-go/apis/snapshot/v1alpha1:go_default_library",
         "//staging/src/kubevirt.io/client-go/generated/containerized-data-importer/clientset/versioned/fake:go_default_library",
@@ -97,6 +106,7 @@ go_test(
         "//vendor/github.com/onsi/ginkgo:go_default_library",
         "//vendor/github.com/onsi/ginkgo/extensions/table:go_default_library",
         "//vendor/github.com/onsi/gomega:go_default_library",
+        "//vendor/github.com/onsi/gomega/gstruct:go_default_library",
         "//vendor/github.com/onsi/gomega/types:go_default_library",
         "//vendor/github.com/pborman/uuid:go_default_library",
         "//vendor/github.com/prometheus/client_model/go:go_default_library",
@@ -109,6 +119,7 @@ go_test(
         "//vendor/k8s.io/apimachinery/pkg/api/resource:go_default_library",
         "//vendor/k8s.io/apimachinery/pkg/apis/meta/v1:go_default_library",
         "//vendor/k8s.io/apimachinery/pkg/runtime:go_default_library",
+        "//vendor/k8s.io/apimachinery/pkg/runtime/schema:go_default_library",
         "//vendor/k8s.io/apimachinery/pkg/types:go_default_library",
         "//vendor/k8s.io/apimachinery/pkg/util/rand:go_default_library",
         "//vendor/k8s.io/client-go/kubernetes/fake:go_default_library",
@@ -116,6 +127,13 @@ go_test(
         "//vendor/k8s.io/client-go/tools/cache:go_default_library",
         "//vendor/k8s.io/client-go/tools/cache/testing:go_default_library",
         "//vendor/k8s.io/client-go/tools/record:go_default_library",
-        "//vendor/kubevirt.io/containerized-data-importer/pkg/apis/core/v1alpha1:go_default_library",
+        "//vendor/kubevirt.io/containerized-data-importer/pkg/apis/core/v1beta1:go_default_library",
     ],
+)
+
+ginkgo_test(
+    name = "go_parallel_test",
+    ginkgo_args = ["-p"],
+    go_test = ":go_default_test",
+    tags = ["nocov"],
 )

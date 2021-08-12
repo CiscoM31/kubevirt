@@ -6279,6 +6279,31 @@
      }
     }
    },
+   "/apis/subresources.kubevirt.io/v1/guestfs": {
+    "get": {
+     "produces": [
+      "application/json"
+     ],
+     "operationId": "v1Guestfs",
+     "responses": {
+      "200": {
+       "description": "OK",
+       "schema": {
+        "type": "string"
+       }
+      },
+      "400": {
+       "description": "Bad Request",
+       "schema": {
+        "type": "string"
+       }
+      },
+      "401": {
+       "description": "Unauthorized"
+      }
+     }
+    }
+   },
    "/apis/subresources.kubevirt.io/v1/healthz": {
     "get": {
      "description": "Health endpoint",
@@ -6411,6 +6436,47 @@
      }
     }
    },
+   "/apis/subresources.kubevirt.io/v1/namespaces/{namespace:[a-z0-9][a-z0-9\\-]*}/virtualmachineinstances/{name:[a-z0-9][a-z0-9\\-]*}/freeze": {
+    "put": {
+     "description": "Freeze a VirtualMachineInstance object.",
+     "operationId": "v1Freeze",
+     "responses": {
+      "200": {
+       "description": "OK",
+       "schema": {
+        "type": "string"
+       }
+      },
+      "401": {
+       "description": "Unauthorized"
+      },
+      "500": {
+       "description": "Internal Server Error",
+       "schema": {
+        "type": "string"
+       }
+      }
+     }
+    },
+    "parameters": [
+     {
+      "uniqueItems": true,
+      "type": "string",
+      "description": "Name of the resource",
+      "name": "name",
+      "in": "path",
+      "required": true
+     },
+     {
+      "uniqueItems": true,
+      "type": "string",
+      "description": "Object name and auth scope, such as for teams and projects",
+      "name": "namespace",
+      "in": "path",
+      "required": true
+     }
+    ]
+   },
    "/apis/subresources.kubevirt.io/v1/namespaces/{namespace:[a-z0-9][a-z0-9\\-]*}/virtualmachineinstances/{name:[a-z0-9][a-z0-9\\-]*}/guestosinfo": {
     "get": {
      "description": "Get guest agent os information",
@@ -6499,6 +6565,88 @@
      }
     ]
    },
+   "/apis/subresources.kubevirt.io/v1/namespaces/{namespace:[a-z0-9][a-z0-9\\-]*}/virtualmachineinstances/{name:[a-z0-9][a-z0-9\\-]*}/portforward/{port:[0-9]+}": {
+    "get": {
+     "description": "Open a websocket connection forwarding traffic to the specified VirtualMachineInstance and port.",
+     "operationId": "v1vmi-PortForward",
+     "responses": {
+      "401": {
+       "description": "Unauthorized"
+      }
+     }
+    },
+    "parameters": [
+     {
+      "uniqueItems": true,
+      "type": "string",
+      "description": "Name of the resource",
+      "name": "name",
+      "in": "path",
+      "required": true
+     },
+     {
+      "uniqueItems": true,
+      "type": "string",
+      "description": "Object name and auth scope, such as for teams and projects",
+      "name": "namespace",
+      "in": "path",
+      "required": true
+     },
+     {
+      "uniqueItems": true,
+      "type": "string",
+      "description": "The target port for portforward on the VirtualMachineInstance.",
+      "name": "port",
+      "in": "path",
+      "required": true
+     }
+    ]
+   },
+   "/apis/subresources.kubevirt.io/v1/namespaces/{namespace:[a-z0-9][a-z0-9\\-]*}/virtualmachineinstances/{name:[a-z0-9][a-z0-9\\-]*}/portforward/{port:[0-9]+}/{protocol:tcp|udp}": {
+    "get": {
+     "description": "Open a websocket connection forwarding traffic of the specified protocol (either tcp or udp) to the specified VirtualMachineInstance and port.",
+     "operationId": "v1vmi-PortForwardWithProtocol",
+     "responses": {
+      "401": {
+       "description": "Unauthorized"
+      }
+     }
+    },
+    "parameters": [
+     {
+      "uniqueItems": true,
+      "type": "string",
+      "description": "Name of the resource",
+      "name": "name",
+      "in": "path",
+      "required": true
+     },
+     {
+      "uniqueItems": true,
+      "type": "string",
+      "description": "Object name and auth scope, such as for teams and projects",
+      "name": "namespace",
+      "in": "path",
+      "required": true
+     },
+     {
+      "uniqueItems": true,
+      "type": "string",
+      "description": "The target port for portforward on the VirtualMachineInstance.",
+      "name": "port",
+      "in": "path",
+      "required": true
+     },
+     {
+      "uniqueItems": true,
+      "type": "string",
+      "description": "The protocol for portforward on the VirtualMachineInstance.",
+      "name": "protocol",
+      "in": "path",
+      "required": true
+     }
+    ]
+   },
    "/apis/subresources.kubevirt.io/v1/namespaces/{namespace:[a-z0-9][a-z0-9\\-]*}/virtualmachineinstances/{name:[a-z0-9][a-z0-9\\-]*}/removevolume": {
     "put": {
      "description": "Removes a volume and disk from a running Virtual Machine Instance",
@@ -6579,6 +6727,47 @@
      }
     ]
    },
+   "/apis/subresources.kubevirt.io/v1/namespaces/{namespace:[a-z0-9][a-z0-9\\-]*}/virtualmachineinstances/{name:[a-z0-9][a-z0-9\\-]*}/unfreeze": {
+    "put": {
+     "description": "Unfreeze a VirtualMachineInstance object.",
+     "operationId": "v1Unfreeze",
+     "responses": {
+      "200": {
+       "description": "OK",
+       "schema": {
+        "type": "string"
+       }
+      },
+      "401": {
+       "description": "Unauthorized"
+      },
+      "500": {
+       "description": "Internal Server Error",
+       "schema": {
+        "type": "string"
+       }
+      }
+     }
+    },
+    "parameters": [
+     {
+      "uniqueItems": true,
+      "type": "string",
+      "description": "Name of the resource",
+      "name": "name",
+      "in": "path",
+      "required": true
+     },
+     {
+      "uniqueItems": true,
+      "type": "string",
+      "description": "Object name and auth scope, such as for teams and projects",
+      "name": "namespace",
+      "in": "path",
+      "required": true
+     }
+    ]
+   },
    "/apis/subresources.kubevirt.io/v1/namespaces/{namespace:[a-z0-9][a-z0-9\\-]*}/virtualmachineinstances/{name:[a-z0-9][a-z0-9\\-]*}/unpause": {
     "put": {
      "description": "Unpause a VirtualMachineInstance object.",
@@ -6604,6 +6793,35 @@
        "schema": {
         "type": "string"
        }
+      }
+     }
+    },
+    "parameters": [
+     {
+      "uniqueItems": true,
+      "type": "string",
+      "description": "Name of the resource",
+      "name": "name",
+      "in": "path",
+      "required": true
+     },
+     {
+      "uniqueItems": true,
+      "type": "string",
+      "description": "Object name and auth scope, such as for teams and projects",
+      "name": "namespace",
+      "in": "path",
+      "required": true
+     }
+    ]
+   },
+   "/apis/subresources.kubevirt.io/v1/namespaces/{namespace:[a-z0-9][a-z0-9\\-]*}/virtualmachineinstances/{name:[a-z0-9][a-z0-9\\-]*}/usbredir": {
+    "get": {
+     "description": "Open a websocket connection to connect to USB device on the specified VirtualMachineInstance.",
+     "operationId": "v1usbredir",
+     "responses": {
+      "401": {
+       "description": "Unauthorized"
       }
      }
     },
@@ -6776,6 +6994,88 @@
      }
     ]
    },
+   "/apis/subresources.kubevirt.io/v1/namespaces/{namespace:[a-z0-9][a-z0-9\\-]*}/virtualmachines/{name:[a-z0-9][a-z0-9\\-]*}/portforward/{port:[0-9]+}": {
+    "get": {
+     "description": "Open a websocket connection forwarding traffic to the running VMI for the specified VirtualMachine and port.",
+     "operationId": "v1vm-PortForward",
+     "responses": {
+      "401": {
+       "description": "Unauthorized"
+      }
+     }
+    },
+    "parameters": [
+     {
+      "uniqueItems": true,
+      "type": "string",
+      "description": "Name of the resource",
+      "name": "name",
+      "in": "path",
+      "required": true
+     },
+     {
+      "uniqueItems": true,
+      "type": "string",
+      "description": "Object name and auth scope, such as for teams and projects",
+      "name": "namespace",
+      "in": "path",
+      "required": true
+     },
+     {
+      "uniqueItems": true,
+      "type": "string",
+      "description": "The target port for portforward on the VirtualMachineInstance.",
+      "name": "port",
+      "in": "path",
+      "required": true
+     }
+    ]
+   },
+   "/apis/subresources.kubevirt.io/v1/namespaces/{namespace:[a-z0-9][a-z0-9\\-]*}/virtualmachines/{name:[a-z0-9][a-z0-9\\-]*}/portforward/{port:[0-9]+}/{protocol:tcp|udp}": {
+    "get": {
+     "description": "Open a websocket connection forwarding traffic of the specified protocol (either tcp or udp) to the specified VirtualMachine and port.",
+     "operationId": "v1vm-PortForwardWithProtocol",
+     "responses": {
+      "401": {
+       "description": "Unauthorized"
+      }
+     }
+    },
+    "parameters": [
+     {
+      "uniqueItems": true,
+      "type": "string",
+      "description": "Name of the resource",
+      "name": "name",
+      "in": "path",
+      "required": true
+     },
+     {
+      "uniqueItems": true,
+      "type": "string",
+      "description": "Object name and auth scope, such as for teams and projects",
+      "name": "namespace",
+      "in": "path",
+      "required": true
+     },
+     {
+      "uniqueItems": true,
+      "type": "string",
+      "description": "The target port for portforward on the VirtualMachineInstance.",
+      "name": "port",
+      "in": "path",
+      "required": true
+     },
+     {
+      "uniqueItems": true,
+      "type": "string",
+      "description": "The protocol for portforward on the VirtualMachineInstance.",
+      "name": "protocol",
+      "in": "path",
+      "required": true
+     }
+    ]
+   },
    "/apis/subresources.kubevirt.io/v1/namespaces/{namespace:[a-z0-9][a-z0-9\\-]*}/virtualmachines/{name:[a-z0-9][a-z0-9\\-]*}/removevolume": {
     "put": {
      "description": "Removes a volume and disk from a running Virtual Machine.",
@@ -6934,6 +7234,15 @@
     "put": {
      "description": "Stop a VirtualMachine object.",
      "operationId": "v1Stop",
+     "parameters": [
+      {
+       "name": "body",
+       "in": "body",
+       "schema": {
+        "$ref": "#/definitions/v1.StopOptions"
+       }
+      }
+     ],
      "responses": {
       "200": {
        "description": "OK",
@@ -7012,6 +7321,31 @@
        "schema": {
         "type": "string"
        }
+      }
+     }
+    }
+   },
+   "/apis/subresources.kubevirt.io/v1alpha3/guestfs": {
+    "get": {
+     "produces": [
+      "application/json"
+     ],
+     "operationId": "v1alpha3Guestfs",
+     "responses": {
+      "200": {
+       "description": "OK",
+       "schema": {
+        "type": "string"
+       }
+      },
+      "400": {
+       "description": "Bad Request",
+       "schema": {
+        "type": "string"
+       }
+      },
+      "401": {
+       "description": "Unauthorized"
       }
      }
     }
@@ -7148,6 +7482,47 @@
      }
     }
    },
+   "/apis/subresources.kubevirt.io/v1alpha3/namespaces/{namespace:[a-z0-9][a-z0-9\\-]*}/virtualmachineinstances/{name:[a-z0-9][a-z0-9\\-]*}/freeze": {
+    "put": {
+     "description": "Freeze a VirtualMachineInstance object.",
+     "operationId": "v1alpha3Freeze",
+     "responses": {
+      "200": {
+       "description": "OK",
+       "schema": {
+        "type": "string"
+       }
+      },
+      "401": {
+       "description": "Unauthorized"
+      },
+      "500": {
+       "description": "Internal Server Error",
+       "schema": {
+        "type": "string"
+       }
+      }
+     }
+    },
+    "parameters": [
+     {
+      "uniqueItems": true,
+      "type": "string",
+      "description": "Name of the resource",
+      "name": "name",
+      "in": "path",
+      "required": true
+     },
+     {
+      "uniqueItems": true,
+      "type": "string",
+      "description": "Object name and auth scope, such as for teams and projects",
+      "name": "namespace",
+      "in": "path",
+      "required": true
+     }
+    ]
+   },
    "/apis/subresources.kubevirt.io/v1alpha3/namespaces/{namespace:[a-z0-9][a-z0-9\\-]*}/virtualmachineinstances/{name:[a-z0-9][a-z0-9\\-]*}/guestosinfo": {
     "get": {
      "description": "Get guest agent os information",
@@ -7236,6 +7611,88 @@
      }
     ]
    },
+   "/apis/subresources.kubevirt.io/v1alpha3/namespaces/{namespace:[a-z0-9][a-z0-9\\-]*}/virtualmachineinstances/{name:[a-z0-9][a-z0-9\\-]*}/portforward/{port:[0-9]+}": {
+    "get": {
+     "description": "Open a websocket connection forwarding traffic to the specified VirtualMachineInstance and port.",
+     "operationId": "v1alpha3vmi-PortForward",
+     "responses": {
+      "401": {
+       "description": "Unauthorized"
+      }
+     }
+    },
+    "parameters": [
+     {
+      "uniqueItems": true,
+      "type": "string",
+      "description": "Name of the resource",
+      "name": "name",
+      "in": "path",
+      "required": true
+     },
+     {
+      "uniqueItems": true,
+      "type": "string",
+      "description": "Object name and auth scope, such as for teams and projects",
+      "name": "namespace",
+      "in": "path",
+      "required": true
+     },
+     {
+      "uniqueItems": true,
+      "type": "string",
+      "description": "The target port for portforward on the VirtualMachineInstance.",
+      "name": "port",
+      "in": "path",
+      "required": true
+     }
+    ]
+   },
+   "/apis/subresources.kubevirt.io/v1alpha3/namespaces/{namespace:[a-z0-9][a-z0-9\\-]*}/virtualmachineinstances/{name:[a-z0-9][a-z0-9\\-]*}/portforward/{port:[0-9]+}/{protocol:tcp|udp}": {
+    "get": {
+     "description": "Open a websocket connection forwarding traffic of the specified protocol (either tcp or udp) to the specified VirtualMachineInstance and port.",
+     "operationId": "v1alpha3vmi-PortForwardWithProtocol",
+     "responses": {
+      "401": {
+       "description": "Unauthorized"
+      }
+     }
+    },
+    "parameters": [
+     {
+      "uniqueItems": true,
+      "type": "string",
+      "description": "Name of the resource",
+      "name": "name",
+      "in": "path",
+      "required": true
+     },
+     {
+      "uniqueItems": true,
+      "type": "string",
+      "description": "Object name and auth scope, such as for teams and projects",
+      "name": "namespace",
+      "in": "path",
+      "required": true
+     },
+     {
+      "uniqueItems": true,
+      "type": "string",
+      "description": "The target port for portforward on the VirtualMachineInstance.",
+      "name": "port",
+      "in": "path",
+      "required": true
+     },
+     {
+      "uniqueItems": true,
+      "type": "string",
+      "description": "The protocol for portforward on the VirtualMachineInstance.",
+      "name": "protocol",
+      "in": "path",
+      "required": true
+     }
+    ]
+   },
    "/apis/subresources.kubevirt.io/v1alpha3/namespaces/{namespace:[a-z0-9][a-z0-9\\-]*}/virtualmachineinstances/{name:[a-z0-9][a-z0-9\\-]*}/removevolume": {
     "put": {
      "description": "Removes a volume and disk from a running Virtual Machine Instance",
@@ -7316,6 +7773,47 @@
      }
     ]
    },
+   "/apis/subresources.kubevirt.io/v1alpha3/namespaces/{namespace:[a-z0-9][a-z0-9\\-]*}/virtualmachineinstances/{name:[a-z0-9][a-z0-9\\-]*}/unfreeze": {
+    "put": {
+     "description": "Unfreeze a VirtualMachineInstance object.",
+     "operationId": "v1alpha3Unfreeze",
+     "responses": {
+      "200": {
+       "description": "OK",
+       "schema": {
+        "type": "string"
+       }
+      },
+      "401": {
+       "description": "Unauthorized"
+      },
+      "500": {
+       "description": "Internal Server Error",
+       "schema": {
+        "type": "string"
+       }
+      }
+     }
+    },
+    "parameters": [
+     {
+      "uniqueItems": true,
+      "type": "string",
+      "description": "Name of the resource",
+      "name": "name",
+      "in": "path",
+      "required": true
+     },
+     {
+      "uniqueItems": true,
+      "type": "string",
+      "description": "Object name and auth scope, such as for teams and projects",
+      "name": "namespace",
+      "in": "path",
+      "required": true
+     }
+    ]
+   },
    "/apis/subresources.kubevirt.io/v1alpha3/namespaces/{namespace:[a-z0-9][a-z0-9\\-]*}/virtualmachineinstances/{name:[a-z0-9][a-z0-9\\-]*}/unpause": {
     "put": {
      "description": "Unpause a VirtualMachineInstance object.",
@@ -7341,6 +7839,35 @@
        "schema": {
         "type": "string"
        }
+      }
+     }
+    },
+    "parameters": [
+     {
+      "uniqueItems": true,
+      "type": "string",
+      "description": "Name of the resource",
+      "name": "name",
+      "in": "path",
+      "required": true
+     },
+     {
+      "uniqueItems": true,
+      "type": "string",
+      "description": "Object name and auth scope, such as for teams and projects",
+      "name": "namespace",
+      "in": "path",
+      "required": true
+     }
+    ]
+   },
+   "/apis/subresources.kubevirt.io/v1alpha3/namespaces/{namespace:[a-z0-9][a-z0-9\\-]*}/virtualmachineinstances/{name:[a-z0-9][a-z0-9\\-]*}/usbredir": {
+    "get": {
+     "description": "Open a websocket connection to connect to USB device on the specified VirtualMachineInstance.",
+     "operationId": "v1alpha3usbredir",
+     "responses": {
+      "401": {
+       "description": "Unauthorized"
       }
      }
     },
@@ -7513,6 +8040,88 @@
      }
     ]
    },
+   "/apis/subresources.kubevirt.io/v1alpha3/namespaces/{namespace:[a-z0-9][a-z0-9\\-]*}/virtualmachines/{name:[a-z0-9][a-z0-9\\-]*}/portforward/{port:[0-9]+}": {
+    "get": {
+     "description": "Open a websocket connection forwarding traffic to the running VMI for the specified VirtualMachine and port.",
+     "operationId": "v1alpha3vm-PortForward",
+     "responses": {
+      "401": {
+       "description": "Unauthorized"
+      }
+     }
+    },
+    "parameters": [
+     {
+      "uniqueItems": true,
+      "type": "string",
+      "description": "Name of the resource",
+      "name": "name",
+      "in": "path",
+      "required": true
+     },
+     {
+      "uniqueItems": true,
+      "type": "string",
+      "description": "Object name and auth scope, such as for teams and projects",
+      "name": "namespace",
+      "in": "path",
+      "required": true
+     },
+     {
+      "uniqueItems": true,
+      "type": "string",
+      "description": "The target port for portforward on the VirtualMachineInstance.",
+      "name": "port",
+      "in": "path",
+      "required": true
+     }
+    ]
+   },
+   "/apis/subresources.kubevirt.io/v1alpha3/namespaces/{namespace:[a-z0-9][a-z0-9\\-]*}/virtualmachines/{name:[a-z0-9][a-z0-9\\-]*}/portforward/{port:[0-9]+}/{protocol:tcp|udp}": {
+    "get": {
+     "description": "Open a websocket connection forwarding traffic of the specified protocol (either tcp or udp) to the specified VirtualMachine and port.",
+     "operationId": "v1alpha3vm-PortForwardWithProtocol",
+     "responses": {
+      "401": {
+       "description": "Unauthorized"
+      }
+     }
+    },
+    "parameters": [
+     {
+      "uniqueItems": true,
+      "type": "string",
+      "description": "Name of the resource",
+      "name": "name",
+      "in": "path",
+      "required": true
+     },
+     {
+      "uniqueItems": true,
+      "type": "string",
+      "description": "Object name and auth scope, such as for teams and projects",
+      "name": "namespace",
+      "in": "path",
+      "required": true
+     },
+     {
+      "uniqueItems": true,
+      "type": "string",
+      "description": "The target port for portforward on the VirtualMachineInstance.",
+      "name": "port",
+      "in": "path",
+      "required": true
+     },
+     {
+      "uniqueItems": true,
+      "type": "string",
+      "description": "The protocol for portforward on the VirtualMachineInstance.",
+      "name": "protocol",
+      "in": "path",
+      "required": true
+     }
+    ]
+   },
    "/apis/subresources.kubevirt.io/v1alpha3/namespaces/{namespace:[a-z0-9][a-z0-9\\-]*}/virtualmachines/{name:[a-z0-9][a-z0-9\\-]*}/removevolume": {
     "put": {
      "description": "Removes a volume and disk from a running Virtual Machine.",
@@ -7671,6 +8280,15 @@
     "put": {
      "description": "Stop a VirtualMachine object.",
      "operationId": "v1alpha3Stop",
+     "parameters": [
+      {
+       "name": "body",
+       "in": "body",
+       "schema": {
+        "$ref": "#/definitions/v1.StopOptions"
+       }
+      }
+     ],
      "responses": {
       "200": {
        "description": "OK",
@@ -7797,6 +8415,19 @@
      "resourceFieldRef": {
       "description": "Selects a resource of the container: only resources limits and requests (limits.cpu, limits.memory, requests.cpu and requests.memory) are currently supported.",
       "$ref": "#/definitions/k8s.io.api.core.v1.ResourceFieldSelector"
+     }
+    }
+   },
+   "k8s.io.api.core.v1.ExecAction": {
+    "description": "ExecAction describes a \"run in container\" action.",
+    "type": "object",
+    "properties": {
+     "command": {
+      "description": "Command is the command line to execute inside the container, the working directory for the command  is root ('/') in the container's filesystem. The command is simply exec'd, it is not run inside a shell, so traditional shell instructions ('|', etc) won't work. To use a shell, you need to explicitly call out to that shell. Exit status of 0 is treated as live/healthy and non-zero is unhealthy.",
+      "type": "array",
+      "items": {
+       "type": "string"
+      }
      }
     }
    },
@@ -9020,6 +9651,10 @@
       "description": "Model specifies the CPU model inside the VMI. List of available models https://github.com/libvirt/libvirt/tree/master/src/cpu_map. It is possible to specify special cases like \"host-passthrough\" to get the same CPU as the node and \"host-model\" to get CPU closest to the node one. Defaults to host-model.",
       "type": "string"
      },
+     "numa": {
+      "description": "NUMA allows specifying settings for the guest NUMA topology",
+      "$ref": "#/definitions/v1.NUMA"
+     },
      "sockets": {
       "description": "Sockets specifies the number of sockets inside the vmi. Must be a value greater or equal 1.",
       "type": "integer",
@@ -9083,6 +9718,10 @@
       "type": "string"
      }
     }
+   },
+   "v1.ClientPassthroughDevices": {
+    "description": "Represent a subset of client devices that can be accessed by VMI. At the moment only, USB devices using Usbredir's library and tooling. Another fit would be a smartcard with libcacard.\n\nThe struct is currently empty as there is no imediate request for user-facing APIs. This structure simply turns on USB redirection of UsbClientPassthroughMaxNumberOf devices.",
+    "type": "object"
    },
    "v1.Clock": {
     "description": "Represents the clock and timers of a vmi.",
@@ -9367,7 +10006,7 @@
      },
      "spec": {
       "description": "DataVolumeSpec contains the DataVolume specification.",
-      "$ref": "#/definitions/v1alpha1.DataVolumeSpec"
+      "$ref": "#/definitions/v1beta1.DataVolumeSpec"
      },
      "status": {
       "description": "DataVolumeTemplateDummyStatus is here simply for backwards compatibility with a previous API.",
@@ -9383,6 +10022,9 @@
       "type": "integer",
       "format": "int32"
      },
+     "diskVerification": {
+      "$ref": "#/definitions/v1.DiskVerification"
+     },
      "featureGates": {
       "type": "array",
       "items": {
@@ -9395,6 +10037,15 @@
      "memoryOvercommit": {
       "type": "integer",
       "format": "int32"
+     },
+     "minimumClusterTSCFrequency": {
+      "description": "Allow overriding the automatically determined minimum TSC frequency of the cluster and fixate the minimum to this frequency.",
+      "type": "integer",
+      "format": "int64"
+     },
+     "minimumReservePVCBytes": {
+      "type": "integer",
+      "format": "int64"
      },
      "nodeSelectors": {
       "type": "object",
@@ -9433,6 +10084,10 @@
      "blockMultiQueue": {
       "description": "Whether or not to enable virtio multi-queue for block devices. Defaults to false.",
       "type": "boolean"
+     },
+     "clientPassthrough": {
+      "description": "To configure and access client devices such as redirecting USB",
+      "$ref": "#/definitions/v1.ClientPassthroughDevices"
      },
      "disableHotplug": {
       "description": "DisableHotplug disabled the ability to hotplug disks.",
@@ -9575,6 +10230,18 @@
      }
     }
    },
+   "v1.DiskVerification": {
+    "description": "DiskVerification holds container disks verification limits",
+    "type": "object",
+    "required": [
+     "memoryLimit"
+    ],
+    "properties": {
+     "memoryLimit": {
+      "$ref": "#/definitions/k8s.io.apimachinery.pkg.api.resource.Quantity"
+     }
+    }
+   },
    "v1.DomainSpec": {
     "type": "object",
     "required": [
@@ -9639,6 +10306,10 @@
       "type": "string"
      }
     }
+   },
+   "v1.DownwardMetricsVolumeSource": {
+    "description": "DownwardMetricsVolumeSource adds a very small disk to VMIs which contains a limited view of host and guest metrics. The disk content is compatible with vhostmd (https://github.com/vhostmd/vhostmd) and vm-dump-metrics.",
+    "type": "object"
    },
    "v1.EFI": {
     "description": "If set, EFI will be used instead of BIOS.",
@@ -9849,6 +10520,10 @@
       "description": "Settings to control the bootloader that is used.",
       "$ref": "#/definitions/v1.Bootloader"
      },
+     "kernelBoot": {
+      "description": "Settings to set the kernel for booting.",
+      "$ref": "#/definitions/v1.KernelBoot"
+     },
      "serial": {
       "description": "The system-serial-number in SMBIOS",
       "type": "string"
@@ -9963,6 +10638,10 @@
       "type": "string"
      }
     }
+   },
+   "v1.GuestAgentPing": {
+    "description": "GuestAgentPing configures the guest-agent based ping probe",
+    "type": "object"
    },
    "v1.HPETTimer": {
     "type": "object",
@@ -10180,6 +10859,49 @@
      }
     }
    },
+   "v1.KernelBoot": {
+    "description": "Represents the firmware blob used to assist in the kernel boot process. Used for setting the kernel, initrd and command line arguments",
+    "type": "object",
+    "properties": {
+     "container": {
+      "description": "Container defines the container that containes kernel artifacts",
+      "$ref": "#/definitions/v1.KernelBootContainer"
+     },
+     "kernelArgs": {
+      "description": "Arguments to be passed to the kernel at boot time",
+      "type": "string"
+     }
+    }
+   },
+   "v1.KernelBootContainer": {
+    "description": "If set, the VM will be booted from the defined kernel / initrd.",
+    "type": "object",
+    "required": [
+     "image"
+    ],
+    "properties": {
+     "image": {
+      "description": "Image that container initrd / kernel files.",
+      "type": "string"
+     },
+     "imagePullPolicy": {
+      "description": "Image pull policy. One of Always, Never, IfNotPresent. Defaults to Always if :latest tag is specified, or IfNotPresent otherwise. Cannot be updated. More info: https://kubernetes.io/docs/concepts/containers/images#updating-images",
+      "type": "string"
+     },
+     "imagePullSecret": {
+      "description": "ImagePullSecret is the name of the Docker registry secret required to pull the image. The secret must already exist.",
+      "type": "string"
+     },
+     "initrdPath": {
+      "description": "the fully-qualified path to the ramdisk image in the host OS",
+      "type": "string"
+     },
+     "kernelPath": {
+      "description": "The fully-qualified path to the kernel image in the host OS",
+      "type": "string"
+     }
+    }
+   },
    "v1.KubeVirt": {
     "description": "KubeVirt represents the object deploying all KubeVirt resources",
     "type": "object",
@@ -10258,6 +10980,9 @@
      "cpuRequest": {
       "$ref": "#/definitions/k8s.io.apimachinery.pkg.api.resource.Quantity"
      },
+     "defaultRuntimeClass": {
+      "type": "string"
+     },
      "developerConfiguration": {
       "$ref": "#/definitions/v1.DeveloperConfiguration"
      },
@@ -10272,6 +10997,9 @@
      },
      "machineType": {
       "type": "string"
+     },
+     "mediatedDevicesConfiguration": {
+      "$ref": "#/definitions/v1.MediatedDevicesConfiguration"
      },
      "memBalloonStatsPeriod": {
       "type": "integer",
@@ -10310,6 +11038,10 @@
       "items": {
        "type": "string"
       }
+     },
+     "virtualMachineInstancesPerNode": {
+      "type": "integer",
+      "format": "int32"
      }
     }
    },
@@ -10549,13 +11281,23 @@
    },
    "v1.Machine": {
     "type": "object",
-    "required": [
-     "type"
-    ],
     "properties": {
      "type": {
       "description": "QEMU machine type is the actual chipset of the VirtualMachineInstance.",
       "type": "string"
+     }
+    }
+   },
+   "v1.MediatedDevicesConfiguration": {
+    "description": "MediatedDevicesConfiguration holds inforamtion about MDEV types to be defined, if available",
+    "type": "object",
+    "properties": {
+     "mediatedDevicesTypes": {
+      "type": "array",
+      "items": {
+       "type": "string"
+      },
+      "x-kubernetes-list-type": "atomic"
      }
     }
    },
@@ -10609,6 +11351,9 @@
       "type": "integer",
       "format": "int64"
      },
+     "disableTLS": {
+      "type": "boolean"
+     },
      "nodeDrainTaintKey": {
       "type": "string"
      },
@@ -10645,6 +11390,19 @@
       "type": "string"
      }
     }
+   },
+   "v1.NUMA": {
+    "type": "object",
+    "properties": {
+     "guestMappingPassthrough": {
+      "description": "GuestMappingPassthrough will create an efficient guest topology based on host CPUs exclusively assigned to a pod. The created topology ensures that memory and CPUs on the virtual numa nodes never cross boundaries of host numa nodes.",
+      "$ref": "#/definitions/v1.NUMAGuestMappingPassthrough"
+     }
+    }
+   },
+   "v1.NUMAGuestMappingPassthrough": {
+    "description": "NUMAGuestMappingPassthrough instructs kubevirt to model numa topology which is compatible with the CPU pinning on the guest. This will result in a subset of the node numa topology being passed through, ensuring that virtual numa nodes and their memory never cross boundaries coming from the node numa mapping.",
+    "type": "object"
    },
    "v1.Network": {
     "description": "Network represents a network type and a resource that should be connected to the vm.",
@@ -10726,12 +11484,15 @@
     ],
     "properties": {
      "externalResourceProvider": {
+      "description": "If true, KubeVirt will leave the allocation and monitoring to an external device plugin",
       "type": "boolean"
      },
      "pciVendorSelector": {
+      "description": "The vendor_id:product_id tuple of the PCI device",
       "type": "string"
      },
      "resourceName": {
+      "description": "The name of the resource that is representing the device. Exposed by a device plugin and requested by VMs. Typically of the form vendor.com/product_nameThe name of the resource that is representing the device. Exposed by a device plugin and requested by VMs. Typically of the form vendor.com/product_name",
       "type": "string"
      }
     }
@@ -10796,10 +11557,18 @@
     "description": "Probe describes a health check to be performed against a VirtualMachineInstance to determine whether it is alive or ready to receive traffic.",
     "type": "object",
     "properties": {
+     "exec": {
+      "description": "One and only one of the following should be specified. Exec specifies the action to take, it will be executed on the guest through the qemu-guest-agent. If the guest agent is not available, this probe will fail.",
+      "$ref": "#/definitions/k8s.io.api.core.v1.ExecAction"
+     },
      "failureThreshold": {
       "description": "Minimum consecutive failures for the probe to be considered failed after having succeeded. Defaults to 3. Minimum value is 1.",
       "type": "integer",
       "format": "int32"
+     },
+     "guestAgentPing": {
+      "description": "GuestAgentPing contacts the qemu-guest-agent for availability checks.",
+      "$ref": "#/definitions/v1.GuestAgentPing"
      },
      "httpGet": {
       "description": "HTTPGet specifies the http request to perform.",
@@ -10825,7 +11594,7 @@
       "$ref": "#/definitions/k8s.io.api.core.v1.TCPSocketAction"
      },
      "timeoutSeconds": {
-      "description": "Number of seconds after which the probe times out. Defaults to 1 second. Minimum value is 1. More info: https://kubernetes.io/docs/concepts/workloads/pods/pod-lifecycle#container-probes",
+      "description": "Number of seconds after which the probe times out. For exec probes the timeout fails the probe but does not terminate the command running on the guest. This means a blocking command can result in an increasing load on the guest. A small buffer will be added to the resulting workload exec probe to compensate for delays caused by the qemu guest exec mechanism. Defaults to 1 second. Minimum value is 1. More info: https://kubernetes.io/docs/concepts/workloads/pods/pod-lifecycle#container-probes",
       "type": "integer",
       "format": "int32"
      }
@@ -11010,6 +11779,25 @@
      }
     }
    },
+   "v1.StopOptions": {
+    "description": "StopOptions may be provided when deleting an API object.",
+    "type": "object",
+    "properties": {
+     "apiVersion": {
+      "description": "APIVersion defines the versioned schema of this representation of an object. Servers should convert recognized schemas to the latest internal value, and may reject unrecognized values. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources",
+      "type": "string"
+     },
+     "gracePeriod": {
+      "description": "this updates the VMIs terminationGracePeriodSeconds during shutdown",
+      "type": "integer",
+      "format": "int64"
+     },
+     "kind": {
+      "description": "Kind is a string value representing the REST resource this object represents. Servers may infer this from the endpoint the client submits requests to. Cannot be updated. In CamelCase. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds",
+      "type": "string"
+     }
+    }
+   },
    "v1.SyNICTimer": {
     "type": "object",
     "properties": {
@@ -11058,6 +11846,15 @@
      "rtc": {
       "description": "RTC (Real Time Clock) - a continuously running timer with periodic interrupts.",
       "$ref": "#/definitions/v1.RTCTimer"
+     }
+    }
+   },
+   "v1.TopologyHints": {
+    "type": "object",
+    "properties": {
+     "tscFrequency": {
+      "type": "integer",
+      "format": "int64"
      }
     }
    },
@@ -11299,6 +12096,10 @@
     "properties": {
      "apiVersion": {
       "description": "APIVersion defines the versioned schema of this representation of an object. Servers should convert recognized schemas to the latest internal value, and may reject unrecognized values. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources",
+      "type": "string"
+     },
+     "fsFreezeStatus": {
+      "description": "FSFreezeStatus is the state of the fs of the guest it can be either frozen or thawed",
       "type": "string"
      },
      "fsInfo": {
@@ -11583,6 +12384,10 @@
       "description": "The time the migration action began",
       "$ref": "#/definitions/k8s.io.apimachinery.pkg.apis.meta.v1.Time"
      },
+     "targetAttachmentPodUID": {
+      "description": "The UID of the target attachment pod for hotplug volumes",
+      "type": "string"
+     },
      "targetDirectMigrationNodePorts": {
       "description": "The list of ports opened for live migration on the destination node",
       "type": "object",
@@ -11650,6 +12455,20 @@
      "name": {
       "description": "Name of the interface, corresponds to name of the network assigned to the interface",
       "type": "string"
+     }
+    }
+   },
+   "v1.VirtualMachineInstancePhaseTransitionTimestamp": {
+    "description": "VirtualMachineInstancePhaseTransitionTimestamp gives a timestamp in relation to when a phase is set on a vmi",
+    "type": "object",
+    "properties": {
+     "phase": {
+      "description": "Phase is the status of the VirtualMachineInstance in kubernetes world. It is not the VirtualMachineInstance status, but partially correlates to it.",
+      "type": "string"
+     },
+     "phaseTransitionTimestamp": {
+      "description": "PhaseTransitionTimestamp is the timestamp of when the phase change occurred",
+      "$ref": "#/definitions/k8s.io.apimachinery.pkg.apis.meta.v1.Time"
      }
     }
    },
@@ -11976,6 +12795,10 @@
       "description": "EvacuationNodeName is used to track the eviction process of a VMI. It stores the name of the node that we want to evacuate. It is meant to be used by KubeVirt core components only and can't be set or modified by users.",
       "type": "string"
      },
+     "fsFreezeStatus": {
+      "description": "FSFreezeStatus is the state of the fs of the guest it can be either frozen or thawed",
+      "type": "string"
+     },
      "guestOSInfo": {
       "description": "Guest OS Information",
       "$ref": "#/definitions/v1.VirtualMachineInstanceGuestOSInfo"
@@ -12007,6 +12830,14 @@
       "description": "Phase is the status of the VirtualMachineInstance in kubernetes world. It is not the VirtualMachineInstance status, but partially correlates to it.",
       "type": "string"
      },
+     "phaseTransitionTimestamps": {
+      "description": "PhaseTransitionTimestamp is the timestamp of when the last phase change occurred",
+      "type": "array",
+      "items": {
+       "$ref": "#/definitions/v1.VirtualMachineInstancePhaseTransitionTimestamp"
+      },
+      "x-kubernetes-list-type": "atomic"
+     },
      "qosClass": {
       "description": "The Quality of Service (QOS) classification assigned to the virtual machine instance based on resource requirements See PodQOSClass type for available QOS classes More info: https://git.k8s.io/community/contributors/design-proposals/node/resource-qos.md",
       "type": "string"
@@ -12014,6 +12845,9 @@
      "reason": {
       "description": "A brief CamelCase message indicating details about why the VMI is in this state. e.g. 'NodeUnresponsive'",
       "type": "string"
+     },
+     "topologyHints": {
+      "$ref": "#/definitions/v1.TopologyHints"
      },
      "volumeStatus": {
       "description": "VolumeStatus contains the statuses of all the volumes",
@@ -12091,6 +12925,22 @@
      }
     }
    },
+   "v1.VirtualMachineStartFailure": {
+    "description": "VirtualMachineStartFailure tracks VMIs which failed to transition successfully to running using the VM status",
+    "type": "object",
+    "properties": {
+     "consecutiveFailCount": {
+      "type": "integer",
+      "format": "int32"
+     },
+     "lastFailedVMIUID": {
+      "type": "string"
+     },
+     "retryAfterTimestamp": {
+      "$ref": "#/definitions/k8s.io.apimachinery.pkg.apis.meta.v1.Time"
+     }
+    }
+   },
    "v1.VirtualMachineStateChangeRequest": {
     "type": "object",
     "required": [
@@ -12130,6 +12980,10 @@
       "description": "Created indicates if the virtual machine is created in the cluster",
       "type": "boolean"
      },
+     "printableStatus": {
+      "description": "PrintableStatus is a human readable, high-level representation of the status of the virtual machine",
+      "type": "string"
+     },
      "ready": {
       "description": "Ready indicates if the virtual machine is running and ready",
       "type": "boolean"
@@ -12137,6 +12991,10 @@
      "snapshotInProgress": {
       "description": "SnapshotInProgress is the name of the VirtualMachineSnapshot currently executing",
       "type": "string"
+     },
+     "startFailure": {
+      "description": "StartFailure tracks consecutive VMI startup failures for the purposes of crash loop backoffs",
+      "$ref": "#/definitions/v1.VirtualMachineStartFailure"
      },
      "stateChangeRequests": {
       "description": "StateChangeRequests indicates a list of actions that should be taken on a VMI e.g. stop a specific VMI then start a new one.",
@@ -12205,6 +13063,10 @@
      "downwardAPI": {
       "description": "DownwardAPI represents downward API about the pod that should populate this volume",
       "$ref": "#/definitions/v1.DownwardAPIVolumeSource"
+     },
+     "downwardMetrics": {
+      "description": "DownwardMetrics adds a very small disk to VMIs which contains a limited view of host and guest metrics. The disk content is compatible with vhostmd (https://github.com/vhostmd/vhostmd) and vm-dump-metrics.",
+      "$ref": "#/definitions/v1.DownwardMetricsVolumeSource"
      },
      "emptyDisk": {
       "description": "EmptyDisk represents a temporary disk which shares the vmis lifecycle. More info: https://kubevirt.gitbooks.io/user-guide/disks-and-volumes.html",
@@ -12346,239 +13208,6 @@
      }
     }
    },
-   "v1alpha1.DataVolumeBlankImage": {
-    "description": "DataVolumeBlankImage provides the parameters to create a new raw blank image for the PVC",
-    "type": "object"
-   },
-   "v1alpha1.DataVolumeCheckpoint": {
-    "description": "DataVolumeCheckpoint defines a stage in a warm migration.",
-    "type": "object",
-    "required": [
-     "previous",
-     "current"
-    ],
-    "properties": {
-     "current": {
-      "description": "Current is the identifier of the snapshot created for this checkpoint.",
-      "type": "string"
-     },
-     "previous": {
-      "description": "Previous is the identifier of the snapshot from the previous checkpoint.",
-      "type": "string"
-     }
-    }
-   },
-   "v1alpha1.DataVolumeSource": {
-    "description": "DataVolumeSource represents the source for our Data Volume, this can be HTTP, Imageio, S3, Registry or an existing PVC",
-    "type": "object",
-    "properties": {
-     "blank": {
-      "$ref": "#/definitions/v1alpha1.DataVolumeBlankImage"
-     },
-     "http": {
-      "$ref": "#/definitions/v1alpha1.DataVolumeSourceHTTP"
-     },
-     "imageio": {
-      "$ref": "#/definitions/v1alpha1.DataVolumeSourceImageIO"
-     },
-     "pvc": {
-      "$ref": "#/definitions/v1alpha1.DataVolumeSourcePVC"
-     },
-     "registry": {
-      "$ref": "#/definitions/v1alpha1.DataVolumeSourceRegistry"
-     },
-     "s3": {
-      "$ref": "#/definitions/v1alpha1.DataVolumeSourceS3"
-     },
-     "upload": {
-      "$ref": "#/definitions/v1alpha1.DataVolumeSourceUpload"
-     },
-     "vddk": {
-      "$ref": "#/definitions/v1alpha1.DataVolumeSourceVDDK"
-     }
-    }
-   },
-   "v1alpha1.DataVolumeSourceHTTP": {
-    "description": "DataVolumeSourceHTTP can be either an http or https endpoint, with an optional basic auth user name and password, and an optional configmap containing additional CAs",
-    "type": "object",
-    "required": [
-     "url"
-    ],
-    "properties": {
-     "certConfigMap": {
-      "description": "CertConfigMap is a configmap reference, containing a Certificate Authority(CA) public key, and a base64 encoded pem certificate",
-      "type": "string"
-     },
-     "secretRef": {
-      "description": "SecretRef A Secret reference, the secret should contain accessKeyId (user name) base64 encoded, and secretKey (password) also base64 encoded",
-      "type": "string"
-     },
-     "url": {
-      "description": "URL is the URL of the http(s) endpoint",
-      "type": "string"
-     }
-    }
-   },
-   "v1alpha1.DataVolumeSourceImageIO": {
-    "description": "DataVolumeSourceImageIO provides the parameters to create a Data Volume from an imageio source",
-    "type": "object",
-    "required": [
-     "url",
-     "diskId"
-    ],
-    "properties": {
-     "certConfigMap": {
-      "description": "CertConfigMap provides a reference to the CA cert",
-      "type": "string"
-     },
-     "diskId": {
-      "description": "DiskID provides id of a disk to be imported",
-      "type": "string"
-     },
-     "secretRef": {
-      "description": "SecretRef provides the secret reference needed to access the ovirt-engine",
-      "type": "string"
-     },
-     "url": {
-      "description": "URL is the URL of the ovirt-engine",
-      "type": "string"
-     }
-    }
-   },
-   "v1alpha1.DataVolumeSourcePVC": {
-    "description": "DataVolumeSourcePVC provides the parameters to create a Data Volume from an existing PVC",
-    "type": "object",
-    "required": [
-     "namespace",
-     "name"
-    ],
-    "properties": {
-     "name": {
-      "description": "The name of the source PVC",
-      "type": "string"
-     },
-     "namespace": {
-      "description": "The namespace of the source PVC",
-      "type": "string"
-     }
-    }
-   },
-   "v1alpha1.DataVolumeSourceRegistry": {
-    "description": "DataVolumeSourceRegistry provides the parameters to create a Data Volume from an registry source",
-    "type": "object",
-    "required": [
-     "url"
-    ],
-    "properties": {
-     "certConfigMap": {
-      "description": "CertConfigMap provides a reference to the Registry certs",
-      "type": "string"
-     },
-     "secretRef": {
-      "description": "SecretRef provides the secret reference needed to access the Registry source",
-      "type": "string"
-     },
-     "url": {
-      "description": "URL is the url of the Docker registry source",
-      "type": "string"
-     }
-    }
-   },
-   "v1alpha1.DataVolumeSourceS3": {
-    "description": "DataVolumeSourceS3 provides the parameters to create a Data Volume from an S3 source",
-    "type": "object",
-    "required": [
-     "url"
-    ],
-    "properties": {
-     "certConfigMap": {
-      "description": "CertConfigMap is a configmap reference, containing a Certificate Authority(CA) public key, and a base64 encoded pem certificate",
-      "type": "string"
-     },
-     "secretRef": {
-      "description": "SecretRef provides the secret reference needed to access the S3 source",
-      "type": "string"
-     },
-     "url": {
-      "description": "URL is the url of the S3 source",
-      "type": "string"
-     }
-    }
-   },
-   "v1alpha1.DataVolumeSourceUpload": {
-    "description": "DataVolumeSourceUpload provides the parameters to create a Data Volume by uploading the source",
-    "type": "object"
-   },
-   "v1alpha1.DataVolumeSourceVDDK": {
-    "description": "DataVolumeSourceVDDK provides the parameters to create a Data Volume from a Vmware source",
-    "type": "object",
-    "properties": {
-     "backingFile": {
-      "description": "BackingFile is the path to the virtual hard disk to migrate from vCenter/ESXi",
-      "type": "string"
-     },
-     "secretRef": {
-      "description": "SecretRef provides a reference to a secret containing the username and password needed to access the vCenter or ESXi host",
-      "type": "string"
-     },
-     "thumbprint": {
-      "description": "Thumbprint is the certificate thumbprint of the vCenter or ESXi host",
-      "type": "string"
-     },
-     "url": {
-      "description": "URL is the URL of the vCenter or ESXi host with the VM to migrate",
-      "type": "string"
-     },
-     "uuid": {
-      "description": "UUID is the UUID of the virtual machine that the backing file is attached to in vCenter/ESXi",
-      "type": "string"
-     }
-    }
-   },
-   "v1alpha1.DataVolumeSpec": {
-    "description": "DataVolumeSpec defines the DataVolume type specification",
-    "type": "object",
-    "required": [
-     "source"
-    ],
-    "properties": {
-     "checkpoints": {
-      "description": "Checkpoints is a list of DataVolumeCheckpoints, representing stages in a multistage import.",
-      "type": "array",
-      "items": {
-       "$ref": "#/definitions/v1alpha1.DataVolumeCheckpoint"
-      }
-     },
-     "contentType": {
-      "description": "DataVolumeContentType options: \"kubevirt\", \"archive\"",
-      "type": "string"
-     },
-     "finalCheckpoint": {
-      "description": "FinalCheckpoint indicates whether the current DataVolumeCheckpoint is the final checkpoint.",
-      "type": "boolean"
-     },
-     "preallocation": {
-      "description": "Preallocation controls whether storage for DataVolumes should be allocated in advance.",
-      "type": "boolean"
-     },
-     "priorityClassName": {
-      "description": "PriorityClassName for Importer, Cloner and Uploader pod",
-      "type": "string"
-     },
-     "pvc": {
-      "description": "PVC is the PVC specification",
-      "$ref": "#/definitions/k8s.io.api.core.v1.PersistentVolumeClaimSpec"
-     },
-     "source": {
-      "description": "Source is the src of the data for the requested DataVolume",
-      "$ref": "#/definitions/v1alpha1.DataVolumeSource"
-     },
-     "storage": {
-      "description": "Storage is the requested storage specification",
-      "$ref": "#/definitions/v1alpha1.StorageSpec"
-     }
-    }
-   },
    "v1alpha1.Error": {
     "description": "Error is the last error encountered during the snapshot/restore",
     "type": "object",
@@ -12610,43 +13239,6 @@
     "properties": {
      "virtualMachine": {
       "$ref": "#/definitions/v1.VirtualMachine"
-     }
-    }
-   },
-   "v1alpha1.StorageSpec": {
-    "description": "StorageSpec defines the Storage type specification",
-    "type": "object",
-    "properties": {
-     "accessModes": {
-      "description": "AccessModes contains the desired access modes the volume should have. More info: https://kubernetes.io/docs/concepts/storage/persistent-volumes#access-modes-1",
-      "type": "array",
-      "items": {
-       "type": "string"
-      }
-     },
-     "dataSource": {
-      "description": "This field can be used to specify either: * An existing VolumeSnapshot object (snapshot.storage.k8s.io/VolumeSnapshot - Beta) * An existing PVC (PersistentVolumeClaim) * An existing custom resource/object that implements data population (Alpha) In order to use VolumeSnapshot object types, the appropriate feature gate must be enabled (VolumeSnapshotDataSource or AnyVolumeDataSource) If the provisioner or an external controller can support the specified data source, it will create a new volume based on the contents of the specified data source. If the specified data source is not supported, the volume will not be created and the failure will be reported as an event. In the future, we plan to support more data source types and the behavior of the provisioner may change.",
-      "$ref": "#/definitions/k8s.io.api.core.v1.TypedLocalObjectReference"
-     },
-     "resources": {
-      "description": "Resources represents the minimum resources the volume should have. More info: https://kubernetes.io/docs/concepts/storage/persistent-volumes#resources",
-      "$ref": "#/definitions/k8s.io.api.core.v1.ResourceRequirements"
-     },
-     "selector": {
-      "description": "A label query over volumes to consider for binding.",
-      "$ref": "#/definitions/k8s.io.apimachinery.pkg.apis.meta.v1.LabelSelector"
-     },
-     "storageClassName": {
-      "description": "Name of the StorageClass required by the claim. More info: https://kubernetes.io/docs/concepts/storage/persistent-volumes#class-1",
-      "type": "string"
-     },
-     "volumeMode": {
-      "description": "volumeMode defines what type of volume is required by the claim. Value of Filesystem is implied when not included in claim spec.",
-      "type": "string"
-     },
-     "volumeName": {
-      "description": "VolumeName is the binding reference to the PersistentVolume backing this claim.",
-      "type": "string"
      }
     }
    },
@@ -12910,6 +13502,10 @@
      "deletionPolicy": {
       "type": "string"
      },
+     "failureDeadline": {
+      "description": "This time represents the number of seconds we permit the vm snapshot to take. In case we pass this deadline we mark this snapshot as failed. Defaults to DefaultFailureDeadline - 5min",
+      "$ref": "#/definitions/k8s.io.apimachinery.pkg.apis.meta.v1.Duration"
+     },
      "source": {
       "$ref": "#/definitions/k8s.io.api.core.v1.TypedLocalObjectReference"
      }
@@ -12938,6 +13534,9 @@
        "type": "string"
       },
       "x-kubernetes-list-type": "set"
+     },
+     "phase": {
+      "type": "string"
      },
      "readyToUse": {
       "type": "boolean"
@@ -13009,6 +13608,299 @@
       "type": "boolean"
      },
      "volumeSnapshotName": {
+      "type": "string"
+     }
+    }
+   },
+   "v1beta1.DataVolumeBlankImage": {
+    "description": "DataVolumeBlankImage provides the parameters to create a new raw blank image for the PVC",
+    "type": "object"
+   },
+   "v1beta1.DataVolumeCheckpoint": {
+    "description": "DataVolumeCheckpoint defines a stage in a warm migration.",
+    "type": "object",
+    "required": [
+     "previous",
+     "current"
+    ],
+    "properties": {
+     "current": {
+      "description": "Current is the identifier of the snapshot created for this checkpoint.",
+      "type": "string"
+     },
+     "previous": {
+      "description": "Previous is the identifier of the snapshot from the previous checkpoint.",
+      "type": "string"
+     }
+    }
+   },
+   "v1beta1.DataVolumeSource": {
+    "description": "DataVolumeSource represents the source for our Data Volume, this can be HTTP, Imageio, S3, Registry or an existing PVC",
+    "type": "object",
+    "properties": {
+     "blank": {
+      "$ref": "#/definitions/v1beta1.DataVolumeBlankImage"
+     },
+     "http": {
+      "$ref": "#/definitions/v1beta1.DataVolumeSourceHTTP"
+     },
+     "imageio": {
+      "$ref": "#/definitions/v1beta1.DataVolumeSourceImageIO"
+     },
+     "pvc": {
+      "$ref": "#/definitions/v1beta1.DataVolumeSourcePVC"
+     },
+     "registry": {
+      "$ref": "#/definitions/v1beta1.DataVolumeSourceRegistry"
+     },
+     "s3": {
+      "$ref": "#/definitions/v1beta1.DataVolumeSourceS3"
+     },
+     "upload": {
+      "$ref": "#/definitions/v1beta1.DataVolumeSourceUpload"
+     },
+     "vddk": {
+      "$ref": "#/definitions/v1beta1.DataVolumeSourceVDDK"
+     }
+    }
+   },
+   "v1beta1.DataVolumeSourceHTTP": {
+    "description": "DataVolumeSourceHTTP can be either an http or https endpoint, with an optional basic auth user name and password, and an optional configmap containing additional CAs",
+    "type": "object",
+    "required": [
+     "url"
+    ],
+    "properties": {
+     "certConfigMap": {
+      "description": "CertConfigMap is a configmap reference, containing a Certificate Authority(CA) public key, and a base64 encoded pem certificate",
+      "type": "string"
+     },
+     "secretRef": {
+      "description": "SecretRef A Secret reference, the secret should contain accessKeyId (user name) base64 encoded, and secretKey (password) also base64 encoded",
+      "type": "string"
+     },
+     "url": {
+      "description": "URL is the URL of the http(s) endpoint",
+      "type": "string"
+     }
+    }
+   },
+   "v1beta1.DataVolumeSourceImageIO": {
+    "description": "DataVolumeSourceImageIO provides the parameters to create a Data Volume from an imageio source",
+    "type": "object",
+    "required": [
+     "url",
+     "diskId"
+    ],
+    "properties": {
+     "certConfigMap": {
+      "description": "CertConfigMap provides a reference to the CA cert",
+      "type": "string"
+     },
+     "diskId": {
+      "description": "DiskID provides id of a disk to be imported",
+      "type": "string"
+     },
+     "secretRef": {
+      "description": "SecretRef provides the secret reference needed to access the ovirt-engine",
+      "type": "string"
+     },
+     "url": {
+      "description": "URL is the URL of the ovirt-engine",
+      "type": "string"
+     }
+    }
+   },
+   "v1beta1.DataVolumeSourcePVC": {
+    "description": "DataVolumeSourcePVC provides the parameters to create a Data Volume from an existing PVC",
+    "type": "object",
+    "required": [
+     "namespace",
+     "name"
+    ],
+    "properties": {
+     "name": {
+      "description": "The name of the source PVC",
+      "type": "string"
+     },
+     "namespace": {
+      "description": "The namespace of the source PVC",
+      "type": "string"
+     }
+    }
+   },
+   "v1beta1.DataVolumeSourceRef": {
+    "description": "DataVolumeSourceRef defines an indirect reference to the source of data for the DataVolume",
+    "type": "object",
+    "required": [
+     "kind",
+     "name"
+    ],
+    "properties": {
+     "kind": {
+      "description": "The kind of the source reference, currently only \"DataSource\" is supported",
+      "type": "string"
+     },
+     "name": {
+      "description": "The name of the source reference",
+      "type": "string"
+     },
+     "namespace": {
+      "description": "The namespace of the source reference, defaults to the DataVolume namespace",
+      "type": "string"
+     }
+    }
+   },
+   "v1beta1.DataVolumeSourceRegistry": {
+    "description": "DataVolumeSourceRegistry provides the parameters to create a Data Volume from an registry source",
+    "type": "object",
+    "required": [
+     "url"
+    ],
+    "properties": {
+     "certConfigMap": {
+      "description": "CertConfigMap provides a reference to the Registry certs",
+      "type": "string"
+     },
+     "secretRef": {
+      "description": "SecretRef provides the secret reference needed to access the Registry source",
+      "type": "string"
+     },
+     "url": {
+      "description": "URL is the url of the Docker registry source",
+      "type": "string"
+     }
+    }
+   },
+   "v1beta1.DataVolumeSourceS3": {
+    "description": "DataVolumeSourceS3 provides the parameters to create a Data Volume from an S3 source",
+    "type": "object",
+    "required": [
+     "url"
+    ],
+    "properties": {
+     "certConfigMap": {
+      "description": "CertConfigMap is a configmap reference, containing a Certificate Authority(CA) public key, and a base64 encoded pem certificate",
+      "type": "string"
+     },
+     "secretRef": {
+      "description": "SecretRef provides the secret reference needed to access the S3 source",
+      "type": "string"
+     },
+     "url": {
+      "description": "URL is the url of the S3 source",
+      "type": "string"
+     }
+    }
+   },
+   "v1beta1.DataVolumeSourceUpload": {
+    "description": "DataVolumeSourceUpload provides the parameters to create a Data Volume by uploading the source",
+    "type": "object"
+   },
+   "v1beta1.DataVolumeSourceVDDK": {
+    "description": "DataVolumeSourceVDDK provides the parameters to create a Data Volume from a Vmware source",
+    "type": "object",
+    "properties": {
+     "backingFile": {
+      "description": "BackingFile is the path to the virtual hard disk to migrate from vCenter/ESXi",
+      "type": "string"
+     },
+     "secretRef": {
+      "description": "SecretRef provides a reference to a secret containing the username and password needed to access the vCenter or ESXi host",
+      "type": "string"
+     },
+     "thumbprint": {
+      "description": "Thumbprint is the certificate thumbprint of the vCenter or ESXi host",
+      "type": "string"
+     },
+     "url": {
+      "description": "URL is the URL of the vCenter or ESXi host with the VM to migrate",
+      "type": "string"
+     },
+     "uuid": {
+      "description": "UUID is the UUID of the virtual machine that the backing file is attached to in vCenter/ESXi",
+      "type": "string"
+     }
+    }
+   },
+   "v1beta1.DataVolumeSpec": {
+    "description": "DataVolumeSpec defines the DataVolume type specification",
+    "type": "object",
+    "properties": {
+     "checkpoints": {
+      "description": "Checkpoints is a list of DataVolumeCheckpoints, representing stages in a multistage import.",
+      "type": "array",
+      "items": {
+       "$ref": "#/definitions/v1beta1.DataVolumeCheckpoint"
+      }
+     },
+     "contentType": {
+      "description": "DataVolumeContentType options: \"kubevirt\", \"archive\"",
+      "type": "string"
+     },
+     "finalCheckpoint": {
+      "description": "FinalCheckpoint indicates whether the current DataVolumeCheckpoint is the final checkpoint.",
+      "type": "boolean"
+     },
+     "preallocation": {
+      "description": "Preallocation controls whether storage for DataVolumes should be allocated in advance.",
+      "type": "boolean"
+     },
+     "priorityClassName": {
+      "description": "PriorityClassName for Importer, Cloner and Uploader pod",
+      "type": "string"
+     },
+     "pvc": {
+      "description": "PVC is the PVC specification",
+      "$ref": "#/definitions/k8s.io.api.core.v1.PersistentVolumeClaimSpec"
+     },
+     "source": {
+      "description": "Source is the src of the data for the requested DataVolume",
+      "$ref": "#/definitions/v1beta1.DataVolumeSource"
+     },
+     "sourceRef": {
+      "description": "SourceRef is an indirect reference to the source of data for the requested DataVolume",
+      "$ref": "#/definitions/v1beta1.DataVolumeSourceRef"
+     },
+     "storage": {
+      "description": "Storage is the requested storage specification",
+      "$ref": "#/definitions/v1beta1.StorageSpec"
+     }
+    }
+   },
+   "v1beta1.StorageSpec": {
+    "description": "StorageSpec defines the Storage type specification",
+    "type": "object",
+    "properties": {
+     "accessModes": {
+      "description": "AccessModes contains the desired access modes the volume should have. More info: https://kubernetes.io/docs/concepts/storage/persistent-volumes#access-modes-1",
+      "type": "array",
+      "items": {
+       "type": "string"
+      }
+     },
+     "dataSource": {
+      "description": "This field can be used to specify either: * An existing VolumeSnapshot object (snapshot.storage.k8s.io/VolumeSnapshot) * An existing PVC (PersistentVolumeClaim) * An existing custom resource that implements data population (Alpha) In order to use custom resource types that implement data population, the AnyVolumeDataSource feature gate must be enabled. If the provisioner or an external controller can support the specified data source, it will create a new volume based on the contents of the specified data source.",
+      "$ref": "#/definitions/k8s.io.api.core.v1.TypedLocalObjectReference"
+     },
+     "resources": {
+      "description": "Resources represents the minimum resources the volume should have. More info: https://kubernetes.io/docs/concepts/storage/persistent-volumes#resources",
+      "$ref": "#/definitions/k8s.io.api.core.v1.ResourceRequirements"
+     },
+     "selector": {
+      "description": "A label query over volumes to consider for binding.",
+      "$ref": "#/definitions/k8s.io.apimachinery.pkg.apis.meta.v1.LabelSelector"
+     },
+     "storageClassName": {
+      "description": "Name of the StorageClass required by the claim. More info: https://kubernetes.io/docs/concepts/storage/persistent-volumes#class-1",
+      "type": "string"
+     },
+     "volumeMode": {
+      "description": "volumeMode defines what type of volume is required by the claim. Value of Filesystem is implied when not included in claim spec.",
+      "type": "string"
+     },
+     "volumeName": {
+      "description": "VolumeName is the binding reference to the PersistentVolume backing this claim.",
       "type": "string"
      }
     }

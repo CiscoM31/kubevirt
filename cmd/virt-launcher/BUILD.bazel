@@ -13,6 +13,8 @@ go_library(
         "//pkg/hooks:go_default_library",
         "//pkg/hotplug-disk:go_default_library",
         "//pkg/ignition:go_default_library",
+        "//pkg/network/istio:go_default_library",
+        "//pkg/util:go_default_library",
         "//pkg/virt-handler/cmd-client:go_default_library",
         "//pkg/virt-launcher:go_default_library",
         "//pkg/virt-launcher/notify-client:go_default_library",
@@ -25,10 +27,13 @@ go_library(
         "//staging/src/kubevirt.io/client-go/api/v1:go_default_library",
         "//staging/src/kubevirt.io/client-go/log:go_default_library",
         "//vendor/github.com/spf13/pflag:go_default_library",
+        "//vendor/k8s.io/apimachinery/pkg/api/errors:go_default_library",
         "//vendor/k8s.io/apimachinery/pkg/types:go_default_library",
+        "//vendor/k8s.io/apimachinery/pkg/util/net:go_default_library",
         "//vendor/k8s.io/apimachinery/pkg/util/wait:go_default_library",
         "//vendor/k8s.io/apimachinery/pkg/watch:go_default_library",
-        "//vendor/libvirt.org/libvirt-go:go_default_library",
+        "//vendor/k8s.io/client-go/util/retry:go_default_library",
+        "//vendor/libvirt.org/go/libvirt:go_default_library",
     ],
 )
 
@@ -39,6 +44,14 @@ go_binary(
     embed = [":go_default_library"],
     visibility = ["//visibility:public"],
     x_defs = version_x_defs(),
+)
+
+genrule(
+    name = "setcaps",
+    srcs = [":virt-launcher"],
+    outs = ["virt-launcher.tar.gz"],
+    cmd = "path=$$(readlink -f $(location virt-launcher)) && cp $$path virt-launcher && setcap 'cap_net_bind_service+eip'  virt-launcher && (chcon -t container_file_t virt-launcher || true) &&  tar --xattrs -czvf virt-launcher.tar.gz virt-launcher && mv virt-launcher.tar.gz $@",
+    visibility = ["//visibility:public"],
 )
 
 load(
@@ -137,7 +150,6 @@ container_image(
 container_image(
     name = "virt-launcher-image",
     architecture = select({
-        "@io_bazel_rules_go//go/platform:linux_ppc64le": "ppc64le",
         "@io_bazel_rules_go//go/platform:linux_arm64": "arm64",
         "//conditions:default": "amd64",
     }),
@@ -146,8 +158,10 @@ container_image(
     entrypoint = ["/usr/bin/virt-launcher"],
     files = [
         "node-labeller/node-labeller.sh",
-        ":virt-launcher",
         "//cmd/container-disk-v2alpha:container-disk",
+        "//cmd/virt-freezer",
+        "//cmd/virt-probe",
     ],
+    tars = [":setcaps"],
     visibility = ["//visibility:public"],
 )

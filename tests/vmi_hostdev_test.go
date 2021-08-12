@@ -7,6 +7,10 @@ import (
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
 
+	"kubevirt.io/kubevirt/tests/util"
+
+	"k8s.io/apimachinery/pkg/api/resource"
+
 	v1 "kubevirt.io/client-go/api/v1"
 	"kubevirt.io/client-go/kubecli"
 
@@ -21,18 +25,23 @@ var _ = Describe("[Serial][sig-compute]HostDevices", func() {
 
 	BeforeEach(func() {
 		virtClient, err = kubecli.GetKubevirtClient()
-		tests.PanicOnError(err)
+		util.PanicOnError(err)
 	})
 
 	Context("with ephemeral disk", func() {
 		It("Should successfully passthrough an emulated PCI device", func() {
 			deviceName := "example.org/soundcard"
 			deviceIDs := "8086:2668"
-			kv := tests.GetCurrentKv(virtClient)
+			kv := util.GetCurrentKv(virtClient)
 
 			By("Adding the emulated sound card to the permitted host devices")
 			config := kv.Spec.Configuration
-			config.DeveloperConfiguration.FeatureGates = []string{virtconfig.HostDevicesGate}
+			config.DeveloperConfiguration = &v1.DeveloperConfiguration{
+				FeatureGates: []string{virtconfig.HostDevicesGate},
+				DiskVerification: &v1.DiskVerification{
+					MemoryLimit: resource.NewScaledQuantity(2, resource.Giga),
+				},
+			}
 			config.PermittedHostDevices = &v1.PermittedHostDevices{
 				PciHostDevices: []v1.PciHostDevice{
 					{
@@ -52,7 +61,7 @@ var _ = Describe("[Serial][sig-compute]HostDevices", func() {
 				},
 			}
 			randomVMI.Spec.Domain.Devices.HostDevices = hostDevs
-			vmi, err := virtClient.VirtualMachineInstance(tests.NamespaceTestDefault).Create(randomVMI)
+			vmi, err := virtClient.VirtualMachineInstance(util.NamespaceTestDefault).Create(randomVMI)
 			Expect(err).ToNot(HaveOccurred())
 			tests.WaitForSuccessfulVMIStart(vmi)
 			Expect(console.LoginToFedora(vmi)).To(Succeed())

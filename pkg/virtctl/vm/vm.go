@@ -48,7 +48,8 @@ const (
 	COMMAND_ADDVOLUME    = "addvolume"
 	COMMAND_REMOVEVOLUME = "removevolume"
 
-	volumeNameArg = "volume-name"
+	volumeNameArg         = "volume-name"
+	notDefinedGracePeriod = -1
 )
 
 var (
@@ -57,6 +58,7 @@ var (
 	volumeName   string
 	serial       string
 	persist      bool
+	startPaused  bool
 )
 
 func NewStartCommand(clientConfig clientcmd.ClientConfig) *cobra.Command {
@@ -70,6 +72,7 @@ func NewStartCommand(clientConfig clientcmd.ClientConfig) *cobra.Command {
 			return c.Run(args)
 		},
 	}
+	cmd.Flags().BoolVar(&startPaused, "paused", false, "--paused=false: If set to true, start virtual machine in paused state")
 	cmd.SetUsageTemplate(templates.UsageTemplate())
 	return cmd
 }
@@ -85,6 +88,9 @@ func NewStopCommand(clientConfig clientcmd.ClientConfig) *cobra.Command {
 			return c.Run(args)
 		},
 	}
+
+	cmd.Flags().BoolVar(&forceRestart, "force", forceRestart, "--force=false: Only used when grace-period=0. If true, immediately remove VMI pod from API and bypass graceful deletion. Note that immediate deletion of some resources may result in inconsistency or data loss and requires confirmation.")
+	cmd.Flags().IntVar(&gracePeriod, "grace-period", gracePeriod, "--grace-period=-1: Period of time in seconds given to the VMI to terminate gracefully. Can only be set to 0 when --force is true (force deletion). Currently only setting 0 is supported.")
 	cmd.SetUsageTemplate(templates.UsageTemplate())
 	return cmd
 }
@@ -206,7 +212,7 @@ func NewRemoveVolumeCommand(clientConfig clientcmd.ClientConfig) *cobra.Command 
 
 func getVolumeSourceFromVolume(volumeName, namespace string, virtClient kubecli.KubevirtClient) (*v1.HotplugVolumeSource, error) {
 	//Check if data volume exists.
-	_, err := virtClient.CdiClient().CdiV1alpha1().DataVolumes(namespace).Get(context.TODO(), volumeName, metav1.GetOptions{})
+	_, err := virtClient.CdiClient().CdiV1beta1().DataVolumes(namespace).Get(context.TODO(), volumeName, metav1.GetOptions{})
 	if err == nil {
 		return &v1.HotplugVolumeSource{
 			DataVolume: &v1.DataVolumeSource{
@@ -316,6 +322,10 @@ func removeVolume(vmiName, volumeName, namespace string, virtClient kubecli.Kube
 	return nil
 }
 
+func gracePeriodIsSet(period int) bool {
+	return period != notDefinedGracePeriod
+}
+
 func (o *Command) Run(args []string) error {
 
 	vmiName := args[0]
@@ -332,11 +342,25 @@ func (o *Command) Run(args []string) error {
 
 	switch o.command {
 	case COMMAND_START:
-		err = virtClient.VirtualMachine(namespace).Start(vmiName)
+		err = virtClient.VirtualMachine(namespace).Start(vmiName, &v1.StartOptions{Paused: startPaused})
 		if err != nil {
 			return fmt.Errorf("Error starting VirtualMachine %v", err)
 		}
 	case COMMAND_STOP:
+		if gracePeriodIsSet(gracePeriod) && forceRestart == false {
+			return fmt.Errorf("Can not set gracePeriod without --force=true")
+		}
+		if forceRestart {
+			if gracePeriodIsSet(gracePeriod) {
+				err = virtClient.VirtualMachine(namespace).ForceStop(vmiName, gracePeriod)
+				if err != nil {
+					return fmt.Errorf("Error force stoping VirtualMachine, %v", err)
+				}
+			} else if !gracePeriodIsSet(gracePeriod) {
+				return fmt.Errorf("Can not force stop without gracePeriod")
+			}
+			break
+		}
 		err = virtClient.VirtualMachine(namespace).Stop(vmiName)
 		if err != nil {
 			return fmt.Errorf("Error stopping VirtualMachine %v", err)

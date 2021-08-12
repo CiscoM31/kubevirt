@@ -22,14 +22,17 @@ package converter
 import (
 	"encoding/xml"
 	"fmt"
+	"io/ioutil"
 	"os"
 	"path"
+	"path/filepath"
 	"reflect"
 	"strconv"
 	"strings"
 
 	"kubevirt.io/kubevirt/pkg/virt-controller/services"
 
+	"github.com/golang/mock/gomock"
 	. "github.com/onsi/ginkgo"
 	"github.com/onsi/ginkgo/extensions/table"
 	. "github.com/onsi/gomega"
@@ -37,6 +40,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	k8smeta "k8s.io/apimachinery/pkg/apis/meta/v1"
 
+	"kubevirt.io/kubevirt/pkg/ephemeral-disk/fake"
 	"kubevirt.io/kubevirt/pkg/testutils"
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/api"
 
@@ -74,6 +78,7 @@ var _ = Describe("getOptimalBlockIO", func() {
 var _ = Describe("Converter", func() {
 
 	TestSmbios := &cmdv1.SMBios{}
+	EphemeralDiskImageCreator := &fake.MockEphemeralDiskImageCreator{BaseDir: "/var/run/libvirt/kubevirt-ephemeral-disk/"}
 
 	Context("with timezone", func() {
 		It("Should set timezone attribute", func() {
@@ -1411,6 +1416,7 @@ var _ = Describe("Converter", func() {
 				SMBios:                TestSmbios,
 				GpuDevices:            []string{},
 				MemBalloonStatsPeriod: 10,
+				EphemeraldiskCreator:  EphemeralDiskImageCreator,
 			}
 		})
 
@@ -1743,6 +1749,30 @@ var _ = Describe("Converter", func() {
 			Expect(domain.Spec.Devices.Inputs[0].Bus).To(Equal("usb"), "Expect usb bus")
 		})
 
+		It("should enable usb redirection when number of USB client devices > 0", func() {
+			v1.SetObjectDefaults_VirtualMachineInstance(vmi)
+			vmi.Spec.Domain.Devices.ClientPassthrough = &v1.ClientPassthroughDevices{}
+			domain := vmiToDomain(vmi, c)
+			Expect(len(domain.Spec.Devices.Redirs)).To(Equal(4))
+			Expect(domain.Spec.Devices.Controllers).To(ContainElement(api.Controller{
+				Type:  "usb",
+				Index: "0",
+				Model: "qemu-xhci",
+			}))
+		})
+
+		It("should not enable usb redirection when numberOfDevices == 0", func() {
+			v1.SetObjectDefaults_VirtualMachineInstance(vmi)
+			vmi.Spec.Domain.Devices.ClientPassthrough = nil
+			domain := vmiToDomain(vmi, c)
+			Expect(domain.Spec.Devices.Redirs).To(BeNil())
+			Expect(domain.Spec.Devices.Controllers).ToNot(ContainElement(api.Controller{
+				Type:  "usb",
+				Index: "0",
+				Model: "qemu-xhci",
+			}))
+		})
+
 		It("should select explicitly chosen network model", func() {
 			v1.SetObjectDefaults_VirtualMachineInstance(vmi)
 			vmi.Spec.Domain.Devices.Interfaces[0].Model = "e1000"
@@ -1779,12 +1809,23 @@ var _ = Describe("Converter", func() {
 			})
 		})
 
-		It("should calculate mebibyte from a quantity", func() {
-			mi64, _ := resource.ParseQuantity("2G")
+		table.DescribeTable("should calculate mebibyte from a quantity", func(quantity string, mebibyte int) {
+			mi64, _ := resource.ParseQuantity(quantity)
 			q, err := QuantityToMebiByte(mi64)
 			Expect(err).ToNot(HaveOccurred())
-			Expect(q).To(BeNumerically("==", 1907))
-		})
+			Expect(q).To(BeNumerically("==", mebibyte))
+		},
+			table.Entry("when 0M is given", "0M", 0),
+			table.Entry("when 0 is given", "0", 0),
+			table.Entry("when 1 is given", "1", 1),
+			table.Entry("when 1M is given", "1M", 1),
+			table.Entry("when 3M is given", "3M", 3),
+			table.Entry("when 100M is given", "100M", 95),
+			table.Entry("when 1Mi is given", "1Mi", 1),
+			table.Entry("when 2G are given", "2G", 1907),
+			table.Entry("when 2Gi are given", "2Gi", 2*1024),
+			table.Entry("when 2780Gi are given", "2780Gi", 2780*1024),
+		)
 
 		It("should fail calculating mebibyte if the quantity is less than 0", func() {
 			mi64, _ := resource.ParseQuantity("-2G")
@@ -1792,47 +1833,25 @@ var _ = Describe("Converter", func() {
 			Expect(err).To(HaveOccurred())
 		})
 
-		It("should calculate memory in bytes", func() {
-			By("specifying memory 64M")
-			m64, _ := resource.ParseQuantity("64M")
+		table.DescribeTable("should calculate memory in bytes", func(quantity string, bytes int) {
+			m64, _ := resource.ParseQuantity(quantity)
 			memory, err := QuantityToByte(m64)
-			Expect(memory.Value).To(Equal(uint64(64000000)))
+			Expect(memory.Value).To(BeNumerically("==", bytes))
 			Expect(memory.Unit).To(Equal("b"))
 			Expect(err).ToNot(HaveOccurred())
-
-			By("specifying memory 64Mi")
-			mi64, _ := resource.ParseQuantity("64Mi")
-			memory, err = QuantityToByte(mi64)
-			Expect(memory.Value).To(Equal(uint64(67108864)))
-			Expect(err).ToNot(HaveOccurred())
-
-			By("specifying memory 3G")
-			g3, _ := resource.ParseQuantity("3G")
-			memory, err = QuantityToByte(g3)
-			Expect(memory.Value).To(Equal(uint64(3000000000)))
-			Expect(err).ToNot(HaveOccurred())
-
-			By("specifying memory 3Gi")
-			gi3, _ := resource.ParseQuantity("3Gi")
-			memory, err = QuantityToByte(gi3)
-			Expect(memory.Value).To(Equal(uint64(3221225472)))
-			Expect(err).ToNot(HaveOccurred())
-
-			By("specifying memory 45Gi")
-			gi45, _ := resource.ParseQuantity("45Gi")
-			memory, err = QuantityToByte(gi45)
-			Expect(memory.Value).To(Equal(uint64(48318382080)))
-			Expect(err).ToNot(HaveOccurred())
-
-			By("specifying memory 451231 bytes")
-			b451231, _ := resource.ParseQuantity("451231")
-			memory, err = QuantityToByte(b451231)
-			Expect(memory.Value).To(Equal(uint64(451231)))
-			Expect(err).ToNot(HaveOccurred())
-
+		},
+			table.Entry("specifying memory 64M", "64M", 64*1000*1000),
+			table.Entry("specifying memory 64Mi", "64Mi", 64*1024*1024),
+			table.Entry("specifying memory 3G", "3G", 3*1000*1000*1000),
+			table.Entry("specifying memory 3Gi", "3Gi", 3*1024*1024*1024),
+			table.Entry("specifying memory 45Gi", "45Gi", 45*1024*1024*1024),
+			table.Entry("specifying memory 2780Gi", "2780Gi", 2780*1024*1024*1024),
+			table.Entry("specifying memory 451231 bytes", "451231", 451231),
+		)
+		It("should calculate memory in bytes", func() {
 			By("specyfing negative memory size -45Gi")
 			m45gi, _ := resource.ParseQuantity("-45Gi")
-			_, err = QuantityToByte(m45gi)
+			_, err := QuantityToByte(m45gi)
 			Expect(err).To(HaveOccurred())
 		})
 
@@ -2556,7 +2575,7 @@ var _ = Describe("Converter", func() {
 				},
 			}
 
-			domain := vmiToDomain(&vmi, &ConverterContext{UseEmulation: true})
+			domain := vmiToDomain(&vmi, &ConverterContext{UseEmulation: true, EphemeraldiskCreator: EphemeralDiskImageCreator})
 			Expect(domain.Spec.IOThreads).ToNot(BeNil())
 			Expect(int(domain.Spec.IOThreads.IOThreads)).To(Equal(threadCount))
 			for idx, disk := range domain.Spec.Devices.Disks {
@@ -2843,39 +2862,92 @@ var _ = Describe("Converter", func() {
 				Expect(domainSpec.OS.BootLoader).To(BeNil())
 				Expect(domainSpec.OS.NVRam).To(BeNil())
 			})
+		})
 
-			It("should configure the EFI bootloader if EFI insecure option", func() {
+		table.DescribeTable("EFI bootloader", func(secureBoot *bool, efiCode, efiVars string) {
+			c.EFIConfiguration = &EFIConfiguration{
+				EFICode:      efiCode,
+				EFIVars:      efiVars,
+				SecureLoader: secureBoot == nil || *secureBoot,
+			}
 
+			secureLoader := "yes"
+			if secureBoot != nil && !*secureBoot {
+				secureLoader = "no"
+			}
+
+			vmi.Spec.Domain.Firmware = &v1.Firmware{
+				Bootloader: &v1.Bootloader{
+					EFI: &v1.EFI{
+						SecureBoot: secureBoot,
+					},
+				},
+			}
+			domainSpec := vmiToDomainXMLToDomainSpec(vmi, c)
+			Expect(domainSpec.OS.BootLoader.ReadOnly).To(Equal("yes"))
+			Expect(domainSpec.OS.BootLoader.Type).To(Equal("pflash"))
+			Expect(domainSpec.OS.BootLoader.Secure).To(Equal(secureLoader))
+			Expect(path.Base(domainSpec.OS.BootLoader.Path)).To(Equal(efiCode))
+			Expect(path.Base(domainSpec.OS.NVRam.Template)).To(Equal(efiVars))
+			Expect(domainSpec.OS.NVRam.NVRam).To(Equal("/tmp/mynamespace_testvmi"))
+		},
+			table.Entry("should use SecureBoot", True(), "OVMF_CODE.secboot.fd", "OVMF_VARS.secboot.fd"),
+			table.Entry("should use SecureBoot when SB not defined", nil, "OVMF_CODE.secboot.fd", "OVMF_VARS.secboot.fd"),
+			table.Entry("should not use SecureBoot", False(), "OVMF_CODE.fd", "OVMF_VARS.fd"),
+			table.Entry("should not use SecureBoot when OVMF_CODE.fd not present", True(), "OVMF_CODE.secboot.fd", "OVMF_VARS.fd"),
+		)
+	})
+
+	Context("Kernel Boot", func() {
+		var vmi *v1.VirtualMachineInstance
+		var c *ConverterContext
+
+		BeforeEach(func() {
+			vmi = &v1.VirtualMachineInstance{}
+
+			v1.SetObjectDefaults_VirtualMachineInstance(vmi)
+
+			c = &ConverterContext{
+				VirtualMachine: vmi,
+				UseEmulation:   true,
+			}
+		})
+
+		Context("when kernel boot is set", func() {
+			table.DescribeTable("should configure the kernel, initrd and Cmdline arguments correctly", func(kernelPath string, initrdPath string, kernelArgs string) {
 				vmi.Spec.Domain.Firmware = &v1.Firmware{
-					Bootloader: &v1.Bootloader{
-						EFI: &v1.EFI{
-							SecureBoot: False(),
+					KernelBoot: &v1.KernelBoot{
+						KernelArgs: kernelArgs,
+						Container: &v1.KernelBootContainer{
+							KernelPath: kernelPath,
+							InitrdPath: initrdPath,
 						},
 					},
 				}
 				domainSpec := vmiToDomainXMLToDomainSpec(vmi, c)
-				Expect(domainSpec.OS.BootLoader.ReadOnly).To(Equal("yes"))
-				Expect(domainSpec.OS.BootLoader.Type).To(Equal("pflash"))
-				Expect(domainSpec.OS.BootLoader.Secure).To(Equal("no"))
-				Expect(path.Base(domainSpec.OS.BootLoader.Path)).To(Equal(EFICode))
-				Expect(path.Base(domainSpec.OS.NVRam.Template)).To(Equal(EFIVars))
-				Expect(domainSpec.OS.NVRam.NVRam).To(Equal("/tmp/mynamespace_testvmi"))
-			})
 
-			It("should configure the EFI bootloader if EFI secure option", func() {
-				vmi.Spec.Domain.Firmware = &v1.Firmware{
-					Bootloader: &v1.Bootloader{
-						EFI: &v1.EFI{},
-					},
+				if kernelPath == "" {
+					Expect(domainSpec.OS.Kernel).To(BeEmpty())
+				} else {
+					Expect(domainSpec.OS.Kernel).To(ContainSubstring(kernelPath))
 				}
-				domainSpec := vmiToDomainXMLToDomainSpec(vmi, c)
-				Expect(domainSpec.OS.BootLoader.ReadOnly).To(Equal("yes"))
-				Expect(domainSpec.OS.BootLoader.Type).To(Equal("pflash"))
-				Expect(domainSpec.OS.BootLoader.Secure).To(Equal("yes"))
-				Expect(path.Base(domainSpec.OS.BootLoader.Path)).To(Equal(EFICodeSecureBoot))
-				Expect(path.Base(domainSpec.OS.NVRam.Template)).To(Equal(EFIVarsSecureBoot))
-				Expect(domainSpec.OS.NVRam.NVRam).To(Equal("/tmp/mynamespace_testvmi"))
-			})
+				if initrdPath == "" {
+					Expect(domainSpec.OS.Initrd).To(BeEmpty())
+				} else {
+					Expect(domainSpec.OS.Initrd).To(ContainSubstring(initrdPath))
+				}
+
+				Expect(domainSpec.OS.KernelArgs).To(Equal(kernelArgs))
+			},
+				table.Entry("when kernel, initrd and Cmdline are provided", "fully specified path to kernel", "fully specified path to initrd", "some cmdline arguments"),
+				table.Entry("when only kernel and Cmdline are provided", "fully specified path to kernel", "", "some cmdline arguments"),
+				table.Entry("when only kernel and initrd are provided", "fully specified path to kernel", "fully specified path to initrd", ""),
+				table.Entry("when only kernel is provided", "fully specified path to kernel", "", ""),
+				table.Entry("when only initrd and Cmdline are provided", "", "fully specified path to initrd", "some cmdline arguments"),
+				table.Entry("when only Cmdline is provided", "", "", "some cmdline arguments"),
+				table.Entry("when only initrd is provided", "", "fully specified path to initrd", ""),
+				table.Entry("when no arguments provided", "", "", ""),
+			)
 		})
 	})
 
@@ -3253,6 +3325,124 @@ var _ = Describe("disk device naming", func() {
 		Expect(res).To(Equal("sda"))
 		Expect(index).To(Equal(0))
 	})
+})
+
+var _ = Describe("direct IO checker", func() {
+	var directIOChecker DirectIOChecker
+	var tmpDir string
+	var existingFile string
+	var nonExistingFile string
+	var err error
+
+	BeforeEach(func() {
+		directIOChecker = NewDirectIOChecker()
+		tmpDir, err = os.MkdirTemp("", "direct-io-checker")
+		Expect(err).ToNot(HaveOccurred())
+		existingFile = filepath.Join(tmpDir, "disk.img")
+		err = ioutil.WriteFile(existingFile, []byte("test"), 0644)
+		Expect(err).ToNot(HaveOccurred())
+		nonExistingFile = filepath.Join(tmpDir, "non-existing-file")
+	})
+
+	AfterEach(func() {
+		err = os.RemoveAll(tmpDir)
+		Expect(err).ToNot(HaveOccurred())
+	})
+
+	It("should not fail when file/device exists", func() {
+		_, err = directIOChecker.CheckFile(existingFile)
+		Expect(err).ToNot(HaveOccurred())
+		_, err = directIOChecker.CheckBlockDevice(existingFile)
+		Expect(err).ToNot(HaveOccurred())
+	})
+
+	It("should not fail when file does not exist", func() {
+		_, err := directIOChecker.CheckFile(nonExistingFile)
+		Expect(err).ToNot(HaveOccurred())
+		_, err = os.Stat(nonExistingFile)
+		Expect(err).To(HaveOccurred())
+		Expect(os.IsNotExist(err)).To(BeTrue())
+	})
+
+	It("should fail when device does not exist", func() {
+		_, err := directIOChecker.CheckBlockDevice(nonExistingFile)
+		Expect(err).To(HaveOccurred())
+		_, err = os.Stat(nonExistingFile)
+		Expect(err).To(HaveOccurred())
+		Expect(os.IsNotExist(err)).To(BeTrue())
+	})
+
+	It("should fail when the path does not exist", func() {
+		nonExistingPath := "/non/existing/path/disk.img"
+		_, err = directIOChecker.CheckFile(nonExistingPath)
+		Expect(err).To(HaveOccurred())
+		Expect(os.IsNotExist(err)).To(BeTrue())
+		_, err = directIOChecker.CheckBlockDevice(nonExistingPath)
+		Expect(err).To(HaveOccurred())
+		Expect(os.IsNotExist(err)).To(BeTrue())
+		_, err = os.Stat(nonExistingPath)
+		Expect(err).To(HaveOccurred())
+		Expect(os.IsNotExist(err)).To(BeTrue())
+	})
+})
+
+var _ = Describe("SetDriverCacheMode", func() {
+	var ctrl *gomock.Controller
+	var mockDirectIOChecker *MockDirectIOChecker
+
+	BeforeEach(func() {
+		ctrl = gomock.NewController(GinkgoT())
+		mockDirectIOChecker = NewMockDirectIOChecker(ctrl)
+	})
+
+	AfterEach(func() {
+		ctrl.Finish()
+	})
+
+	expectCheckTrue := func() {
+		mockDirectIOChecker.EXPECT().CheckBlockDevice(gomock.Any()).AnyTimes().Return(true, nil)
+		mockDirectIOChecker.EXPECT().CheckFile(gomock.Any()).AnyTimes().Return(true, nil)
+	}
+
+	expectCheckFalse := func() {
+		mockDirectIOChecker.EXPECT().CheckBlockDevice(gomock.Any()).AnyTimes().Return(false, nil)
+		mockDirectIOChecker.EXPECT().CheckFile(gomock.Any()).AnyTimes().Return(false, nil)
+	}
+
+	expectCheckError := func() {
+		checkerError := fmt.Errorf("DirectIOChecker error")
+		mockDirectIOChecker.EXPECT().CheckBlockDevice(gomock.Any()).AnyTimes().Return(false, checkerError)
+		mockDirectIOChecker.EXPECT().CheckFile(gomock.Any()).AnyTimes().Return(false, checkerError)
+	}
+
+	table.DescribeTable("should correctly set driver cache mode", func(cache, expectedCache string, setExpectations func()) {
+		disk := &api.Disk{
+			Driver: &api.DiskDriver{
+				Cache: cache,
+			},
+			Source: api.DiskSource{
+				File: "file",
+			},
+		}
+		setExpectations()
+		err := SetDriverCacheMode(disk, mockDirectIOChecker)
+		if expectedCache == "" {
+			Expect(err).To(HaveOccurred())
+		} else {
+			Expect(err).ToNot(HaveOccurred())
+			Expect(disk.Driver.Cache).To(Equal(expectedCache))
+		}
+	},
+		table.Entry("detect 'none' with direct io", string(""), string(v1.CacheNone), expectCheckTrue),
+		table.Entry("detect 'writethrough' without direct io", string(""), string(v1.CacheWriteThrough), expectCheckFalse),
+		table.Entry("fallback to 'writethrough' on error", string(""), string(v1.CacheWriteThrough), expectCheckError),
+		table.Entry("keep 'none' with direct io", string(v1.CacheNone), string(v1.CacheNone), expectCheckTrue),
+		table.Entry("return error without direct io", string(v1.CacheNone), string(""), expectCheckFalse),
+		table.Entry("return error on error", string(v1.CacheNone), string(""), expectCheckError),
+		table.Entry("'writethrough' with direct io", string(v1.CacheWriteThrough), string(v1.CacheWriteThrough), expectCheckTrue),
+		table.Entry("'writethrough' without direct io", string(v1.CacheWriteThrough), string(v1.CacheWriteThrough), expectCheckFalse),
+		table.Entry("'writethrough' on error", string(v1.CacheWriteThrough), string(v1.CacheWriteThrough), expectCheckError),
+	)
 })
 
 func diskToDiskXML(disk *v1.Disk) string {

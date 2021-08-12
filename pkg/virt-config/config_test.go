@@ -9,6 +9,7 @@ import (
 	"github.com/onsi/ginkgo/extensions/table"
 	. "github.com/onsi/gomega"
 	kubev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/rand"
 	"k8s.io/utils/pointer"
@@ -20,26 +21,6 @@ import (
 )
 
 var _ = Describe("ConfigMap", func() {
-
-	table.DescribeTable("when CPU Architecture is", func(value string, result1 string, result2 string) {
-		machineType, emulatedMachine := virtconfig.NewDefaultArch(value).GetDefaultMachinesForArch()
-		Expect(machineType).To(Equal(result1))
-		Expect(emulatedMachine).To(Equal(result2))
-	},
-		table.Entry("amd64, GetDefaultMachinesForArch should return q35, q35*,pc-q35*", "amd64", virtconfig.DefaultAMD64MachineType, virtconfig.DefaultAMD64EmulatedMachines),
-		table.Entry("ppc64le, GetDefaultMachinesForArch should return pseries, pseries*", "ppc64le", virtconfig.DefaultPPC64LEMachineType, virtconfig.DefaultPPC64LEEmulatedMachines),
-		table.Entry("arm64, GetDefaultMachinesForArch should return virt, virt*", "arm64", virtconfig.DefaultAARCH64MachineType, virtconfig.DefaultAARCH64EmulatedMachines),
-	)
-
-	table.DescribeTable("when CPU Architecture is", func(value string, result string) {
-		ovmfPath := virtconfig.NewDefaultArch(value).GetDefaultOVMFPathForArch()
-		Expect(ovmfPath).To(Equal(result))
-	},
-		table.Entry("amd64, GetDefaultOVMFPathForArch should return", "amd64", virtconfig.DefaultARCHOVMFPath),
-		table.Entry("ppc64le, GetDefaultOVMFPathForArch should return", "ppc64le", virtconfig.DefaultARCHOVMFPath),
-		table.Entry("arm64, GetDefaultOVMFPathForArch should return", "arm64", virtconfig.DefaultAARCH64OVMFPath),
-	)
-
 	table.DescribeTable("when memBalloonStatsPeriod", func(value string, result uint32) {
 		clusterConfig, _, _, _ := testutils.NewFakeClusterConfig(&kubev1.ConfigMap{
 			Data: map[string]string{"memBalloonStatsPeriod": value},
@@ -141,14 +122,16 @@ var _ = Describe("ConfigMap", func() {
 		table.Entry("is invalid, GetNodeSelectors should return the default", "-1", nil),
 	)
 
-	table.DescribeTable(" when machineType", func(value string, result string) {
-		clusterConfig, _, _, _ := testutils.NewFakeClusterConfig(&kubev1.ConfigMap{
-			Data: map[string]string{virtconfig.MachineTypeKey: value},
-		})
+	table.DescribeTable(" when machineType", func(cpuArch string, machineType string, result string) {
+		clusterConfig, _, _, _ := testutils.NewFakeClusterConfigWithCPUArch(&kubev1.ConfigMap{
+			Data: map[string]string{virtconfig.MachineTypeKey: machineType},
+		}, cpuArch)
 		Expect(clusterConfig.GetMachineType()).To(Equal(result))
 	},
-		table.Entry("when set, GetMachineType should return the value", "pc-q35-3.0", "pc-q35-3.0"),
-		table.Entry("when unset, GetMachineType should return the default", "", virtconfig.DefaultMachineType),
+		table.Entry("when set, GetMachineType should return the value", "", "pc-q35-3.0", "pc-q35-3.0"),
+		table.Entry("when unset, GetMachineType should return the default with amd64", "amd64", "", virtconfig.DefaultAMD64MachineType),
+		table.Entry("when unset, GetMachineType should return the default with arm64", "arm64", "", virtconfig.DefaultAARCH64MachineType),
+		table.Entry("when unset, GetMachineType should return the default with ppc64le", "ppc64le", "", virtconfig.DefaultPPC64LEMachineType),
 	)
 
 	table.DescribeTable(" when cpuModel", func(value string, result string) {
@@ -182,15 +165,19 @@ var _ = Describe("ConfigMap", func() {
 		table.Entry("when unset, GetMemoryOvercommit should return the default", "", virtconfig.DefaultMemoryOvercommit),
 	)
 
-	table.DescribeTable(" when emulatedMachines", func(value string, result []string) {
-		clusterConfig, _, _, _ := testutils.NewFakeClusterConfig(&kubev1.ConfigMap{
-			Data: map[string]string{virtconfig.EmulatedMachinesKey: value},
-		})
+	table.DescribeTable(" when emulatedMachines", func(cpuArch string, emuMachinesKey string, result []string) {
+		clusterConfig, _, _, _ := testutils.NewFakeClusterConfigWithCPUArch(&kubev1.ConfigMap{
+			Data: map[string]string{
+				virtconfig.EmulatedMachinesKey: emuMachinesKey,
+			},
+		}, cpuArch)
 		emulatedMachines := clusterConfig.GetEmulatedMachines()
 		Expect(emulatedMachines).To(ConsistOf(result))
 	},
-		table.Entry("when set, GetEmulatedMachines should return the value", "q35, i440*", []string{"q35", "i440*"}),
-		table.Entry("when unset, GetEmulatedMachines should return the defaults", "", strings.Split(virtconfig.DefaultEmulatedMachines, ",")),
+		table.Entry("when set, GetEmulatedMachines should return the value", "", "q35, i440*", []string{"q35", "i440*"}),
+		table.Entry("when unset, GetEmulatedMachines should return the defaults with amd64", "amd64", "", strings.Split(virtconfig.DefaultAMD64EmulatedMachines, ",")),
+		table.Entry("when unset, GetEmulatedMachines should return the defaults with arm64", "arm64", "", strings.Split(virtconfig.DefaultAARCH64EmulatedMachines, ",")),
+		table.Entry("when unset, GetEmulatedMachines should return the defaults with ppc64le", "ppc64le", "", strings.Split(virtconfig.DefaultPPC64LEEmulatedMachines, ",")),
 	)
 
 	table.DescribeTable(" when supportedGuestAgentVersions", func(value string, result []string) {
@@ -238,7 +225,7 @@ var _ = Describe("ConfigMap", func() {
 		result := clusterConfig.GetMigrationConfiguration()
 		Expect(*result.ParallelOutboundMigrationsPerNode).To(BeNumerically("==", 10))
 		Expect(*result.ParallelMigrationsPerCluster).To(BeNumerically("==", 5))
-		Expect(result.BandwidthPerMigration.String()).To(Equal("64Mi"))
+		Expect(result.BandwidthPerMigration.String()).To(Equal("0"))
 	})
 
 	It("Should update the config if a newer version is available", func() {
@@ -335,15 +322,19 @@ var _ = Describe("ConfigMap", func() {
 		table.Entry("when unset, GetSELinuxLauncherType should return the default", virtconfig.DefaultSELinuxLauncherType, virtconfig.DefaultSELinuxLauncherType),
 	)
 
-	table.DescribeTable(" when OVMFPath", func(value string, result string) {
-		clusterConfig, _, _, _ := testutils.NewFakeClusterConfig(&kubev1.ConfigMap{
-			Data: map[string]string{virtconfig.OVMFPathKey: value},
-		})
+	table.DescribeTable(" when OVMFPath", func(cpuArch string, ovmfPathKey string, result string) {
+		clusterConfig, _, _, _ := testutils.NewFakeClusterConfigWithCPUArch(&kubev1.ConfigMap{
+			Data: map[string]string{
+				virtconfig.OVMFPathKey: ovmfPathKey,
+			},
+		}, cpuArch)
 		ovmfPath := clusterConfig.GetOVMFPath()
 		Expect(ovmfPath).To(Equal(result))
 	},
-		table.Entry("when set, GetOVMFPath should return the value", "/usr/share/ovmf/x64", "/usr/share/ovmf/x64"),
-		table.Entry("when unset, GetOVMFPath should return the default", "", virtconfig.DefaultOVMFPath),
+		table.Entry("when set, GetOVMFPath should return the value", "", "/usr/share/ovmf/x64", "/usr/share/ovmf/x64"),
+		table.Entry("when unset, GetOVMFPath should return the default with amd64", "amd64", "", virtconfig.DefaultARCHOVMFPath),
+		table.Entry("when unset, GetOVMFPath should return the default with arm64", "arm64", "", virtconfig.DefaultAARCH64OVMFPath),
+		table.Entry("when unset, GetOVMFPath should return the default with ppc64le", "ppc64le", "", virtconfig.DefaultARCHOVMFPath),
 	)
 
 	It("verifies that SetConfigModifiedCallback works as expected ", func() {
@@ -452,12 +443,15 @@ var _ = Describe("ConfigMap", func() {
 					NodeSelectors:          map[string]string{"test": "test"},
 					UseEmulation:           true,
 					CPUAllocationRatio:     25,
+					DiskVerification: &v1.DiskVerification{
+						MemoryLimit: resource.NewScaledQuantity(1, resource.Giga),
+					},
 				},
 			},
 			func(c *v1.KubeVirtConfiguration) interface{} {
 				return c.DeveloperConfiguration
 			},
-			`{"featureGates":["test1","test2"],"pvcTolerateLessSpaceUpToPercent":5,"memoryOvercommit":150,"nodeSelectors":{"test":"test"},"useEmulation":true,"cpuAllocationRatio":25,"logVerbosity":{"virtAPI":2,"virtController":2,"virtHandler":2,"virtLauncher":2,"virtOperator":2}}`),
+			`{"featureGates":["test1","test2"],"pvcTolerateLessSpaceUpToPercent":5,"minimumReservePVCBytes":131072,"memoryOvercommit":150,"nodeSelectors":{"test":"test"},"useEmulation":true,"cpuAllocationRatio":25,"diskVerification":{"memoryLimit":"1G"},"logVerbosity":{"virtAPI":2,"virtController":2,"virtHandler":2,"virtLauncher":2,"virtOperator":2}}`),
 		table.Entry("when networkConfiguration set, should equal to result",
 			v1.KubeVirtConfiguration{
 				NetworkConfiguration: &v1.NetworkConfiguration{

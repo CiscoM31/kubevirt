@@ -28,7 +28,6 @@ package cmdclient
 import (
 	"fmt"
 	"io"
-	"io/ioutil"
 	"net"
 	"net/rpc"
 	"os"
@@ -81,6 +80,8 @@ type LauncherClient interface {
 	SyncVirtualMachine(vmi *v1.VirtualMachineInstance, options *cmdv1.VirtualMachineOptions) error
 	PauseVirtualMachine(vmi *v1.VirtualMachineInstance) error
 	UnpauseVirtualMachine(vmi *v1.VirtualMachineInstance) error
+	FreezeVirtualMachine(vmi *v1.VirtualMachineInstance) error
+	UnfreezeVirtualMachine(vmi *v1.VirtualMachineInstance) error
 	SyncMigrationTarget(vmi *v1.VirtualMachineInstance) error
 	SignalTargetPodCleanup(vmi *v1.VirtualMachineInstance) error
 	ShutdownVirtualMachine(vmi *v1.VirtualMachineInstance) error
@@ -94,7 +95,9 @@ type LauncherClient interface {
 	GetGuestInfo() (*v1.VirtualMachineInstanceGuestAgentInfo, error)
 	GetUsers() (v1.VirtualMachineInstanceGuestOSUserList, error)
 	GetFilesystems() (v1.VirtualMachineInstanceFileSystemList, error)
+	Exec(string, string, []string, int32) (int, string, error)
 	Ping() error
+	GuestPing(string, int32) error
 	Close()
 }
 
@@ -129,7 +132,7 @@ func ListAllSockets() ([]string, error) {
 		return socketFiles, nil
 	}
 
-	files, err := ioutil.ReadDir(socketsDir)
+	files, err := os.ReadDir(socketsDir)
 	if err != nil {
 		return nil, err
 	}
@@ -146,7 +149,7 @@ func ListAllSockets() ([]string, error) {
 	}
 
 	podsDir := podsBaseDir
-	dirs, err := ioutil.ReadDir(podsDir)
+	dirs, err := os.ReadDir(podsDir)
 	if err != nil {
 		return nil, err
 	}
@@ -415,6 +418,14 @@ func (c *VirtLauncherClient) UnpauseVirtualMachine(vmi *v1.VirtualMachineInstanc
 	return c.genericSendVMICmd("Unpause", c.v1client.UnpauseVirtualMachine, vmi, &cmdv1.VirtualMachineOptions{})
 }
 
+func (c *VirtLauncherClient) FreezeVirtualMachine(vmi *v1.VirtualMachineInstance) error {
+	return c.genericSendVMICmd("Freeze", c.v1client.FreezeVirtualMachine, vmi, &cmdv1.VirtualMachineOptions{})
+}
+
+func (c *VirtLauncherClient) UnfreezeVirtualMachine(vmi *v1.VirtualMachineInstance) error {
+	return c.genericSendVMICmd("Unfreeze", c.v1client.UnfreezeVirtualMachine, vmi, &cmdv1.VirtualMachineOptions{})
+}
+
 func (c *VirtLauncherClient) ShutdownVirtualMachine(vmi *v1.VirtualMachineInstance) error {
 	return c.genericSendVMICmd("Shutdown", c.v1client.ShutdownVirtualMachine, vmi, &cmdv1.VirtualMachineOptions{})
 }
@@ -627,4 +638,51 @@ func (c *VirtLauncherClient) GetFilesystems() (v1.VirtualMachineInstanceFileSyst
 	}
 
 	return filesystemList, nil
+}
+
+// Exec the command with args on the guest and return the resulting status code, stdOut and error
+func (c *VirtLauncherClient) Exec(domainName, command string, args []string, timeoutSeconds int32) (int, string, error) {
+	request := &cmdv1.ExecRequest{
+		DomainName:     domainName,
+		Command:        command,
+		Args:           args,
+		TimeoutSeconds: int32(timeoutSeconds),
+	}
+	exitCode := -1
+	stdOut := ""
+
+	ctx, cancel := context.WithTimeout(
+		context.Background(),
+		// we give the context a bit more time as the timeout should kick
+		// on the actual execution
+		time.Duration(timeoutSeconds)*time.Second+shortTimeout,
+	)
+	defer cancel()
+
+	resp, err := c.v1client.Exec(ctx, request)
+	if resp == nil {
+		return exitCode, stdOut, err
+	}
+
+	exitCode = int(resp.ExitCode)
+	stdOut = resp.StdOut
+
+	return exitCode, stdOut, err
+}
+
+func (c *VirtLauncherClient) GuestPing(domainName string, timeoutSeconds int32) error {
+	request := &cmdv1.GuestPingRequest{
+		DomainName:     domainName,
+		TimeoutSeconds: timeoutSeconds,
+	}
+	ctx, cancel := context.WithTimeout(
+		context.Background(),
+		// we give the context a bit more time as the timeout should kick
+		// on the actual execution
+		time.Duration(timeoutSeconds)*time.Second+shortTimeout,
+	)
+	defer cancel()
+
+	_, err := c.v1client.GuestPing(ctx, request)
+	return err
 }

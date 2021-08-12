@@ -34,18 +34,6 @@ bazel run \
 
 bazel run \
     --config=${ARCHITECTURE} \
-    //:bazeldnf -- rpmtree --public --arch=ppc64le --name testimage_ppc64le \
-    $basesystem \
-    qemu-img \
-    nginx \
-    scsi-target-utils \
-    procps-ng \
-    nmap-ncat \
-    iputils \
-    e2fsprogs
-
-bazel run \
-    --config=${ARCHITECTURE} \
     //:bazeldnf -- rpmtree --public --arch=aarch64 --name testimage_aarch64 \
     $basesystem \
     qemu-img \
@@ -83,12 +71,11 @@ bazel run \
     --config=${ARCHITECTURE} \
     //:bazeldnf -- rpmtree --public --name launcherbase_x86_64 \
     $basesystem \
-    libverto-libev \
     libvirt-daemon-driver-qemu-${LIBVIRT_VERSION} \
     libvirt-client-${LIBVIRT_VERSION} \
-    qemu-kvm-${QEMU_VERSION} \
+    qemu-kvm-core-${QEMU_VERSION} \
     seabios-${SEABIOS_VERSION} \
-    genisoimage \
+    xorriso \
     selinux-policy selinux-policy-targeted \
     nftables \
     findutils \
@@ -100,17 +87,29 @@ bazel run \
     --config=${ARCHITECTURE} \
     //:bazeldnf -- rpmtree --public --arch=aarch64 --name launcherbase_aarch64 \
     $basesystem \
-    libverto-libev \
     libvirt-daemon-driver-qemu-${LIBVIRT_VERSION} \
     libvirt-client-${LIBVIRT_VERSION} \
-    qemu-kvm-${QEMU_VERSION} \
-    genisoimage \
+    qemu-kvm-core-${QEMU_VERSION} \
+    xorriso \
     selinux-policy selinux-policy-targeted \
     nftables \
     findutils \
     procps-ng \
     iptables \
     tar
+
+bazel run \
+    //:bazeldnf -- rpmtree --public --name libguestfs-tools \
+    $basesystem \
+    libguestfs \
+    libguestfs-tools \
+    --force-ignore-with-dependencies '^(kernel-|linux-firmware)' \
+    --force-ignore-with-dependencies '^(python[3]{0,1}-|perl[3]{0,1}-)' \
+    --force-ignore-with-dependencies '^(mesa-|libwayland-|selinux-policy|mozjs60)' \
+    --force-ignore-with-dependencies '^(libvirt-daemon-driver-storage|swtpm)' \
+    --force-ignore-with-dependencies '^(man-db|mandoc)' \
+    --force-ignore-with-dependencies '^(dbus|glusterfs|libX11|qemu-kvm-block|trousers|usbredir)' \
+    --force-ignore-with-dependencies '^(gstreamer1|kbd|libX)'
 
 # remove all RPMs which are no longer referenced by a rpmtree
 bazel run \

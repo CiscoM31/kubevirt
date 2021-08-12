@@ -231,386 +231,522 @@ var _ = Describe("VirtualMachineInstance Subresources", func() {
 			close(done)
 		}, 5)
 
-		It("should fail with no 'name' path param", func(done Done) {
+		Context("VNC", func() {
+			It("should fail with no 'name' path param", func(done Done) {
 
-			app.VNCRequestHandler(request, response)
-			ExpectStatusErrorWithCode(recorder, http.StatusInternalServerError)
-			close(done)
-		}, 5)
+				app.VNCRequestHandler(request, response)
+				ExpectStatusErrorWithCode(recorder, http.StatusInternalServerError)
+				close(done)
+			}, 5)
 
-		It("should fail with no 'namespace' path param", func(done Done) {
+			It("should fail with no 'namespace' path param", func(done Done) {
 
-			request.PathParameters()["name"] = "testvmi"
+				request.PathParameters()["name"] = "testvmi"
 
-			app.VNCRequestHandler(request, response)
-			ExpectStatusErrorWithCode(recorder, http.StatusInternalServerError)
-			close(done)
-		}, 5)
+				app.VNCRequestHandler(request, response)
+				ExpectStatusErrorWithCode(recorder, http.StatusInternalServerError)
+				close(done)
+			}, 5)
 
-		It("should fail if vmi is not found", func(done Done) {
+			It("should fail if vmi is not found", func(done Done) {
 
-			request.PathParameters()["name"] = "testvmi"
-			request.PathParameters()["namespace"] = "default"
+				request.PathParameters()["name"] = "testvmi"
+				request.PathParameters()["namespace"] = "default"
 
-			server.AppendHandlers(
-				ghttp.CombineHandlers(
-					ghttp.VerifyRequest("GET", "/apis/kubevirt.io/v1alpha3/namespaces/default/virtualmachineinstances/testvmi"),
-					ghttp.RespondWithJSONEncoded(http.StatusNotFound, nil),
-				),
-			)
+				server.AppendHandlers(
+					ghttp.CombineHandlers(
+						ghttp.VerifyRequest("GET", "/apis/kubevirt.io/v1alpha3/namespaces/default/virtualmachineinstances/testvmi"),
+						ghttp.RespondWithJSONEncoded(http.StatusNotFound, nil),
+					),
+				)
 
-			app.VNCRequestHandler(request, response)
-			ExpectStatusErrorWithCode(recorder, http.StatusNotFound)
-			close(done)
-		}, 5)
+				app.VNCRequestHandler(request, response)
+				ExpectStatusErrorWithCode(recorder, http.StatusNotFound)
+				close(done)
+			}, 5)
 
-		It("should fail with internal at fetching vmi errors", func(done Done) {
+			It("should fail with internal at fetching vmi errors", func(done Done) {
 
-			request.PathParameters()["name"] = "testvmi"
-			request.PathParameters()["namespace"] = "default"
+				request.PathParameters()["name"] = "testvmi"
+				request.PathParameters()["namespace"] = "default"
 
-			server.AppendHandlers(
-				ghttp.CombineHandlers(
-					ghttp.VerifyRequest("GET", "/apis/kubevirt.io/v1alpha3/namespaces/default/virtualmachineinstances/testvmi"),
-					ghttp.RespondWithJSONEncoded(http.StatusServiceUnavailable, nil),
-				),
-			)
+				server.AppendHandlers(
+					ghttp.CombineHandlers(
+						ghttp.VerifyRequest("GET", "/apis/kubevirt.io/v1alpha3/namespaces/default/virtualmachineinstances/testvmi"),
+						ghttp.RespondWithJSONEncoded(http.StatusServiceUnavailable, nil),
+					),
+				)
 
-			app.VNCRequestHandler(request, response)
-			ExpectStatusErrorWithCode(recorder, http.StatusInternalServerError)
-			close(done)
-		}, 5)
+				app.VNCRequestHandler(request, response)
+				ExpectStatusErrorWithCode(recorder, http.StatusInternalServerError)
+				close(done)
+			}, 5)
 
-		It("should fail with no graphics device at VNC connections", func(done Done) {
+			It("should fail with no graphics device at VNC connections", func(done Done) {
 
-			request.PathParameters()["name"] = "testvmi"
-			request.PathParameters()["namespace"] = "default"
+				request.PathParameters()["name"] = "testvmi"
+				request.PathParameters()["namespace"] = "default"
 
-			flag := false
-			vmi := v1.NewMinimalVMI("testvmi")
-			vmi.Status.Phase = v1.Running
-			vmi.ObjectMeta.SetUID(uuid.NewUUID())
-			vmi.Spec.Domain.Devices.AutoattachGraphicsDevice = &flag
+				flag := false
+				vmi := v1.NewMinimalVMI("testvmi")
+				vmi.Status.Phase = v1.Running
+				vmi.ObjectMeta.SetUID(uuid.NewUUID())
+				vmi.Spec.Domain.Devices.AutoattachGraphicsDevice = &flag
 
-			server.AppendHandlers(
-				ghttp.CombineHandlers(
-					ghttp.VerifyRequest("GET", "/apis/kubevirt.io/v1alpha3/namespaces/default/virtualmachineinstances/testvmi"),
-					ghttp.RespondWithJSONEncoded(http.StatusOK, vmi),
-				),
-			)
-			app.VNCRequestHandler(request, response)
-			ExpectStatusErrorWithCode(recorder, http.StatusBadRequest)
-			close(done)
-		}, 5)
+				server.AppendHandlers(
+					ghttp.CombineHandlers(
+						ghttp.VerifyRequest("GET", "/apis/kubevirt.io/v1alpha3/namespaces/default/virtualmachineinstances/testvmi"),
+						ghttp.RespondWithJSONEncoded(http.StatusOK, vmi),
+					),
+				)
+				app.VNCRequestHandler(request, response)
+				ExpectStatusErrorWithCode(recorder, http.StatusBadRequest)
+				close(done)
+			}, 5)
 
-		It("should fail with no serial console at console connections", func(done Done) {
-
-			request.PathParameters()["name"] = "testvmi"
-			request.PathParameters()["namespace"] = "default"
-
-			flag := false
-			vmi := v1.NewMinimalVMI("testvmi")
-			vmi.Status.Phase = v1.Running
-			vmi.ObjectMeta.SetUID(uuid.NewUUID())
-			vmi.Spec.Domain.Devices.AutoattachSerialConsole = &flag
-
-			server.AppendHandlers(
-				ghttp.CombineHandlers(
-					ghttp.VerifyRequest("GET", "/apis/kubevirt.io/v1alpha3/namespaces/default/virtualmachineinstances/testvmi"),
-					ghttp.RespondWithJSONEncoded(http.StatusOK, vmi),
-				),
-			)
-
-			app.ConsoleRequestHandler(request, response)
-			ExpectStatusErrorWithCode(recorder, http.StatusBadRequest)
-			close(done)
-		}, 5)
-
-		It("should fail to connect to the serial console if the VMI is Failed", func(done Done) {
-
-			request.PathParameters()["name"] = "testvmi"
-			request.PathParameters()["namespace"] = "default"
-
-			expectVMI(false, false)
-
-			app.ConsoleRequestHandler(request, response)
-			ExpectStatusErrorWithCode(recorder, http.StatusConflict)
-			close(done)
-		}, 5)
-
-		It("should fail if VirtualMachine not exists", func(done Done) {
-			request.PathParameters()["name"] = "testvm"
-			request.PathParameters()["namespace"] = "default"
-
-			server.AppendHandlers(
-				ghttp.CombineHandlers(
-					ghttp.VerifyRequest("GET", "/apis/kubevirt.io/v1alpha3/namespaces/default/virtualmachines/testvm"),
-					ghttp.RespondWithJSONEncoded(http.StatusNotFound, nil),
-				),
-			)
-
-			app.RestartVMRequestHandler(request, response)
-
-			ExpectStatusErrorWithCode(recorder, http.StatusNotFound)
-			close(done)
-		}, 5)
-
-		It("should fail if VirtualMachine is not in running state", func(done Done) {
-			request.PathParameters()["name"] = "testvm"
-			request.PathParameters()["namespace"] = "default"
-
-			vm := v1.VirtualMachine{
-				Spec: v1.VirtualMachineSpec{
-					Running: &notRunning,
-				},
-			}
-
-			server.AppendHandlers(
-				ghttp.CombineHandlers(
-					ghttp.VerifyRequest("GET", "/apis/kubevirt.io/v1alpha3/namespaces/default/virtualmachines/testvm"),
-					ghttp.RespondWithJSONEncoded(http.StatusOK, vm),
-				),
-			)
-
-			app.RestartVMRequestHandler(request, response)
-
-			status := ExpectStatusErrorWithCode(recorder, http.StatusConflict)
-			// check the msg string that would be presented to virtctl output
-			Expect(status.Error()).To(ContainSubstring("Halted does not support manual restart requests"))
-			close(done)
 		})
 
-		It("should ForceRestart VirtualMachine", func(done Done) {
-			request.PathParameters()["name"] = "testvm"
-			request.PathParameters()["namespace"] = "default"
+		Context("PortForward", func() {
+			It("should fail with no 'name' path param", func(done Done) {
 
-			body := map[string]int64{
-				"gracePeriodSeconds": 0,
-			}
-			bytesRepresentation, _ := json.Marshal(body)
-			request.Request.Body = ioutil.NopCloser(bytes.NewReader(bytesRepresentation))
+				app.PortForwardRequestHandler(app.FetchVirtualMachineInstance)(request, response)
+				ExpectStatusErrorWithCode(recorder, http.StatusInternalServerError)
+				close(done)
+			}, 5)
 
-			vm := v1.VirtualMachine{
-				ObjectMeta: k8smetav1.ObjectMeta{
-					Name:      "testvm",
-					Namespace: "default",
-				},
-				Spec: v1.VirtualMachineSpec{
-					Running: &running,
-				},
-			}
-			vmi := v1.VirtualMachineInstance{
-				Spec: v1.VirtualMachineInstanceSpec{},
-			}
-			vmi.ObjectMeta.SetUID(uuid.NewUUID())
+			It("should fail with no 'namespace' path param", func(done Done) {
 
-			pod := &k8sv1.Pod{}
-			pod.Labels = map[string]string{}
-			pod.Annotations = map[string]string{}
-			pod.Labels[v1.AppLabel] = "virt-launcher"
-			pod.ObjectMeta.Name = "virt-launcher-testvm"
-			pod.Spec.NodeName = "mynode"
-			pod.Status.Phase = k8sv1.PodRunning
-			pod.Status.PodIP = "10.35.1.1"
-			pod.Labels[v1.CreatedByLabel] = string(vmi.UID)
-			pod.Annotations[v1.DomainAnnotation] = vm.Name
+				request.PathParameters()["name"] = "testvmi"
 
-			podList := k8sv1.PodList{}
-			podList.Items = []k8sv1.Pod{}
-			podList.Items = append(podList.Items, *pod)
+				app.PortForwardRequestHandler(app.FetchVirtualMachineInstance)(request, response)
+				ExpectStatusErrorWithCode(recorder, http.StatusInternalServerError)
+				close(done)
+			}, 5)
 
-			server.AppendHandlers(
-				ghttp.CombineHandlers(
-					ghttp.VerifyRequest("GET", "/apis/kubevirt.io/v1alpha3/namespaces/default/virtualmachines/testvm"),
-					ghttp.RespondWithJSONEncoded(http.StatusOK, vm),
-				),
-			)
+			It("should fail if vmi is not found", func(done Done) {
 
-			server.AppendHandlers(
-				ghttp.CombineHandlers(
-					ghttp.VerifyRequest("GET", "/apis/kubevirt.io/v1alpha3/namespaces/default/virtualmachineinstances/testvm"),
-					ghttp.RespondWithJSONEncoded(http.StatusOK, vmi),
-				),
-			)
+				request.PathParameters()["name"] = "testvmi"
+				request.PathParameters()["namespace"] = "default"
 
-			server.AppendHandlers(
-				ghttp.CombineHandlers(
-					ghttp.VerifyRequest("PATCH", "/apis/kubevirt.io/v1alpha3/namespaces/default/virtualmachines/testvm/status"),
-					ghttp.RespondWithJSONEncoded(http.StatusOK, vm),
-				),
-			)
+				server.AppendHandlers(
+					ghttp.CombineHandlers(
+						ghttp.VerifyRequest("GET", "/apis/kubevirt.io/v1alpha3/namespaces/default/virtualmachineinstances/testvmi"),
+						ghttp.RespondWithJSONEncoded(http.StatusNotFound, nil),
+					),
+				)
 
-			server.AppendHandlers(
-				ghttp.CombineHandlers(
-					ghttp.VerifyRequest("GET", "/api/v1/namespaces/default/pods"),
-					ghttp.RespondWithJSONEncoded(http.StatusOK, podList),
-				),
-			)
+				app.PortForwardRequestHandler(app.FetchVirtualMachineInstance)(request, response)
+				ExpectStatusErrorWithCode(recorder, http.StatusNotFound)
+				close(done)
+			}, 5)
 
-			server.AppendHandlers(
-				ghttp.CombineHandlers(
-					ghttp.VerifyRequest("DELETE", "/api/v1/namespaces/default/pods/virt-launcher-testvm"),
-					ghttp.RespondWithJSONEncoded(http.StatusOK, vm),
-				),
-			)
+			It("should fail with internal at fetching vmi errors", func(done Done) {
 
-			app.RestartVMRequestHandler(request, response)
+				request.PathParameters()["name"] = "testvmi"
+				request.PathParameters()["namespace"] = "default"
 
-			Expect(response.Error()).ToNot(HaveOccurred())
-			Expect(response.StatusCode()).To(Equal(http.StatusAccepted))
-			close(done)
+				server.AppendHandlers(
+					ghttp.CombineHandlers(
+						ghttp.VerifyRequest("GET", "/apis/kubevirt.io/v1alpha3/namespaces/default/virtualmachineinstances/testvmi"),
+						ghttp.RespondWithJSONEncoded(http.StatusServiceUnavailable, nil),
+					),
+				)
+
+				app.PortForwardRequestHandler(app.FetchVirtualMachineInstance)(request, response)
+				ExpectStatusErrorWithCode(recorder, http.StatusInternalServerError)
+				close(done)
+			}, 5)
+
 		})
 
-		It("should not ForceRestart VirtualMachine if no Pods found for the VMI", func(done Done) {
-			request.PathParameters()["name"] = "testvm"
-			request.PathParameters()["namespace"] = "default"
+		Context("console", func() {
+			It("should fail with no serial console at console connections", func(done Done) {
 
-			body := map[string]int64{
-				"gracePeriodSeconds": 0,
-			}
-			bytesRepresentation, _ := json.Marshal(body)
-			request.Request.Body = ioutil.NopCloser(bytes.NewReader(bytesRepresentation))
+				request.PathParameters()["name"] = "testvmi"
+				request.PathParameters()["namespace"] = "default"
 
-			vm := v1.VirtualMachine{
-				ObjectMeta: k8smetav1.ObjectMeta{
-					Name:      "testvm",
-					Namespace: "default",
-				},
-				Spec: v1.VirtualMachineSpec{
-					Running: &running,
-				},
-			}
-			vmi := v1.VirtualMachineInstance{
-				Spec: v1.VirtualMachineInstanceSpec{},
-			}
-			vmi.ObjectMeta.SetUID(uuid.NewUUID())
+				flag := false
+				vmi := v1.NewMinimalVMI("testvmi")
+				vmi.Status.Phase = v1.Running
+				vmi.ObjectMeta.SetUID(uuid.NewUUID())
+				vmi.Spec.Domain.Devices.AutoattachSerialConsole = &flag
 
-			podList := k8sv1.PodList{}
-			podList.Items = []k8sv1.Pod{}
+				server.AppendHandlers(
+					ghttp.CombineHandlers(
+						ghttp.VerifyRequest("GET", "/apis/kubevirt.io/v1alpha3/namespaces/default/virtualmachineinstances/testvmi"),
+						ghttp.RespondWithJSONEncoded(http.StatusOK, vmi),
+					),
+				)
 
-			server.AppendHandlers(
-				ghttp.CombineHandlers(
-					ghttp.VerifyRequest("GET", "/apis/kubevirt.io/v1alpha3/namespaces/default/virtualmachines/testvm"),
-					ghttp.RespondWithJSONEncoded(http.StatusOK, vm),
-				),
-			)
+				app.ConsoleRequestHandler(request, response)
+				ExpectStatusErrorWithCode(recorder, http.StatusBadRequest)
+				close(done)
+			}, 5)
 
-			server.AppendHandlers(
-				ghttp.CombineHandlers(
-					ghttp.VerifyRequest("GET", "/apis/kubevirt.io/v1alpha3/namespaces/default/virtualmachineinstances/testvm"),
-					ghttp.RespondWithJSONEncoded(http.StatusOK, vmi),
-				),
-			)
+			It("should fail to connect to the serial console if the VMI is Failed", func(done Done) {
 
-			server.AppendHandlers(
-				ghttp.CombineHandlers(
-					ghttp.VerifyRequest("PATCH", "/apis/kubevirt.io/v1alpha3/namespaces/default/virtualmachines/testvm/status"),
-					ghttp.RespondWithJSONEncoded(http.StatusOK, vm),
-				),
-			)
+				request.PathParameters()["name"] = "testvmi"
+				request.PathParameters()["namespace"] = "default"
 
-			server.AppendHandlers(
-				ghttp.CombineHandlers(
-					ghttp.VerifyRequest("GET", "/api/v1/namespaces/default/pods"),
-					ghttp.RespondWithJSONEncoded(http.StatusOK, podList),
-				),
-			)
+				expectVMI(false, false)
 
-			app.RestartVMRequestHandler(request, response)
+				app.ConsoleRequestHandler(request, response)
+				ExpectStatusErrorWithCode(recorder, http.StatusConflict)
+				close(done)
+			}, 5)
 
-			Expect(response.Error()).ToNot(HaveOccurred())
-			Expect(response.StatusCode()).To(Equal(http.StatusAccepted))
-			close(done)
 		})
 
-		It("should restart VirtualMachine", func(done Done) {
-			request.PathParameters()["name"] = "testvm"
-			request.PathParameters()["namespace"] = "default"
+		Context("restart", func() {
+			It("should fail if VirtualMachine not exists", func(done Done) {
+				request.PathParameters()["name"] = "testvm"
+				request.PathParameters()["namespace"] = "default"
 
-			vm := v1.VirtualMachine{
-				ObjectMeta: k8smetav1.ObjectMeta{
-					Name:      "testvm",
-					Namespace: "default",
-				},
-				Spec: v1.VirtualMachineSpec{
-					Running: &running,
-				},
-			}
+				server.AppendHandlers(
+					ghttp.CombineHandlers(
+						ghttp.VerifyRequest("GET", "/apis/kubevirt.io/v1alpha3/namespaces/default/virtualmachines/testvm"),
+						ghttp.RespondWithJSONEncoded(http.StatusNotFound, nil),
+					),
+				)
 
-			vmi := v1.VirtualMachineInstance{
-				Spec: v1.VirtualMachineInstanceSpec{},
-			}
+				app.RestartVMRequestHandler(request, response)
 
-			vmi.ObjectMeta.SetUID(uuid.NewUUID())
+				ExpectStatusErrorWithCode(recorder, http.StatusNotFound)
+				close(done)
+			}, 5)
 
-			server.AppendHandlers(
-				ghttp.CombineHandlers(
-					ghttp.VerifyRequest("GET", "/apis/kubevirt.io/v1alpha3/namespaces/default/virtualmachines/testvm"),
-					ghttp.RespondWithJSONEncoded(http.StatusOK, vm),
-				),
-			)
+			It("should fail if VirtualMachine is not in running state", func(done Done) {
+				request.PathParameters()["name"] = "testvm"
+				request.PathParameters()["namespace"] = "default"
 
-			server.AppendHandlers(
-				ghttp.CombineHandlers(
-					ghttp.VerifyRequest("GET", "/apis/kubevirt.io/v1alpha3/namespaces/default/virtualmachineinstances/testvm"),
-					ghttp.RespondWithJSONEncoded(http.StatusOK, vmi),
-				),
-			)
+				vm := v1.VirtualMachine{
+					Spec: v1.VirtualMachineSpec{
+						Running: &notRunning,
+					},
+				}
 
-			server.AppendHandlers(
-				ghttp.CombineHandlers(
-					ghttp.VerifyRequest("PATCH", "/apis/kubevirt.io/v1alpha3/namespaces/default/virtualmachines/testvm/status"),
-					ghttp.RespondWithJSONEncoded(http.StatusOK, vm),
-				),
-			)
+				server.AppendHandlers(
+					ghttp.CombineHandlers(
+						ghttp.VerifyRequest("GET", "/apis/kubevirt.io/v1alpha3/namespaces/default/virtualmachines/testvm"),
+						ghttp.RespondWithJSONEncoded(http.StatusOK, vm),
+					),
+				)
 
-			app.RestartVMRequestHandler(request, response)
+				app.RestartVMRequestHandler(request, response)
 
-			Expect(response.Error()).ToNot(HaveOccurred())
-			Expect(response.StatusCode()).To(Equal(http.StatusAccepted))
-			close(done)
+				status := ExpectStatusErrorWithCode(recorder, http.StatusConflict)
+				// check the msg string that would be presented to virtctl output
+				Expect(status.Error()).To(ContainSubstring("Halted does not support manual restart requests"))
+				close(done)
+			})
+
+			It("should ForceRestart VirtualMachine", func(done Done) {
+				request.PathParameters()["name"] = "testvm"
+				request.PathParameters()["namespace"] = "default"
+
+				body := map[string]int64{
+					"gracePeriodSeconds": 0,
+				}
+				bytesRepresentation, _ := json.Marshal(body)
+				request.Request.Body = ioutil.NopCloser(bytes.NewReader(bytesRepresentation))
+
+				vm := v1.VirtualMachine{
+					ObjectMeta: k8smetav1.ObjectMeta{
+						Name:      "testvm",
+						Namespace: "default",
+					},
+					Spec: v1.VirtualMachineSpec{
+						Running: &running,
+					},
+				}
+				vmi := v1.VirtualMachineInstance{
+					Spec: v1.VirtualMachineInstanceSpec{},
+				}
+				vmi.ObjectMeta.SetUID(uuid.NewUUID())
+
+				pod := &k8sv1.Pod{}
+				pod.Labels = map[string]string{}
+				pod.Annotations = map[string]string{}
+				pod.Labels[v1.AppLabel] = "virt-launcher"
+				pod.ObjectMeta.Name = "virt-launcher-testvm"
+				pod.Spec.NodeName = "mynode"
+				pod.Status.Phase = k8sv1.PodRunning
+				pod.Status.PodIP = "10.35.1.1"
+				pod.Labels[v1.CreatedByLabel] = string(vmi.UID)
+				pod.Annotations[v1.DomainAnnotation] = vm.Name
+
+				podList := k8sv1.PodList{}
+				podList.Items = []k8sv1.Pod{}
+				podList.Items = append(podList.Items, *pod)
+
+				server.AppendHandlers(
+					ghttp.CombineHandlers(
+						ghttp.VerifyRequest("GET", "/apis/kubevirt.io/v1alpha3/namespaces/default/virtualmachines/testvm"),
+						ghttp.RespondWithJSONEncoded(http.StatusOK, vm),
+					),
+				)
+
+				server.AppendHandlers(
+					ghttp.CombineHandlers(
+						ghttp.VerifyRequest("GET", "/apis/kubevirt.io/v1alpha3/namespaces/default/virtualmachineinstances/testvm"),
+						ghttp.RespondWithJSONEncoded(http.StatusOK, vmi),
+					),
+				)
+
+				server.AppendHandlers(
+					ghttp.CombineHandlers(
+						ghttp.VerifyRequest("PATCH", "/apis/kubevirt.io/v1alpha3/namespaces/default/virtualmachines/testvm/status"),
+						ghttp.RespondWithJSONEncoded(http.StatusOK, vm),
+					),
+				)
+
+				server.AppendHandlers(
+					ghttp.CombineHandlers(
+						ghttp.VerifyRequest("GET", "/api/v1/namespaces/default/pods"),
+						ghttp.RespondWithJSONEncoded(http.StatusOK, podList),
+					),
+				)
+
+				server.AppendHandlers(
+					ghttp.CombineHandlers(
+						ghttp.VerifyRequest("DELETE", "/api/v1/namespaces/default/pods/virt-launcher-testvm"),
+						ghttp.RespondWithJSONEncoded(http.StatusOK, vm),
+					),
+				)
+
+				app.RestartVMRequestHandler(request, response)
+
+				Expect(response.Error()).ToNot(HaveOccurred())
+				Expect(response.StatusCode()).To(Equal(http.StatusAccepted))
+				close(done)
+			})
+
+			It("should not ForceRestart VirtualMachine if no Pods found for the VMI", func(done Done) {
+				request.PathParameters()["name"] = "testvm"
+				request.PathParameters()["namespace"] = "default"
+
+				body := map[string]int64{
+					"gracePeriodSeconds": 0,
+				}
+				bytesRepresentation, _ := json.Marshal(body)
+				request.Request.Body = ioutil.NopCloser(bytes.NewReader(bytesRepresentation))
+
+				vm := v1.VirtualMachine{
+					ObjectMeta: k8smetav1.ObjectMeta{
+						Name:      "testvm",
+						Namespace: "default",
+					},
+					Spec: v1.VirtualMachineSpec{
+						Running: &running,
+					},
+				}
+				vmi := v1.VirtualMachineInstance{
+					Spec: v1.VirtualMachineInstanceSpec{},
+				}
+				vmi.ObjectMeta.SetUID(uuid.NewUUID())
+
+				podList := k8sv1.PodList{}
+				podList.Items = []k8sv1.Pod{}
+
+				server.AppendHandlers(
+					ghttp.CombineHandlers(
+						ghttp.VerifyRequest("GET", "/apis/kubevirt.io/v1alpha3/namespaces/default/virtualmachines/testvm"),
+						ghttp.RespondWithJSONEncoded(http.StatusOK, vm),
+					),
+				)
+
+				server.AppendHandlers(
+					ghttp.CombineHandlers(
+						ghttp.VerifyRequest("GET", "/apis/kubevirt.io/v1alpha3/namespaces/default/virtualmachineinstances/testvm"),
+						ghttp.RespondWithJSONEncoded(http.StatusOK, vmi),
+					),
+				)
+
+				server.AppendHandlers(
+					ghttp.CombineHandlers(
+						ghttp.VerifyRequest("PATCH", "/apis/kubevirt.io/v1alpha3/namespaces/default/virtualmachines/testvm/status"),
+						ghttp.RespondWithJSONEncoded(http.StatusOK, vm),
+					),
+				)
+
+				server.AppendHandlers(
+					ghttp.CombineHandlers(
+						ghttp.VerifyRequest("GET", "/api/v1/namespaces/default/pods"),
+						ghttp.RespondWithJSONEncoded(http.StatusOK, podList),
+					),
+				)
+
+				app.RestartVMRequestHandler(request, response)
+
+				Expect(response.Error()).ToNot(HaveOccurred())
+				Expect(response.StatusCode()).To(Equal(http.StatusAccepted))
+				close(done)
+			})
+
+			It("should restart VirtualMachine", func(done Done) {
+				request.PathParameters()["name"] = "testvm"
+				request.PathParameters()["namespace"] = "default"
+
+				vm := v1.VirtualMachine{
+					ObjectMeta: k8smetav1.ObjectMeta{
+						Name:      "testvm",
+						Namespace: "default",
+					},
+					Spec: v1.VirtualMachineSpec{
+						Running: &running,
+					},
+				}
+
+				vmi := v1.VirtualMachineInstance{
+					Spec: v1.VirtualMachineInstanceSpec{},
+				}
+
+				vmi.ObjectMeta.SetUID(uuid.NewUUID())
+
+				server.AppendHandlers(
+					ghttp.CombineHandlers(
+						ghttp.VerifyRequest("GET", "/apis/kubevirt.io/v1alpha3/namespaces/default/virtualmachines/testvm"),
+						ghttp.RespondWithJSONEncoded(http.StatusOK, vm),
+					),
+				)
+
+				server.AppendHandlers(
+					ghttp.CombineHandlers(
+						ghttp.VerifyRequest("GET", "/apis/kubevirt.io/v1alpha3/namespaces/default/virtualmachineinstances/testvm"),
+						ghttp.RespondWithJSONEncoded(http.StatusOK, vmi),
+					),
+				)
+
+				server.AppendHandlers(
+					ghttp.CombineHandlers(
+						ghttp.VerifyRequest("PATCH", "/apis/kubevirt.io/v1alpha3/namespaces/default/virtualmachines/testvm/status"),
+						ghttp.RespondWithJSONEncoded(http.StatusOK, vm),
+					),
+				)
+
+				app.RestartVMRequestHandler(request, response)
+
+				Expect(response.Error()).ToNot(HaveOccurred())
+				Expect(response.StatusCode()).To(Equal(http.StatusAccepted))
+				close(done)
+			})
+
+			It("should start VirtualMachine if VMI doesn't exist", func(done Done) {
+				request.PathParameters()["name"] = "testvm"
+				request.PathParameters()["namespace"] = "default"
+
+				vm := v1.VirtualMachine{
+					ObjectMeta: k8smetav1.ObjectMeta{
+						Name:      "testvm",
+						Namespace: "default",
+					},
+					Spec: v1.VirtualMachineSpec{
+						Running: &running,
+					},
+				}
+
+				server.AppendHandlers(
+					ghttp.CombineHandlers(
+						ghttp.VerifyRequest("GET", "/apis/kubevirt.io/v1alpha3/namespaces/default/virtualmachines/testvm"),
+						ghttp.RespondWithJSONEncoded(http.StatusOK, vm),
+					),
+				)
+
+				server.AppendHandlers(
+					ghttp.CombineHandlers(
+						ghttp.VerifyRequest("GET", "/apis/kubevirt.io/v1alpha3/namespaces/default/virtualmachineinstances/testvm"),
+						ghttp.RespondWithJSONEncoded(http.StatusOK, nil),
+					),
+				)
+
+				server.AppendHandlers(
+					ghttp.CombineHandlers(
+						ghttp.VerifyRequest("PATCH", "/apis/kubevirt.io/v1alpha3/namespaces/default/virtualmachines/testvm/status"),
+						ghttp.RespondWithJSONEncoded(http.StatusOK, vm),
+					),
+				)
+
+				app.RestartVMRequestHandler(request, response)
+				Expect(response.Error()).NotTo(HaveOccurred())
+				Expect(response.StatusCode()).To(Equal(http.StatusAccepted))
+				close(done)
+			})
 		})
 
-		It("should start VirtualMachine if VMI doesn't exist", func(done Done) {
-			request.PathParameters()["name"] = "testvm"
-			request.PathParameters()["namespace"] = "default"
+		Context("stop", func() {
+			table.DescribeTable("should ForceStop VirtualMachine", func(statusPhase v1.VirtualMachineInstancePhase) {
+				request.PathParameters()["name"] = "testvm"
+				request.PathParameters()["namespace"] = "default"
+				var terminationGracePeriodSeconds int64 = 1800
 
-			vm := v1.VirtualMachine{
-				ObjectMeta: k8smetav1.ObjectMeta{
-					Name:      "testvm",
-					Namespace: "default",
-				},
-				Spec: v1.VirtualMachineSpec{
-					Running: &running,
-				},
-			}
+				body := map[string]int64{
+					"gracePeriod": 0,
+				}
+				bytesRepresentation, _ := json.Marshal(body)
+				request.Request.Body = ioutil.NopCloser(bytes.NewReader(bytesRepresentation))
 
-			server.AppendHandlers(
-				ghttp.CombineHandlers(
-					ghttp.VerifyRequest("GET", "/apis/kubevirt.io/v1alpha3/namespaces/default/virtualmachines/testvm"),
-					ghttp.RespondWithJSONEncoded(http.StatusOK, vm),
-				),
+				vm := v1.VirtualMachine{
+					ObjectMeta: k8smetav1.ObjectMeta{
+						Name:      "testvm",
+						Namespace: "default",
+					},
+					Spec: v1.VirtualMachineSpec{
+						Running: &running,
+					},
+				}
+
+				vmi := v1.VirtualMachineInstance{
+					ObjectMeta: k8smetav1.ObjectMeta{
+						Name:      "testvm",
+						Namespace: "default",
+					},
+					Spec: v1.VirtualMachineInstanceSpec{
+						TerminationGracePeriodSeconds: &terminationGracePeriodSeconds,
+					},
+					Status: v1.VirtualMachineInstanceStatus{
+						Phase: statusPhase,
+					},
+				}
+				vmi.ObjectMeta.SetUID(uuid.NewUUID())
+
+				server.AppendHandlers(
+					ghttp.CombineHandlers(
+						ghttp.VerifyRequest("GET", "/apis/kubevirt.io/v1alpha3/namespaces/default/virtualmachines/testvm"),
+						ghttp.RespondWithJSONEncoded(http.StatusOK, vm),
+					),
+				)
+
+				server.AppendHandlers(
+					ghttp.CombineHandlers(
+						ghttp.VerifyRequest("GET", "/apis/kubevirt.io/v1alpha3/namespaces/default/virtualmachineinstances/testvm"),
+						ghttp.RespondWithJSONEncoded(http.StatusOK, vmi),
+					),
+				)
+
+				if statusPhase != v1.Failed {
+					server.AppendHandlers(
+						ghttp.CombineHandlers(
+							ghttp.VerifyRequest("PATCH", "/apis/kubevirt.io/v1alpha3/namespaces/default/virtualmachineinstances/testvm"),
+							ghttp.RespondWithJSONEncoded(http.StatusOK, vmi),
+						),
+					)
+				}
+
+				server.AppendHandlers(
+					ghttp.CombineHandlers(
+						ghttp.VerifyRequest("PATCH", "/apis/kubevirt.io/v1alpha3/namespaces/default/virtualmachines/testvm"),
+						ghttp.RespondWithJSONEncoded(http.StatusOK, vm),
+					),
+				)
+
+				app.StopVMRequestHandler(request, response)
+
+				Expect(response.Error()).ToNot(HaveOccurred())
+				Expect(response.StatusCode()).To(Equal(http.StatusAccepted))
+			},
+				table.Entry("in status Running", v1.Running),
+				table.Entry("in status Failed", v1.Failed),
 			)
-
-			server.AppendHandlers(
-				ghttp.CombineHandlers(
-					ghttp.VerifyRequest("GET", "/apis/kubevirt.io/v1alpha3/namespaces/default/virtualmachineinstances/testvm"),
-					ghttp.RespondWithJSONEncoded(http.StatusOK, nil),
-				),
-			)
-
-			server.AppendHandlers(
-				ghttp.CombineHandlers(
-					ghttp.VerifyRequest("PATCH", "/apis/kubevirt.io/v1alpha3/namespaces/default/virtualmachines/testvm/status"),
-					ghttp.RespondWithJSONEncoded(http.StatusOK, vm),
-				),
-			)
-
-			app.RestartVMRequestHandler(request, response)
-
-			Expect(response.Error()).NotTo(HaveOccurred())
-			Expect(response.StatusCode()).To(Equal(http.StatusAccepted))
-			close(done)
 		})
 	})
 
@@ -1080,7 +1216,7 @@ var _ = Describe("VirtualMachineInstance Subresources", func() {
 			request.PathParameters()["namespace"] = "default"
 		})
 
-		table.DescribeTable("should fail with any strategy if VMI does not exist", func(runStrategy v1.VirtualMachineRunStrategy, msg string) {
+		table.DescribeTable("should handle VMI does not exist per run strategy", func(runStrategy v1.VirtualMachineRunStrategy, msg string, expectError bool) {
 			vm := newVirtualMachineWithRunStrategy(runStrategy)
 
 			server.AppendHandlers(
@@ -1097,19 +1233,34 @@ var _ = Describe("VirtualMachineInstance Subresources", func() {
 				),
 			)
 
+			if !expectError {
+				server.AppendHandlers(
+					ghttp.CombineHandlers(
+						ghttp.VerifyRequest("PATCH", "/apis/kubevirt.io/v1alpha3/namespaces/default/virtualmachines/testvm"),
+						ghttp.RespondWithJSONEncoded(http.StatusOK, vm),
+					),
+				)
+			}
+
 			app.StopVMRequestHandler(request, response)
 
-			statusErr := ExpectStatusErrorWithCode(recorder, http.StatusConflict)
-			// check the msg string that would be presented to virtctl output
-			Expect(statusErr.Error()).To(ContainSubstring(msg))
+			if expectError {
+				statusErr := ExpectStatusErrorWithCode(recorder, http.StatusConflict)
+				// check the msg string that would be presented to virtctl output
+				Expect(statusErr.Error()).To(ContainSubstring(msg))
+			} else {
+
+				Expect(response.StatusCode()).To(Equal(http.StatusAccepted))
+			}
+
 		},
-			table.Entry("RunStrategyAlways", v1.RunStrategyAlways, "VM is not running"),
-			table.Entry("RunStrategyManual", v1.RunStrategyManual, "VM is not running"),
-			table.Entry("RunStrategyRerunOnFailure", v1.RunStrategyRerunOnFailure, "VM is not running"),
-			table.Entry("RunStrategyHalted", v1.RunStrategyHalted, "VM is not running"),
+			table.Entry("RunStrategyAlways", v1.RunStrategyAlways, "", false),
+			table.Entry("RunStrategyRerunOnFailure", v1.RunStrategyRerunOnFailure, "", false),
+			table.Entry("RunStrategyManual", v1.RunStrategyManual, "VM is not running", true),
+			table.Entry("RunStrategyHalted", v1.RunStrategyHalted, "VM is not running", true),
 		)
 
-		It("should fail on VM with RunStrategyHalted", func() {
+		It("should fail on VM with VMI in Unknown Phase", func() {
 			vm := newVirtualMachineWithRunStrategy(v1.RunStrategyHalted)
 			vmi := newVirtualMachineInstanceInPhase(v1.Unknown)
 
@@ -1131,7 +1282,32 @@ var _ = Describe("VirtualMachineInstance Subresources", func() {
 
 			statusErr := ExpectStatusErrorWithCode(recorder, http.StatusConflict)
 			// check the msg string that would be presented to virtctl output
-			Expect(statusErr.Error()).To(ContainSubstring("VM is not running"))
+			Expect(statusErr.Error()).To(ContainSubstring("Halted does not support manual stop requests"))
+		})
+
+		It("should fail on VM with RunStrategyHalted", func() {
+			vm := newVirtualMachineWithRunStrategy(v1.RunStrategyHalted)
+			vmi := newVirtualMachineInstanceInPhase(v1.Running)
+
+			server.AppendHandlers(
+				ghttp.CombineHandlers(
+					ghttp.VerifyRequest("GET", "/apis/kubevirt.io/v1alpha3/namespaces/default/virtualmachines/testvm"),
+					ghttp.RespondWithJSONEncoded(http.StatusOK, vm),
+				),
+			)
+
+			server.AppendHandlers(
+				ghttp.CombineHandlers(
+					ghttp.VerifyRequest("GET", "/apis/kubevirt.io/v1alpha3/namespaces/default/virtualmachineinstances/testvm"),
+					ghttp.RespondWithJSONEncoded(http.StatusOK, vmi),
+				),
+			)
+
+			app.StopVMRequestHandler(request, response)
+
+			statusErr := ExpectStatusErrorWithCode(recorder, http.StatusConflict)
+			// check the msg string that would be presented to virtctl output
+			Expect(statusErr.Error()).To(ContainSubstring("Halted does not support manual stop requests"))
 		})
 
 		table.DescribeTable("should not fail on VM with RunStrategy", func(runStrategy v1.VirtualMachineRunStrategy) {
@@ -1509,6 +1685,55 @@ var _ = Describe("VirtualMachineInstance Subresources", func() {
 		})
 	})
 
+	Context("Freezing", func() {
+		It("Should freeze a running VMI", func() {
+
+			backend.AppendHandlers(
+				ghttp.CombineHandlers(
+					ghttp.VerifyRequest("PUT", "/v1/namespaces/default/virtualmachineinstances/testvmi/freeze"),
+					ghttp.RespondWith(http.StatusOK, ""),
+				),
+			)
+			expectVMI(true, false)
+
+			app.FreezeVMIRequestHandler(request, response)
+
+			Expect(response.StatusCode()).To(Equal(http.StatusOK))
+		})
+
+		It("Should fail freezing a not running VMI", func() {
+
+			expectVMI(false, false)
+
+			app.FreezeVMIRequestHandler(request, response)
+
+			ExpectStatusErrorWithCode(recorder, http.StatusConflict)
+		})
+
+		It("Should fail unfreezing a not running VMI", func() {
+
+			expectVMI(false, false)
+
+			app.UnfreezeVMIRequestHandler(request, response)
+
+			ExpectStatusErrorWithCode(recorder, http.StatusConflict)
+		})
+
+		It("Should unfreeze a running VMI", func() {
+			backend.AppendHandlers(
+				ghttp.CombineHandlers(
+					ghttp.VerifyRequest("PUT", "/v1/namespaces/default/virtualmachineinstances/testvmi/unfreeze"),
+					ghttp.RespondWith(http.StatusOK, ""),
+				),
+			)
+			expectVMI(true, false)
+
+			app.UnfreezeVMIRequestHandler(request, response)
+
+			Expect(response.StatusCode()).To(Equal(http.StatusOK))
+		})
+	})
+
 	Context("Pausing", func() {
 		It("Should pause a running, not paused VMI", func() {
 
@@ -1574,6 +1799,103 @@ var _ = Describe("VirtualMachineInstance Subresources", func() {
 
 			Expect(response.StatusCode()).To(Equal(http.StatusOK))
 		})
+	})
+
+	Context("Subresource api - start paused", func() {
+		BeforeEach(func() {
+			request.PathParameters()["name"] = "testvm"
+			request.PathParameters()["namespace"] = "default"
+		})
+		It("should patch status on start", func(done Done) {
+			body := map[string]bool{
+				"paused": true,
+			}
+			bytesRepresentation, _ := json.Marshal(body)
+			request.Request.Body = ioutil.NopCloser(bytes.NewReader(bytesRepresentation))
+
+			vm := v1.VirtualMachine{
+				ObjectMeta: k8smetav1.ObjectMeta{
+					Name:      "testvm",
+					Namespace: "default",
+				},
+				Spec: v1.VirtualMachineSpec{
+					Running:  &notRunning,
+					Template: &v1.VirtualMachineInstanceTemplateSpec{},
+				},
+			}
+			vmi := v1.VirtualMachineInstance{
+				Spec: v1.VirtualMachineInstanceSpec{},
+			}
+			vmi.ObjectMeta.SetUID(uuid.NewUUID())
+
+			server.AppendHandlers(
+				ghttp.CombineHandlers(
+					ghttp.VerifyRequest("GET", "/apis/kubevirt.io/v1alpha3/namespaces/default/virtualmachines/testvm"),
+					ghttp.RespondWithJSONEncoded(http.StatusOK, vm),
+				),
+			)
+
+			server.AppendHandlers(
+				ghttp.CombineHandlers(
+					ghttp.VerifyRequest("GET", "/apis/kubevirt.io/v1alpha3/namespaces/default/virtualmachineinstances/testvm"),
+					ghttp.RespondWithJSONEncoded(http.StatusOK, vmi),
+				),
+			)
+
+			server.AppendHandlers(
+				ghttp.CombineHandlers(
+					ghttp.VerifyRequest("PATCH", "/apis/kubevirt.io/v1alpha3/namespaces/default/virtualmachines/testvm/status"),
+					ghttp.RespondWithJSONEncoded(http.StatusOK, vm),
+				),
+			)
+
+			app.StartVMRequestHandler(request, response)
+
+			Expect(response.Error()).ToNot(HaveOccurred())
+			Expect(response.StatusCode()).To(Equal(http.StatusAccepted))
+			close(done)
+		})
+
+		table.DescribeTable("should patch status on start for VM with RunStrategy",
+			func(runStrategy v1.VirtualMachineRunStrategy) {
+				vm := newVirtualMachineWithRunStrategy(runStrategy)
+				vm.Spec.Template = &v1.VirtualMachineInstanceTemplateSpec{}
+				body := map[string]bool{
+					"paused": true,
+				}
+				bytesRepresentation, _ := json.Marshal(body)
+				request.Request.Body = ioutil.NopCloser(bytes.NewReader(bytesRepresentation))
+
+				vmi := newVirtualMachineInstanceInPhase(v1.Succeeded)
+
+				server.AppendHandlers(
+					ghttp.CombineHandlers(
+						ghttp.VerifyRequest("GET", "/apis/kubevirt.io/v1alpha3/namespaces/default/virtualmachines/testvm"),
+						ghttp.RespondWithJSONEncoded(http.StatusOK, vm),
+					),
+				)
+
+				server.AppendHandlers(
+					ghttp.CombineHandlers(
+						ghttp.VerifyRequest("GET", "/apis/kubevirt.io/v1alpha3/namespaces/default/virtualmachineinstances/testvm"),
+						ghttp.RespondWithJSONEncoded(http.StatusOK, vmi),
+					),
+				)
+
+				server.AppendHandlers(
+					ghttp.CombineHandlers(
+						ghttp.VerifyRequest("PATCH", "/apis/kubevirt.io/v1alpha3/namespaces/default/virtualmachines/testvm/status"),
+						ghttp.RespondWithJSONEncoded(http.StatusOK, vm),
+					),
+				)
+
+				app.StartVMRequestHandler(request, response)
+
+				Expect(response.StatusCode()).To(Equal(http.StatusAccepted))
+			},
+			table.Entry("Manual RunStrategy", v1.RunStrategyManual),
+			table.Entry("RerunOnFailure RunStrategy", v1.RunStrategyRerunOnFailure),
+		)
 	})
 
 	AfterEach(func() {

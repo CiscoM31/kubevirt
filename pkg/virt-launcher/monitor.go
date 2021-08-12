@@ -26,6 +26,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"kubevirt.io/client-go/log"
@@ -128,6 +129,9 @@ func (mon *monitor) refresh() {
 			} else if expired {
 				log.Log.Infof("%s not found after grace period expired", mon.cmdlineMatchStr)
 				mon.isDone = true
+			} else if mon.gracePeriodStartTime != 0 {
+				log.Log.Infof("%s not found after shutdown initiated", mon.cmdlineMatchStr)
+				mon.isDone = true
 			}
 			return
 		}
@@ -135,7 +139,7 @@ func (mon *monitor) refresh() {
 		log.Log.Infof("Found PID for %s: %d", mon.cmdlineMatchStr, mon.pid)
 	}
 
-	exists, err := pidExists(mon.pid)
+	exists, isZombie, err := pidExists(mon.pid)
 	if err != nil {
 		log.Log.Reason(err).Errorf("Error detecting pid (%d) status.", mon.pid)
 		return
@@ -145,6 +149,13 @@ func (mon *monitor) refresh() {
 		mon.pid = 0
 		mon.isDone = true
 		return
+	}
+
+	if isZombie {
+		log.Log.Infof("Process %s and pid %d is a zombie, sending SIGCHLD to pid 1 to reap process", mon.cmdlineMatchStr, mon.pid)
+		syscall.Kill(1, syscall.SIGCHLD)
+		mon.pid = 0
+		mon.isDone = true
 	}
 
 	if expired {
@@ -189,22 +200,32 @@ func (mon *monitor) monitorLoop(startTimeout time.Duration, signalStopChan chan 
 }
 
 func (mon *monitor) RunForever(startTimeout time.Duration, signalStopChan chan struct{}) {
-
 	mon.monitorLoop(startTimeout, signalStopChan)
 }
 
-func pidExists(pid int) (bool, error) {
-	path := fmt.Sprintf("/proc/%d/cmdline", pid)
+func pidExists(pid int) (exists bool, isZombie bool, err error) {
 
-	exists, err := diskutils.FileExists(path)
+	pathCmdline := fmt.Sprintf("/proc/%d/cmdline", pid)
+	pathStatus := fmt.Sprintf("/proc/%d/status", pid)
+
+	exists, err = diskutils.FileExists(pathCmdline)
 	if err != nil {
-		return false, err
+		return false, false, err
 	}
 	if exists == false {
-		return false, nil
+		return false, false, nil
 	}
 
-	return true, nil
+	dataBytes, err := ioutil.ReadFile(pathStatus)
+	if err != nil {
+		return false, false, err
+	}
+
+	if strings.Contains(string(dataBytes), "Z (zombie)") {
+		isZombie = true
+	}
+
+	return exists, isZombie, nil
 }
 
 func FindPid(commandNamePrefix string) (int, error) {

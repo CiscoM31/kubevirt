@@ -2,6 +2,7 @@ package util
 
 import (
 	"fmt"
+	"os"
 	"strings"
 
 	v1 "kubevirt.io/client-go/api/v1"
@@ -16,6 +17,15 @@ const KubeletPodsDir = "/var/lib/kubelet/pods"
 const HostRootMount = "/proc/1/root/"
 const CPUManagerOS3Path = HostRootMount + "var/lib/origin/openshift.local.volumes/cpu_manager_state"
 const CPUManagerPath = HostRootMount + "var/lib/kubelet/cpu_manager_state"
+
+const NonRootUID = 107
+const NonRootUserString = "qemu"
+const RootUser = 0
+
+func IsNonRootVMI(vmi *v1.VirtualMachineInstance) bool {
+	_, ok := vmi.Annotations[v1.NonRootVMIAnnotation]
+	return ok
+}
 
 func IsSRIOVVmi(vmi *v1.VirtualMachineInstance) bool {
 	for _, iface := range vmi.Spec.Domain.Devices.Interfaces {
@@ -63,9 +73,53 @@ func IsVFIOVMI(vmi *v1.VirtualMachineInstance) bool {
 	return false
 }
 
+func NeedVirtioNetDevice(vmi *v1.VirtualMachineInstance, useEmulation bool) bool {
+	for _, iface := range vmi.Spec.Domain.Devices.Interfaces {
+		if !useEmulation && (iface.Model == "" || iface.Model == "virtio") {
+			return true
+		}
+	}
+	return false
+}
+
+// UseSoftwareEmulationForDevice determines whether to fallback to software emulation for the given device.
+// This happens when the given device doesn't exist, and software emulation is enabled.
+func UseSoftwareEmulationForDevice(devicePath string, useEmulation bool) (bool, error) {
+	if !useEmulation {
+		return false, nil
+	}
+
+	_, err := os.Stat(devicePath)
+	if err == nil {
+		return false, nil
+	}
+	if os.IsNotExist(err) {
+		return true, nil
+	}
+	return false, err
+}
+
 func ResourceNameToEnvVar(prefix string, resourceName string) string {
 	varName := strings.ToUpper(resourceName)
 	varName = strings.Replace(varName, "/", "_", -1)
 	varName = strings.Replace(varName, ".", "_", -1)
 	return fmt.Sprintf("%s_%s", prefix, varName)
+}
+
+// Checks if kernel boot is defined in a valid way
+func HasKernelBootContainerImage(vmi *v1.VirtualMachineInstance) bool {
+	if vmi == nil {
+		return false
+	}
+
+	vmiFirmware := vmi.Spec.Domain.Firmware
+	if (vmiFirmware == nil) || (vmiFirmware.KernelBoot == nil) || (vmiFirmware.KernelBoot.Container == nil) {
+		return false
+	}
+
+	return true
+}
+
+func HasHugePages(vmi *v1.VirtualMachineInstance) bool {
+	return vmi.Spec.Domain.Memory != nil && vmi.Spec.Domain.Memory.Hugepages != nil
 }

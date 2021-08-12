@@ -20,7 +20,7 @@
 package config
 
 import (
-	"io/ioutil"
+	"os"
 	"os/exec"
 	"path/filepath"
 )
@@ -69,6 +69,10 @@ var (
 	SysprepDisksDir = mountBaseDir + "/sysprep-disks"
 	// DownwardAPIDisksDir represents a path to DownwardAPI iso images
 	DownwardAPIDisksDir = mountBaseDir + "/downwardapi-disks"
+	// DownwardMetricDisksDir represents a path to DownwardMetric block disk
+	DownwardMetricDisksDir = mountBaseDir + "/downwardmetric-disk"
+	// DownwardMetricDisks represents the disk location for the DownwardMetric disk
+	DownwardMetricDisk = filepath.Join(DownwardAPIDisksDir, "vhostmd0")
 	// ServiceAccountDiskDir represents a path to the ServiceAccount iso image
 	ServiceAccountDiskDir = mountBaseDir + "/service-account-disk"
 	// ServiceAccountDiskName represents the name of the ServiceAccount iso image
@@ -84,7 +88,7 @@ func setIsoCreationFunction(isoFunc isoCreationFunc) {
 
 func getFilesLayout(dirPath string) ([]string, error) {
 	var filesPath []string
-	files, err := ioutil.ReadDir(dirPath)
+	files, err := os.ReadDir(dirPath)
 	if err != nil {
 		return nil, err
 	}
@@ -110,10 +114,14 @@ func defaultCreateIsoImage(output string, volID string, files []string) error {
 	args = append(args, "-joliet")
 	args = append(args, "-rock")
 	args = append(args, "-graft-points")
+	args = append(args, "-partition_cyl_align")
+	args = append(args, "on")
 	args = append(args, files...)
 
+	isoBinary := "xorrisofs"
+
 	// #nosec No risk for attacket injection. Parameters are predefined strings
-	cmd := exec.Command("genisoimage", args...)
+	cmd := exec.Command(isoBinary, args...)
 	err := cmd.Run()
 	if err != nil {
 		return err

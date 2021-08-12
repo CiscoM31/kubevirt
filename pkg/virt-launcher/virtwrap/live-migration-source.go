@@ -24,17 +24,16 @@ import (
 	"encoding/xml"
 	"fmt"
 	"io"
-	"net"
-	"strconv"
 	"strings"
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	utilwait "k8s.io/apimachinery/pkg/util/wait"
-	libvirt "libvirt.org/libvirt-go"
+	"libvirt.org/go/libvirt"
 
 	v1 "kubevirt.io/client-go/api/v1"
 	"kubevirt.io/client-go/log"
+	virtutil "kubevirt.io/kubevirt/pkg/util"
 	"kubevirt.io/kubevirt/pkg/util/net/ip"
 	cmdclient "kubevirt.io/kubevirt/pkg/virt-handler/cmd-client"
 	migrationproxy "kubevirt.io/kubevirt/pkg/virt-handler/migration-proxy"
@@ -124,7 +123,8 @@ func hotUnplugHostDevices(virConn cli.Connection, dom cli.VirDomain) error {
 	return nil
 }
 
-// This returns domain xml without the metadata sections
+// This returns domain xml without the migration metadata section, as it is only relevant to the source domain
+// Note: Unfortunately we can't just use UnMarshall + Marshall here, as that leads to unwanted XML alterations
 func migratableDomXML(dom cli.VirDomain, vmi *v1.VirtualMachineInstance) (string, error) {
 	xmlstr, err := dom.GetXMLDesc(libvirt.DOMAIN_XML_MIGRATABLE)
 	if err != nil {
@@ -138,14 +138,15 @@ func migratableDomXML(dom cli.VirDomain, vmi *v1.VirtualMachineInstance) (string
 	depth := 0
 	inMeta := false
 	inMetaKV := false
+	inMetaKVMigration := false
 	for {
-		token, err := decoder.Token()
+		token, err := decoder.RawToken()
 		if err == io.EOF {
 			break
 		}
 		if err != nil {
 			log.Log.Object(vmi).Errorf("error getting token: %v\n", err)
-			break
+			return "", err
 		}
 
 		switch v := token.(type) {
@@ -154,29 +155,36 @@ func migratableDomXML(dom cli.VirDomain, vmi *v1.VirtualMachineInstance) (string
 				inMeta = true
 			} else if inMeta && depth == 2 && v.Name.Local == "kubevirt" {
 				inMetaKV = true
+			} else if inMetaKV && depth == 3 && v.Name.Local == "migration" {
+				inMetaKVMigration = true
 			}
 			depth++
 		case xml.EndElement:
 			depth--
+			if inMetaKVMigration && depth == 3 && v.Name.Local == "migration" {
+				inMetaKVMigration = false
+				continue // Skip </migration>
+			}
 			if inMetaKV && depth == 2 && v.Name.Local == "kubevirt" {
 				inMetaKV = false
-				continue // Skip </kubevirt>
 			}
 			if inMeta && depth == 1 && v.Name.Local == "metadata" {
 				inMeta = false
 			}
 		}
-		if inMetaKV {
-			continue // We're inside metadata/kubevirt, continuing to skip elements
+		if inMetaKVMigration {
+			continue // We're inside metadata/kubevirt/migration, continuing to skip elements
 		}
 
 		if err := encoder.EncodeToken(xml.CopyToken(token)); err != nil {
 			log.Log.Object(vmi).Reason(err)
+			return "", err
 		}
 	}
 
 	if err := encoder.Flush(); err != nil {
 		log.Log.Object(vmi).Reason(err)
+		return "", err
 	}
 
 	return string(buf.Bytes()), nil
@@ -257,10 +265,6 @@ func (l *LibvirtDomainManager) startMigration(vmi *v1.VirtualMachineInstance, op
 	}
 	if inProgress {
 		return nil
-	}
-
-	if err := updateHostsFile(fmt.Sprintf("%s %s\n", ip.GetLoopbackAddress(), vmi.Status.MigrationState.TargetPod)); err != nil {
-		return fmt.Errorf("failed to update the hosts file: %v", err)
 	}
 
 	err = l.asyncMigrate(vmi, options)
@@ -739,10 +743,7 @@ func isBlockMigration(vmi *v1.VirtualMachineInstance) bool {
 func (l *LibvirtDomainManager) generateMigrationProxies(vmi *v1.VirtualMachineInstance) []migrationproxy.MigrationProxyListener {
 	// create local migration proxies.
 	//
-	// Right now Libvirt won't let us perform a migration using a unix socket, so
-	// we have to create a local host tcp server (on port 22222) that forwards the traffic
-	// to libvirt in order to trick libvirt into doing what we want.
-	// This also creates a tcp server for each additional direct migration connections
+	// This creates a tcp server for each additional direct migration connections
 	// that will be proxied to the destination pod
 	migrationPortsRange := migrationproxy.GetMigrationPortsList(isBlockMigration(vmi))
 
@@ -759,23 +760,10 @@ func (l *LibvirtDomainManager) generateMigrationProxies(vmi *v1.VirtualMachineIn
 		newProxy := migrationproxy.NewTargetProxy(loopbackAddress, port, nil, nil, migrationproxy.SourceUnixFile(l.virtShareDir, key), string(vmi.UID))
 		proxies = append(proxies, newProxy)
 	}
-
-	//  proxy incoming migration requests on port 22222 to the vmi's existing libvirt connection
-	tcpBindPort := LibvirtLocalConnectionPort
-	if osChosenMigrationProxyPort {
-		// this is only set to 0 during unit tests
-		tcpBindPort = 0
-	}
-	libvirtConnectionProxy := migrationproxy.NewTargetProxy(loopbackAddress, tcpBindPort, nil, nil, migrationproxy.SourceUnixFile(l.virtShareDir, string(vmi.UID)), string(vmi.UID))
-	proxies = append(proxies, libvirtConnectionProxy)
-
 	return proxies
 }
 
 func generateMigrationParams(dom cli.VirDomain, vmi *v1.VirtualMachineInstance, options *cmdclient.MigrationOptions) (*libvirt.DomainMigrateParameters, error) {
-
-	migrURI := fmt.Sprintf("tcp://%s", ip.NormalizeIPAddress(ip.GetLoopbackAddress()))
-
 	bandwidth, err := converter.QuantityToMebiByte(options.Bandwidth)
 	if err != nil {
 		return nil, err
@@ -786,12 +774,14 @@ func generateMigrationParams(dom cli.VirDomain, vmi *v1.VirtualMachineInstance, 
 		return nil, err
 	}
 
+	migrURI := fmt.Sprintf("tcp://%s", ip.NormalizeIPAddress(ip.GetLoopbackAddress()))
 	params := &libvirt.DomainMigrateParameters{
-		Bandwidth:  bandwidth, // MiB/s
-		URI:        migrURI,
-		URISet:     true,
-		DestXML:    xmlstr,
-		DestXMLSet: true,
+		URI:          migrURI,
+		URISet:       true,
+		Bandwidth:    bandwidth, // MiB/s
+		BandwidthSet: bandwidth > 0,
+		DestXML:      xmlstr,
+		DestXMLSet:   true,
 	}
 
 	copyDisks := getDiskTargetsForMigration(dom, vmi)
@@ -856,7 +846,13 @@ func (l *LibvirtDomainManager) migrateHelper(vmi *v1.VirtualMachineInstance, opt
 	}
 
 	// initiate the live migration
-	dstURI := fmt.Sprintf("qemu+tcp://%s/system", net.JoinHostPort(ip.GetLoopbackAddress(), strconv.Itoa(LibvirtLocalConnectionPort)))
+	var dstURI string
+	if virtutil.IsNonRootVMI(vmi) {
+		dstURI = fmt.Sprintf("qemu+unix:///session?socket=%s", migrationproxy.SourceUnixFile(l.virtShareDir, string(vmi.UID)))
+	} else {
+		dstURI = fmt.Sprintf("qemu+unix:///system?socket=%s", migrationproxy.SourceUnixFile(l.virtShareDir, string(vmi.UID)))
+	}
+
 	err = dom.MigrateToURI3(dstURI, params, migrateFlags)
 	if err != nil {
 		return fmt.Errorf("error encountered during MigrateToURI3 libvirt api call: %v", err)

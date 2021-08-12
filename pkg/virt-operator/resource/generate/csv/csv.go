@@ -47,6 +47,7 @@ type NewClusterServiceVersionData struct {
 	VirtControllerSha    string
 	VirtHandlerSha       string
 	VirtLauncherSha      string
+	GsSha                string
 	Replicas             int
 	IconBase64           string
 	ReplacesCsvVersion   string
@@ -112,14 +113,14 @@ As of today KubeVirt can be used to declaratively
 # Start developing KubeVirt
 
 To set up a development environment please read our
-[Getting Started Guide](https://github.com/kubevirt/kubevirt/blob/master/docs/getting-started.md).
-To learn how to contribute, please read our [contribution guide](https://github.com/kubevirt/kubevirt/blob/master/CONTRIBUTING.md).
+[Getting Started Guide](https://github.com/kubevirt/kubevirt/blob/main/docs/getting-started.md).
+To learn how to contribute, please read our [contribution guide](https://github.com/kubevirt/kubevirt/blob/main/CONTRIBUTING.md).
 
 You can learn more about how KubeVirt is designed (and why it is that way),
 and learn more about the major components by taking a look at our developer documentation:
 
-  * [Architecture](https://github.com/kubevirt/kubevirt/blob/master/docs/architecture.md) - High-level view on the architecture
-  * [Components](https://github.com/kubevirt/kubevirt/blob/master/docs/components.md) - Detailed look at all components
+  * [Architecture](https://github.com/kubevirt/kubevirt/blob/main/docs/architecture.md) - High-level view on the architecture
+  * [Components](https://github.com/kubevirt/kubevirt/blob/main/docs/components.md) - Detailed look at all components
   * [API Reference](https://kubevirt.io/api-reference/)
 
 # Community
@@ -150,7 +151,8 @@ func NewClusterServiceVersion(data *NewClusterServiceVersionData) (*csvv1.Cluste
 		data.VirtApiSha,
 		data.VirtControllerSha,
 		data.VirtHandlerSha,
-		data.VirtLauncherSha)
+		data.VirtLauncherSha,
+		data.GsSha)
 	if err != nil {
 		return nil, err
 	}

@@ -63,6 +63,26 @@ func (_mr *_MockLauncherClientRecorder) UnpauseVirtualMachine(arg0 interface{}) 
 	return _mr.mock.ctrl.RecordCall(_mr.mock, "UnpauseVirtualMachine", arg0)
 }
 
+func (_m *MockLauncherClient) FreezeVirtualMachine(vmi *v1.VirtualMachineInstance) error {
+	ret := _m.ctrl.Call(_m, "FreezeVirtualMachine", vmi)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+func (_mr *_MockLauncherClientRecorder) FreezeVirtualMachine(arg0 interface{}) *gomock.Call {
+	return _mr.mock.ctrl.RecordCall(_mr.mock, "FreezeVirtualMachine", arg0)
+}
+
+func (_m *MockLauncherClient) UnfreezeVirtualMachine(vmi *v1.VirtualMachineInstance) error {
+	ret := _m.ctrl.Call(_m, "UnfreezeVirtualMachine", vmi)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+func (_mr *_MockLauncherClientRecorder) UnfreezeVirtualMachine(arg0 interface{}) *gomock.Call {
+	return _mr.mock.ctrl.RecordCall(_mr.mock, "UnfreezeVirtualMachine", arg0)
+}
+
 func (_m *MockLauncherClient) SyncMigrationTarget(vmi *v1.VirtualMachineInstance) error {
 	ret := _m.ctrl.Call(_m, "SyncMigrationTarget", vmi)
 	ret0, _ := ret[0].(error)
@@ -200,6 +220,18 @@ func (_mr *_MockLauncherClientRecorder) GetFilesystems() *gomock.Call {
 	return _mr.mock.ctrl.RecordCall(_mr.mock, "GetFilesystems")
 }
 
+func (_m *MockLauncherClient) Exec(_param0 string, _param1 string, _param2 []string, _param3 int32) (int, string, error) {
+	ret := _m.ctrl.Call(_m, "Exec", _param0, _param1, _param2, _param3)
+	ret0, _ := ret[0].(int)
+	ret1, _ := ret[1].(string)
+	ret2, _ := ret[2].(error)
+	return ret0, ret1, ret2
+}
+
+func (_mr *_MockLauncherClientRecorder) Exec(arg0, arg1, arg2, arg3 interface{}) *gomock.Call {
+	return _mr.mock.ctrl.RecordCall(_mr.mock, "Exec", arg0, arg1, arg2, arg3)
+}
+
 func (_m *MockLauncherClient) Ping() error {
 	ret := _m.ctrl.Call(_m, "Ping")
 	ret0, _ := ret[0].(error)
@@ -208,6 +240,16 @@ func (_m *MockLauncherClient) Ping() error {
 
 func (_mr *_MockLauncherClientRecorder) Ping() *gomock.Call {
 	return _mr.mock.ctrl.RecordCall(_mr.mock, "Ping")
+}
+
+func (_m *MockLauncherClient) GuestPing(_param0 string, _param1 int32) error {
+	ret := _m.ctrl.Call(_m, "GuestPing", _param0, _param1)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+func (_mr *_MockLauncherClientRecorder) GuestPing(arg0, arg1 interface{}) *gomock.Call {
+	return _mr.mock.ctrl.RecordCall(_mr.mock, "GuestPing", arg0, arg1)
 }
 
 func (_m *MockLauncherClient) Close() {

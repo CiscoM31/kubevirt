@@ -20,16 +20,20 @@
 package watch
 
 import (
+	"encoding/json"
 	"fmt"
-	"runtime"
+	"strings"
+	"time"
 
 	"github.com/golang/mock/gomock"
 	. "github.com/onsi/ginkgo"
 	"github.com/onsi/ginkgo/extensions/table"
 	. "github.com/onsi/gomega"
 	k8sv1 "k8s.io/api/core/v1"
+	"k8s.io/api/policy/v1beta1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/rand"
 	"k8s.io/client-go/kubernetes/fake"
@@ -42,6 +46,7 @@ import (
 	fakenetworkclient "kubevirt.io/client-go/generated/network-attachment-definition-client/clientset/versioned/fake"
 	"kubevirt.io/client-go/kubecli"
 	"kubevirt.io/kubevirt/pkg/testutils"
+	utiltype "kubevirt.io/kubevirt/pkg/util/types"
 	"kubevirt.io/kubevirt/pkg/virt-controller/services"
 )
 
@@ -56,6 +61,7 @@ var _ = Describe("Migration watcher", func() {
 	var vmiInformer cache.SharedIndexInformer
 	var podInformer cache.SharedIndexInformer
 	var migrationInformer cache.SharedIndexInformer
+	var nodeInformer cache.SharedIndexInformer
 	var stop chan struct{}
 	var controller *MigrationController
 	var recorder *record.FakeRecorder
@@ -93,6 +99,21 @@ var _ = Describe("Migration watcher", func() {
 			if expectedNodeAffinityCount > 0 {
 				Expect(len(update.GetObject().(*k8sv1.Pod).Spec.Affinity.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution.NodeSelectorTerms)).To(Equal(expectedNodeAffinityCount))
 			}
+
+			return true, update.GetObject(), nil
+		})
+	}
+
+	shouldExpectAttachmentPodCreation := func(uid types.UID, migrationUid types.UID) {
+		// Expect pod creation
+		kubeClient.Fake.PrependReactor("create", "pods", func(action testing.Action) (handled bool, obj k8sruntime.Object, err error) {
+			update, ok := action.(testing.CreateAction)
+			Expect(ok).To(BeTrue())
+			Expect(update.GetObject().(*k8sv1.Pod).Labels[v1.MigrationJobLabel]).To(Equal(string(migrationUid)))
+
+			Expect(update.GetObject().(*k8sv1.Pod).Spec.Affinity).ToNot(BeNil())
+			Expect(update.GetObject().(*k8sv1.Pod).Spec.Affinity.NodeAffinity).ToNot(BeNil())
+			Expect(len(update.GetObject().(*k8sv1.Pod).Spec.Affinity.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution.NodeSelectorTerms)).To(Equal(1))
 
 			return true, update.GetObject(), nil
 		})
@@ -140,26 +161,21 @@ var _ = Describe("Migration watcher", func() {
 		})
 	}
 
-	shouldExpectVirtualMachineHandoff := func(vmi *v1.VirtualMachineInstance, migrationUid types.UID, targetNode string) {
-		vmiInterface.EXPECT().Update(gomock.Any()).DoAndReturn(func(arg interface{}) (interface{}, interface{}) {
-			Expect(arg.(*v1.VirtualMachineInstance).Status.MigrationState).ToNot(BeNil())
-			Expect(arg.(*v1.VirtualMachineInstance).Status.MigrationState.MigrationUID).To(Equal(migrationUid))
-
-			Expect(arg.(*v1.VirtualMachineInstance).Status.MigrationState.SourceNode).To(Equal(vmi.Status.NodeName))
-			Expect(arg.(*v1.VirtualMachineInstance).Status.MigrationState.TargetNode).To(Equal(targetNode))
-			Expect(arg.(*v1.VirtualMachineInstance).Labels[v1.MigrationTargetNodeNameLabel]).To(Equal(targetNode))
-			return arg, nil
-		})
+	shouldExpectVirtualMachineInstancePatch := func(vmi *v1.VirtualMachineInstance, patch string) {
+		vmiInterface.EXPECT().Patch(vmi.Name, types.JSONPatchType, []byte(patch)).Return(vmi, nil)
 	}
+
 	syncCaches := func(stop chan struct{}) {
 		go vmiInformer.Run(stop)
 		go podInformer.Run(stop)
 		go migrationInformer.Run(stop)
+		go nodeInformer.Run(stop)
 
 		Expect(cache.WaitForCacheSync(stop,
 			vmiInformer.HasSynced,
 			podInformer.HasSynced,
-			migrationInformer.HasSynced)).To(BeTrue())
+			migrationInformer.HasSynced,
+			nodeInformer.HasSynced)).To(BeTrue())
 	}
 
 	BeforeEach(func() {
@@ -173,15 +189,19 @@ var _ = Describe("Migration watcher", func() {
 		migrationInformer, migrationSource = testutils.NewFakeInformerFor(&v1.VirtualMachineInstanceMigration{})
 		podInformer, podSource = testutils.NewFakeInformerFor(&k8sv1.Pod{})
 		recorder = record.NewFakeRecorder(100)
+		recorder.IncludeObject = true
+		nodeInformer, _ = testutils.NewFakeInformerFor(&k8sv1.Node{})
 
 		pvcInformer, _ = testutils.NewFakeInformerFor(&k8sv1.PersistentVolumeClaim{})
 		config, _, _, _ := testutils.NewFakeClusterConfig(&k8sv1.ConfigMap{})
 
 		controller = NewMigrationController(
-			services.NewTemplateService("a", "b", "c", "d", "e", "f", "g", pvcInformer.GetStore(), virtClient, config, qemuGid, runtime.GOARCH),
+			services.NewTemplateService("a", 240, "b", "c", "d", "e", "f", "g", pvcInformer.GetStore(), virtClient, config, qemuGid),
 			vmiInformer,
 			podInformer,
 			migrationInformer,
+			nodeInformer,
+			pvcInformer,
 			recorder,
 			virtClient,
 			config,
@@ -204,6 +224,12 @@ var _ = Describe("Migration watcher", func() {
 			Expect(action).To(BeNil())
 			return true, nil, nil
 		})
+
+		virtClient.EXPECT().PolicyV1beta1().Return(kubeClient.PolicyV1beta1()).AnyTimes()
+		kubeClient.Fake.PrependReactor("create", "poddisruptionbudgets", func(action testing.Action) (handled bool, obj k8sruntime.Object, err error) {
+			return true, &v1beta1.PodDisruptionBudget{}, nil
+		})
+
 		syncCaches(stop)
 	})
 
@@ -226,6 +252,87 @@ var _ = Describe("Migration watcher", func() {
 		mockQueue.Wait()
 	}
 
+	addNode := func(node *k8sv1.Node) {
+		err := nodeInformer.GetIndexer().Add(node)
+		Expect(err).ShouldNot(HaveOccurred())
+	}
+
+	Context("Migration with hotplug volumes", func() {
+		var (
+			vmi           *v1.VirtualMachineInstance
+			migration     *v1.VirtualMachineInstanceMigration
+			sourcePod     *k8sv1.Pod
+			targetPod     *k8sv1.Pod
+			attachmentPod *k8sv1.Pod
+		)
+
+		BeforeEach(func() {
+			vmi = newVirtualMachineWithHotplugVolume("testvmi", v1.Running)
+			migration = newMigration("testmigration", vmi.Name, v1.MigrationPending)
+			sourcePod = newSourcePodForVirtualMachine(vmi)
+			targetPod = newTargetPodForVirtualMachine(vmi, migration, k8sv1.PodRunning)
+			attachmentPod = newAttachmentPodForVirtualMachine(targetPod, migration, k8sv1.PodRunning)
+		})
+
+		It("should create target attachment pod", func() {
+			addMigration(migration)
+			addVirtualMachineInstance(vmi)
+			podInformer.GetStore().Add(sourcePod)
+			podFeeder.Add(targetPod)
+			shouldExpectAttachmentPodCreation(vmi.UID, migration.UID)
+
+			controller.Execute()
+
+			testutils.ExpectEvents(recorder, SuccessfulCreatePodReason)
+		})
+
+		It("should set migration state to scheduling if attachment pod exists", func() {
+			addMigration(migration)
+			addVirtualMachineInstance(vmi)
+			podFeeder.Add(targetPod)
+			podFeeder.Add(attachmentPod)
+
+			shouldExpectMigrationSchedulingState(migration)
+			controller.Execute()
+		})
+
+		It("should hand pod over to target virt-handler if attachment pod is ready and running", func() {
+			vmi.Status.NodeName = "node02"
+			migration.Status.Phase = v1.MigrationScheduled
+			targetPod.Spec.NodeName = "node01"
+			targetPod.Status.ContainerStatuses = []k8sv1.ContainerStatus{{
+				Name: "compute", State: k8sv1.ContainerState{Running: &k8sv1.ContainerStateRunning{}},
+			}}
+
+			addMigration(migration)
+			addVirtualMachineInstance(vmi)
+			podFeeder.Add(targetPod)
+			podFeeder.Add(attachmentPod)
+
+			patch := fmt.Sprintf(`[{ "op": "add", "path": "/status/migrationState", "value": {"targetNode":"node01","targetPod":"%s","targetAttachmentPodUID":"%s","sourceNode":"node02","migrationUid":"testmigration"} }, { "op": "test", "path": "/metadata/labels", "value": {} }, { "op": "replace", "path": "/metadata/labels", "value": {"kubevirt.io/migrationTargetNodeName":"node01"} }]`, targetPod.Name, attachmentPod.UID)
+
+			shouldExpectVirtualMachineInstancePatch(vmi, patch)
+
+			controller.Execute()
+			testutils.ExpectEvent(recorder, SuccessfulHandOverPodReason)
+		})
+
+		It("should fail the migration if the attachment pod goes to final state", func() {
+			attachmentPod.Status.Phase = k8sv1.PodFailed
+
+			addMigration(migration)
+			addVirtualMachineInstance(vmi)
+			podFeeder.Add(targetPod)
+			podFeeder.Add(attachmentPod)
+
+			shouldExpectMigrationFailedState(migration)
+
+			controller.Execute()
+
+			testutils.ExpectEvent(recorder, FailedMigrationReason)
+		})
+	})
+
 	Context("Migration object in pending state", func() {
 		It("should create target pod", func() {
 			vmi := newVirtualMachine("testvmi", v1.Running)
@@ -237,7 +344,7 @@ var _ = Describe("Migration watcher", func() {
 
 			controller.Execute()
 
-			testutils.ExpectEvent(recorder, SuccessfulCreatePodReason)
+			testutils.ExpectEvents(recorder, SuccessfulCreatePodReason, successfulCreatePodDisruptionBudgetReason)
 		})
 		It("should not create target pod if multiple pods exist in a non finalized state for VMI", func() {
 			vmi := newVirtualMachine("testvmi", v1.Running)
@@ -286,7 +393,7 @@ var _ = Describe("Migration watcher", func() {
 
 			shouldExpectPodCreation(vmi.UID, migration.UID, 1, 0, 0)
 			controller.Execute()
-			testutils.ExpectEvent(recorder, SuccessfulCreatePodReason)
+			testutils.ExpectEvents(recorder, SuccessfulCreatePodReason, successfulCreatePodDisruptionBudgetReason)
 		})
 
 		It("should not overload the cluster and only run 5 migrations in parallel", func() {
@@ -362,7 +469,7 @@ var _ = Describe("Migration watcher", func() {
 
 			shouldExpectPodCreation(vmi.UID, migration.UID, 1, 0, 0)
 			controller.Execute()
-			testutils.ExpectEvent(recorder, SuccessfulCreatePodReason)
+			testutils.ExpectEvents(recorder, SuccessfulCreatePodReason, successfulCreatePodDisruptionBudgetReason)
 		})
 
 		It("should not overload the node and only run 2 outbound migrations in parallel", func() {
@@ -440,7 +547,7 @@ var _ = Describe("Migration watcher", func() {
 
 			controller.Execute()
 
-			testutils.ExpectEvent(recorder, SuccessfulCreatePodReason)
+			testutils.ExpectEvents(recorder, SuccessfulCreatePodReason, successfulCreatePodDisruptionBudgetReason)
 		})
 
 		It("should place migration in scheduling state if pod exists", func() {
@@ -546,35 +653,76 @@ var _ = Describe("Migration watcher", func() {
 	})
 	Context("Migration object ", func() {
 
-		It("should hand pod over to target virt-handler", func() {
+		table.DescribeTable("should hand pod over to target virt-handler if pod is ready and running", func(containerStatus []k8sv1.ContainerStatus) {
 			vmi := newVirtualMachine("testvmi", v1.Running)
 			vmi.Status.NodeName = "node02"
 			migration := newMigration("testmigration", vmi.Name, v1.MigrationScheduled)
-			pod := newTargetPodForVirtualMachine(vmi, migration, k8sv1.PodPending)
+			pod := newTargetPodForVirtualMachine(vmi, migration, k8sv1.PodRunning)
 			pod.Spec.NodeName = "node01"
+			pod.Status.ContainerStatuses = containerStatus
 
 			addMigration(migration)
 			addVirtualMachineInstance(vmi)
 			podFeeder.Add(pod)
 
-			shouldExpectVirtualMachineHandoff(vmi, migration.UID, "node01")
+			patch := fmt.Sprintf(`[{ "op": "add", "path": "/status/migrationState", "value": {"targetNode":"node01","targetPod":"%s","sourceNode":"node02","migrationUid":"testmigration"} }, { "op": "test", "path": "/metadata/labels", "value": {} }, { "op": "replace", "path": "/metadata/labels", "value": {"kubevirt.io/migrationTargetNodeName":"node01"} }]`, pod.Name)
+
+			shouldExpectVirtualMachineInstancePatch(vmi, patch)
 
 			controller.Execute()
 			testutils.ExpectEvent(recorder, SuccessfulHandOverPodReason)
-		})
+		},
+			table.Entry("with running compute container and no infra container",
+				[]k8sv1.ContainerStatus{{
+					Name: "compute", State: k8sv1.ContainerState{Running: &k8sv1.ContainerStateRunning{}},
+				}},
+			),
+			table.Entry("with running compute container and no ready istio-proxy container",
+				[]k8sv1.ContainerStatus{{
+					Name: "compute", State: k8sv1.ContainerState{Running: &k8sv1.ContainerStateRunning{}},
+				}, {Name: "istio-proxy", Ready: false}},
+			),
+		)
+
+		table.DescribeTable("should not hand pod over to target virt-handler if pod is not ready and running", func(containerStatus []k8sv1.ContainerStatus) {
+			vmi := newVirtualMachine("testvmi", v1.Running)
+			vmi.Status.NodeName = "node02"
+			migration := newMigration("testmigration", vmi.Name, v1.MigrationScheduled)
+			pod := newTargetPodForVirtualMachine(vmi, migration, k8sv1.PodRunning)
+			pod.Spec.NodeName = "node01"
+			pod.Status.ContainerStatuses = containerStatus
+
+			addMigration(migration)
+			addVirtualMachineInstance(vmi)
+			podFeeder.Add(pod)
+
+			controller.Execute()
+		},
+			table.Entry("with not ready infra container and not ready compute container",
+				[]k8sv1.ContainerStatus{{Name: "compute", Ready: false}, {Name: "kubevirt-infra", Ready: false}},
+			),
+			table.Entry("with not ready compute container and no infra container",
+				[]k8sv1.ContainerStatus{{Name: "compute", Ready: false}},
+			),
+		)
+
 		It("should hand pod over to target virt-handler with migration config", func() {
 			vmi := newVirtualMachine("testvmi", v1.Running)
 			vmi.Status.NodeName = "node02"
 			migration := newMigration("testmigration", vmi.Name, v1.MigrationScheduled)
 
-			pod := newTargetPodForVirtualMachine(vmi, migration, k8sv1.PodPending)
+			pod := newTargetPodForVirtualMachine(vmi, migration, k8sv1.PodRunning)
 			pod.Spec.NodeName = "node01"
+			pod.Status.ContainerStatuses = []k8sv1.ContainerStatus{{
+				Name: "compute", State: k8sv1.ContainerState{Running: &k8sv1.ContainerStateRunning{}},
+			}}
 
 			addMigration(migration)
 			addVirtualMachineInstance(vmi)
 			podFeeder.Add(pod)
 
-			shouldExpectVirtualMachineHandoff(vmi, migration.UID, "node01")
+			patch := fmt.Sprintf(`[{ "op": "add", "path": "/status/migrationState", "value": {"targetNode":"node01","targetPod":"%s","sourceNode":"node02","migrationUid":"testmigration"} }, { "op": "test", "path": "/metadata/labels", "value": {} }, { "op": "replace", "path": "/metadata/labels", "value": {"kubevirt.io/migrationTargetNodeName":"node01"} }]`, pod.Name)
+			shouldExpectVirtualMachineInstancePatch(vmi, patch)
 
 			controller.Execute()
 			testutils.ExpectEvent(recorder, SuccessfulHandOverPodReason)
@@ -587,14 +735,19 @@ var _ = Describe("Migration watcher", func() {
 				MigrationUID: "1111-2222-3333-4444",
 			}
 			migration := newMigration("testmigration", vmi.Name, v1.MigrationScheduled)
-			pod := newTargetPodForVirtualMachine(vmi, migration, k8sv1.PodPending)
+			pod := newTargetPodForVirtualMachine(vmi, migration, k8sv1.PodRunning)
 			pod.Spec.NodeName = "node01"
+			pod.Status.ContainerStatuses = []k8sv1.ContainerStatus{{
+				Name: "compute", State: k8sv1.ContainerState{Running: &k8sv1.ContainerStateRunning{}},
+			}}
 
 			addMigration(migration)
 			addVirtualMachineInstance(vmi)
 			podFeeder.Add(pod)
 
-			shouldExpectVirtualMachineHandoff(vmi, migration.UID, "node01")
+			patch := fmt.Sprintf(`[{ "op": "test", "path": "/status/migrationState", "value": {"migrationUid":"1111-2222-3333-4444"} }, { "op": "replace", "path": "/status/migrationState", "value": {"targetNode":"node01","targetPod":"%s","sourceNode":"node02","migrationUid":"testmigration"} }, { "op": "test", "path": "/metadata/labels", "value": {} }, { "op": "replace", "path": "/metadata/labels", "value": {"kubevirt.io/migrationTargetNodeName":"node01"} }]`, pod.Name)
+
+			shouldExpectVirtualMachineInstancePatch(vmi, patch)
 
 			controller.Execute()
 			testutils.ExpectEvent(recorder, SuccessfulHandOverPodReason)
@@ -604,7 +757,7 @@ var _ = Describe("Migration watcher", func() {
 			vmi := newVirtualMachine("testvmi", v1.Running)
 			vmi.Status.NodeName = "node02"
 			migration := newMigration("testmigration", vmi.Name, v1.MigrationScheduled)
-			pod := newTargetPodForVirtualMachine(vmi, migration, k8sv1.PodPending)
+			pod := newTargetPodForVirtualMachine(vmi, migration, k8sv1.PodRunning)
 			pod.Spec.NodeName = "node01"
 
 			vmi.Status.MigrationState = &v1.VirtualMachineInstanceMigrationState{
@@ -727,15 +880,18 @@ var _ = Describe("Migration watcher", func() {
 			controller.Execute()
 			testutils.ExpectEvent(recorder, SuccessfulAbortMigrationReason)
 		})
-		table.DescribeTable("should finalize migration on VMI if target pod fails before migration starts", func(phase v1.VirtualMachineInstanceMigrationPhase, hasPod bool, podPhase k8sv1.PodPhase) {
+		table.DescribeTable("should finalize migration on VMI if target pod fails before migration starts", func(phase v1.VirtualMachineInstanceMigrationPhase, hasPod bool, podPhase k8sv1.PodPhase, initializeMigrationState bool) {
 			vmi := newVirtualMachine("testvmi", v1.Running)
 			vmi.Status.NodeName = "node02"
 			migration := newMigration("testmigration", vmi.Name, phase)
 
-			vmi.Status.MigrationState = &v1.VirtualMachineInstanceMigrationState{
-				MigrationUID: migration.UID,
-				TargetNode:   "node01",
-				SourceNode:   "node02",
+			vmi.Status.MigrationState = nil
+			if initializeMigrationState {
+				vmi.Status.MigrationState = &v1.VirtualMachineInstanceMigrationState{
+					MigrationUID: migration.UID,
+					TargetNode:   "node01",
+					SourceNode:   "node02",
+				}
 			}
 			addMigration(migration)
 			addVirtualMachineInstance(vmi)
@@ -751,19 +907,96 @@ var _ = Describe("Migration watcher", func() {
 				shouldExpectMigrationFailedState(migration)
 			}
 
-			vmiInterface.EXPECT().Patch(vmi.Name, types.JSONPatchType, gomock.Any()).Return(vmi, nil)
+			if initializeMigrationState {
+				patch := `[{ "op": "test", "path": "/status/migrationState", "value": {"targetNode":"node01","sourceNode":"node02","migrationUid":"testmigration"} }, { "op": "replace", "path": "/status/migrationState", "value": {"startTimestamp":"%s","endTimestamp":"%s","targetNode":"node01","sourceNode":"node02","completed":true,"failed":true,"migrationUid":"testmigration"} }]`
+
+				vmiInterface.EXPECT().Patch(vmi.Name, types.JSONPatchType, gomock.Any()).DoAndReturn(func(name interface{}, ptype interface{}, vmiStatusPatch []byte) (*v1.VirtualMachineInstance, error) {
+
+					vmiSP := []utiltype.PatchOperation{}
+					err := json.Unmarshal(vmiStatusPatch, &vmiSP)
+					Expect(err).To(BeNil())
+					Expect(vmiSP).To(HaveLen(2))
+
+					b, err := json.Marshal(vmiSP[1].Value)
+					Expect(err).To(BeNil())
+
+					newMS := v1.VirtualMachineInstanceMigrationState{}
+					err = json.Unmarshal(b, &newMS)
+					Expect(err).To(BeNil())
+					Expect(newMS.StartTimestamp).ToNot(BeNil())
+					Expect(newMS.EndTimestamp).ToNot(BeNil())
+
+					expected := fmt.Sprintf(patch, newMS.StartTimestamp.UTC().Format(time.RFC3339), newMS.EndTimestamp.UTC().Format(time.RFC3339))
+					Expect(expected).To(Equal(string(vmiStatusPatch)))
+
+					return vmi, nil
+				})
+			}
+
 			controller.Execute()
 
 			// in this case, we have two failed events. one for the VMI and one on the Migration object.
-			testutils.ExpectEvent(recorder, FailedMigrationReason)
+			if initializeMigrationState {
+				testutils.ExpectEvent(recorder, FailedMigrationReason)
+			}
 			if phase != v1.MigrationFailed {
 				testutils.ExpectEvent(recorder, FailedMigrationReason)
 			}
 		},
-			table.Entry("in preparing target state", v1.MigrationPreparingTarget, true, k8sv1.PodFailed),
-			table.Entry("in target ready state", v1.MigrationTargetReady, true, k8sv1.PodFailed),
-			table.Entry("in failed state", v1.MigrationFailed, true, k8sv1.PodFailed),
-			table.Entry("in failed state and pod does not exist", v1.MigrationFailed, false, k8sv1.PodFailed),
+			table.Entry("in preparing target state", v1.MigrationPreparingTarget, true, k8sv1.PodFailed, true),
+			table.Entry("in target ready state", v1.MigrationTargetReady, true, k8sv1.PodFailed, true),
+			table.Entry("in failed state", v1.MigrationFailed, true, k8sv1.PodFailed, true),
+			table.Entry("in failed state before pod is created", v1.MigrationFailed, false, k8sv1.PodFailed, false),
+			table.Entry("in failed state and pod does not exist", v1.MigrationFailed, false, k8sv1.PodFailed, false),
+		)
+		table.DescribeTable("with CPU mode which is", func(toDefineHostModelCPU bool) {
+			const nodeName = "testNode"
+
+			vmi := newVirtualMachine("testvmi", v1.Running)
+			vmi.Status.NodeName = nodeName
+			if toDefineHostModelCPU {
+				vmi.Spec.Domain.CPU = &v1.CPU{Model: v1.CPUModeHostModel}
+			}
+
+			migration := newMigration("testmigration", vmi.Name, v1.MigrationPending)
+
+			node := newNode(nodeName)
+			if toDefineHostModelCPU {
+				node.ObjectMeta.Labels = map[string]string{
+					v1.HostModelCPULabel + "fake":              "true",
+					v1.HostModelRequiredFeaturesLabel + "fake": "true",
+				}
+			}
+
+			addMigration(migration)
+			addVirtualMachineInstance(vmi)
+			addNode(node)
+
+			expectPodToHaveProperNodeSelector := func(pod *k8sv1.Pod) {
+				podHasCpuModeLabelSelector := false
+				for key, _ := range pod.Spec.NodeSelector {
+					if strings.Contains(key, v1.HostModelCPULabel) {
+						podHasCpuModeLabelSelector = true
+						break
+					}
+				}
+
+				Expect(podHasCpuModeLabelSelector).To(Equal(toDefineHostModelCPU))
+			}
+			kubeClient.Fake.PrependReactor("create", "pods", func(action testing.Action) (handled bool, obj k8sruntime.Object, err error) {
+				creation, ok := action.(testing.CreateAction)
+				Expect(ok).To(BeTrue())
+				pod := creation.GetObject().(*k8sv1.Pod)
+				expectPodToHaveProperNodeSelector(pod)
+				return true, creation.GetObject(), nil
+			})
+			controller.Execute()
+
+			testutils.ExpectEvent(recorder, SuccessfulCreatePodReason)
+			testutils.ExpectEvent(recorder, successfulCreatePodDisruptionBudgetReason) // for temporal migration PDB
+		},
+			table.Entry("host-model should be targeted only to nodes which support the model", true),
+			table.Entry("non-host-model should not be targeted to nodes which support the model", false),
 		)
 	})
 })
@@ -773,7 +1006,7 @@ func newMigration(name string, vmiName string, phase v1.VirtualMachineInstanceMi
 	migration := &v1.VirtualMachineInstanceMigration{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
-			Namespace: "default",
+			Namespace: k8sv1.NamespaceDefault,
 			Annotations: map[string]string{
 				v1.ControllerAPILatestVersionObservedAnnotation:  v1.ApiLatestVersion,
 				v1.ControllerAPIStorageVersionObservedAnnotation: v1.ApiStorageVersion,
@@ -801,6 +1034,42 @@ func newVirtualMachine(name string, phase v1.VirtualMachineInstancePhase) *v1.Vi
 	return vmi
 }
 
+func newVirtualMachineWithHotplugVolume(name string, phase v1.VirtualMachineInstancePhase) *v1.VirtualMachineInstance {
+	vmi := newVirtualMachine(name, phase)
+	vmi.Status.VolumeStatus = []v1.VolumeStatus{
+		{
+			HotplugVolume: &v1.HotplugVolumeStatus{},
+		},
+	}
+	return vmi
+}
+
+func newSourcePodForVirtualMachine(vmi *v1.VirtualMachineInstance) *k8sv1.Pod {
+	return &k8sv1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      rand.String(10),
+			Namespace: vmi.Namespace,
+			Labels: map[string]string{
+				v1.AppLabel:       "virt-launcher",
+				v1.CreatedByLabel: string(vmi.UID),
+			},
+			Annotations: map[string]string{
+				v1.DomainAnnotation: vmi.Name,
+			},
+		},
+		Status: k8sv1.PodStatus{
+			Phase: k8sv1.PodRunning,
+			ContainerStatuses: []k8sv1.ContainerStatus{
+				{Ready: true, Name: "test"},
+			},
+		},
+		Spec: k8sv1.PodSpec{
+			NodeName: vmi.Status.NodeName,
+			Volumes:  []k8sv1.Volume{},
+		},
+	}
+}
+
 func newTargetPodForVirtualMachine(vmi *v1.VirtualMachineInstance, migration *v1.VirtualMachineInstanceMigration, phase k8sv1.PodPhase) *k8sv1.Pod {
 	return &k8sv1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
@@ -823,4 +1092,50 @@ func newTargetPodForVirtualMachine(vmi *v1.VirtualMachineInstance, migration *v1
 			},
 		},
 	}
+}
+
+func newAttachmentPodForVirtualMachine(ownerPod *k8sv1.Pod, migration *v1.VirtualMachineInstanceMigration, phase k8sv1.PodPhase) *k8sv1.Pod {
+	return &k8sv1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      rand.String(10),
+			Namespace: ownerPod.Namespace,
+			UID:       "test-uid",
+			Labels: map[string]string{
+				v1.AppLabel:          "hotplug-disk",
+				v1.MigrationJobLabel: string(migration.UID),
+			},
+			Annotations: map[string]string{
+				v1.MigrationJobNameAnnotation: migration.Name,
+			},
+			OwnerReferences: []metav1.OwnerReference{
+				*metav1.NewControllerRef(ownerPod, schema.GroupVersionKind{
+					Group:   k8sv1.SchemeGroupVersion.Group,
+					Version: k8sv1.SchemeGroupVersion.Version,
+					Kind:    "Pod",
+				}),
+			},
+		},
+		Status: k8sv1.PodStatus{
+			Phase: phase,
+			ContainerStatuses: []k8sv1.ContainerStatus{
+				{Ready: true, Name: "test"},
+			},
+		},
+	}
+}
+
+func newNode(name string) *k8sv1.Node {
+	node := &k8sv1.Node{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: name,
+		},
+		TypeMeta: metav1.TypeMeta{
+			Kind:       "Node",
+			APIVersion: v1.GroupVersion.String(),
+		},
+	}
+
+	node.Status.Phase = k8sv1.NodeRunning
+
+	return node
 }

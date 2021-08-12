@@ -31,26 +31,29 @@ import (
 	"github.com/onsi/ginkgo/extensions/table"
 	. "github.com/onsi/gomega"
 
+	"kubevirt.io/kubevirt/tests/util"
+
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	kubevirtv1 "kubevirt.io/client-go/api/v1"
 	v1 "kubevirt.io/client-go/api/v1"
 	"kubevirt.io/client-go/kubecli"
 	"kubevirt.io/client-go/log"
-	cdiv1 "kubevirt.io/containerized-data-importer/pkg/apis/core/v1alpha1"
+	cdiv1 "kubevirt.io/containerized-data-importer/pkg/apis/core/v1beta1"
 	"kubevirt.io/kubevirt/tests"
 	"kubevirt.io/kubevirt/tests/console"
 	cd "kubevirt.io/kubevirt/tests/containerdisk"
+	"kubevirt.io/kubevirt/tests/libvmi"
 
 	virtctl "kubevirt.io/kubevirt/pkg/virtctl/vm"
 )
 
 const (
-	guestDiskIdPrefix      = "scsi-0QEMU_QEMU_HARDDISK_"
 	virtCtlNamespace       = "--namespace"
 	virtCtlVolumeName      = "--volume-name=%s"
-	verifyCannotAccessDisk = "ls: cannot access '%s'"
+	verifyCannotAccessDisk = "ls: %s: No such file or directory"
 
 	waitDiskTemplateError         = "waiting on new disk to appear in template"
 	waitVolumeTemplateError       = "waiting on new volume to appear in template"
@@ -68,7 +71,7 @@ var _ = SIGDescribe("Hotplug", func() {
 
 	BeforeEach(func() {
 		virtClient, err = kubecli.GetKubevirtClient()
-		tests.PanicOnError(err)
+		util.PanicOnError(err)
 
 		tests.BeforeTestCleanup()
 	})
@@ -81,13 +84,13 @@ var _ = SIGDescribe("Hotplug", func() {
 	createVirtualMachine := func(running bool, template *kubevirtv1.VirtualMachineInstance) *kubevirtv1.VirtualMachine {
 		By("Creating VirtualMachine")
 		vm := tests.NewRandomVirtualMachine(template, running)
-		newVM, err := virtClient.VirtualMachine(tests.NamespaceTestDefault).Create(vm)
+		newVM, err := virtClient.VirtualMachine(util.NamespaceTestDefault).Create(vm)
 		Expect(err).ToNot(HaveOccurred())
 		return newVM
 	}
 
 	deleteVirtualMachine := func(vm *kubevirtv1.VirtualMachine) error {
-		return virtClient.VirtualMachine(tests.NamespaceTestDefault).Delete(vm.Name, &metav1.DeleteOptions{})
+		return virtClient.VirtualMachine(util.NamespaceTestDefault).Delete(vm.Name, &metav1.DeleteOptions{})
 	}
 
 	getAddVolumeOptions := func(volumeName, bus string, volumeSource *kubevirtv1.HotplugVolumeSource) *kubevirtv1.AddVolumeOptions {
@@ -313,7 +316,7 @@ var _ = SIGDescribe("Hotplug", func() {
 			}
 
 			return nil
-		}, 90*time.Second, 1*time.Second).ShouldNot(HaveOccurred())
+		}, 360*time.Second, 1*time.Second).ShouldNot(HaveOccurred())
 	}
 
 	verifyCreateData := func(vmi *kubevirtv1.VirtualMachineInstance, device string) {
@@ -341,6 +344,23 @@ var _ = SIGDescribe("Hotplug", func() {
 			&expect.BSnd{S: expectReturn},
 			&expect.BExp{R: console.RetValue("0")},
 			&expect.BSnd{S: fmt.Sprintf("cat %s\n", filepath.Join("/test", filepath.Base(device), "data/message"))},
+			&expect.BExp{R: string(vmi.UID)},
+			&expect.BSnd{S: "sync\n"},
+			&expect.BExp{R: console.PromptExpression},
+			&expect.BSnd{S: "sync\n"},
+			&expect.BExp{R: console.PromptExpression},
+		}
+		Expect(console.SafeExpectBatch(vmi, batch, 20)).To(Succeed())
+	}
+
+	verifyWriteReadData := func(vmi *kubevirtv1.VirtualMachineInstance, device string) {
+		dataFile := filepath.Join("/test", filepath.Base(device), "data/message")
+		batch := []expect.Batcher{
+			&expect.BSnd{S: fmt.Sprintf("echo '%s' > %s\n", vmi.UID, dataFile)},
+			&expect.BExp{R: console.PromptExpression},
+			&expect.BSnd{S: expectReturn},
+			&expect.BExp{R: console.RetValue("0")},
+			&expect.BSnd{S: fmt.Sprintf("cat %s\n", dataFile)},
 			&expect.BExp{R: string(vmi.UID)},
 			&expect.BSnd{S: "sync\n"},
 			&expect.BExp{R: console.PromptExpression},
@@ -381,6 +401,40 @@ var _ = SIGDescribe("Hotplug", func() {
 		}, 90*time.Second, 2*time.Second).Should(Succeed())
 	}
 
+	waitForAttachmentPodToRun := func(vmi *kubevirtv1.VirtualMachineInstance) {
+		namespace := vmi.GetNamespace()
+		uid := vmi.GetUID()
+
+		labelSelector := fmt.Sprintf(v1.CreatedByLabel + "=" + string(uid))
+
+		pods, err := virtClient.CoreV1().Pods(namespace).List(context.Background(), metav1.ListOptions{LabelSelector: labelSelector})
+		Expect(err).ToNot(HaveOccurred(), "Should list pods")
+
+		var virtlauncher *corev1.Pod
+		for _, pod := range pods.Items {
+			if pod.ObjectMeta.DeletionTimestamp == nil {
+				virtlauncher = &pod
+				break
+			}
+		}
+		Expect(virtlauncher).ToNot(BeNil(), "Should find running virtlauncher pod")
+		Eventually(func() bool {
+			podList, err := virtClient.CoreV1().Pods(namespace).List(context.Background(), metav1.ListOptions{})
+			if err != nil {
+				return false
+			}
+			for _, pod := range podList.Items {
+				for _, owner := range pod.OwnerReferences {
+					if owner.UID == virtlauncher.UID {
+						By(fmt.Sprintf("phase: %s", pod.Status.Phase))
+						return pod.Status.Phase == corev1.PodRunning
+					}
+				}
+			}
+			return false
+		}, 270*time.Second, 2*time.Second).Should(BeTrue())
+	}
+
 	getTargetsFromVolumeStatus := func(vmi *kubevirtv1.VirtualMachineInstance, volumeNames ...string) []string {
 		nameMap := make(map[string]bool)
 		for _, volumeName := range volumeNames {
@@ -392,7 +446,7 @@ var _ = SIGDescribe("Hotplug", func() {
 		for _, volumeStatus := range updatedVMI.Status.VolumeStatus {
 			if _, ok := nameMap[volumeStatus.Name]; ok && volumeStatus.HotplugVolume != nil {
 				Expect(volumeStatus.Target).ToNot(BeEmpty())
-				res = append(res, fmt.Sprintf("/dev/disk/by-id/%s%s", guestDiskIdPrefix, volumeStatus.Name))
+				res = append(res, fmt.Sprintf("/dev/%s", volumeStatus.Target))
 			}
 		}
 		return res
@@ -404,10 +458,10 @@ var _ = SIGDescribe("Hotplug", func() {
 			Skip("Skip no local wffc storage class available")
 		}
 
-		template := tests.NewRandomFedoraVMI()
+		template := libvmi.NewCirros()
 		vm := createVirtualMachine(true, template)
 		Eventually(func() bool {
-			vm, err := virtClient.VirtualMachine(tests.NamespaceTestDefault).Get(vm.Name, &metav1.GetOptions{})
+			vm, err := virtClient.VirtualMachine(util.NamespaceTestDefault).Get(vm.Name, &metav1.GetOptions{})
 			Expect(err).ToNot(HaveOccurred())
 			return vm.Status.Ready
 		}, 300*time.Second, 1*time.Second).Should(BeTrue())
@@ -423,9 +477,23 @@ var _ = SIGDescribe("Hotplug", func() {
 		return targets
 	}
 
+	verifySingleAttachmentPod := func(vmi *kubevirtv1.VirtualMachineInstance) {
+		podList, err := virtClient.CoreV1().Pods(vmi.Namespace).List(context.Background(), metav1.ListOptions{})
+		Expect(err).ToNot(HaveOccurred())
+		attachmentPodCount := 0
+		for _, pod := range podList.Items {
+			for _, ownerRef := range pod.GetOwnerReferences() {
+				if ownerRef.UID == vmi.GetUID() {
+					attachmentPodCount++
+				}
+			}
+		}
+		Expect(attachmentPodCount).To(Equal(1), "Number of attachment pods is not 1: %s", attachmentPodCount)
+	}
+
 	getVmiConsoleAndLogin := func(vmi *kubevirtv1.VirtualMachineInstance) {
 		By("Obtaining the serial console")
-		Expect(console.LoginToFedora(vmi)).To(Succeed())
+		Expect(console.LoginToCirros(vmi)).To(Succeed())
 	}
 
 	createDataVolumeAndWaitForImport := func(sc string, volumeMode corev1.PersistentVolumeMode) *cdiv1.DataVolume {
@@ -434,8 +502,8 @@ var _ = SIGDescribe("Hotplug", func() {
 			accessMode = corev1.ReadWriteMany
 		}
 		By("Creating DataVolume")
-		dvBlock := tests.NewRandomBlankDataVolume(tests.NamespaceTestDefault, sc, "64Mi", accessMode, volumeMode)
-		_, err := virtClient.CdiClient().CdiV1alpha1().DataVolumes(dvBlock.Namespace).Create(context.Background(), dvBlock, metav1.CreateOptions{})
+		dvBlock := tests.NewRandomBlankDataVolume(util.NamespaceTestDefault, sc, "64Mi", accessMode, volumeMode)
+		_, err := virtClient.CdiClient().CdiV1beta1().DataVolumes(dvBlock.Namespace).Create(context.Background(), dvBlock, metav1.CreateOptions{})
 		Expect(err).To(BeNil())
 		tests.WaitForSuccessfulDataVolumeImport(dvBlock, 240)
 		return dvBlock
@@ -479,17 +547,34 @@ var _ = SIGDescribe("Hotplug", func() {
 		)
 
 		BeforeEach(func() {
+			pvList, err := virtClient.CoreV1().PersistentVolumes().List(context.TODO(), metav1.ListOptions{})
+			Expect(err).ToNot(HaveOccurred())
+			// Verify we have at least 3 available file system PVs
+			count := 0
+			for _, pv := range pvList.Items {
+				if pv.Spec.NodeAffinity == nil || pv.Spec.NodeAffinity.Required == nil || len(pv.Spec.NodeAffinity.Required.NodeSelectorTerms) == 0 || (pv.Spec.VolumeMode != nil && *pv.Spec.VolumeMode == corev1.PersistentVolumeBlock) {
+					// Not a local volume filesystem PV
+					continue
+				}
+				if pv.Spec.ClaimRef == nil {
+					count++
+				}
+			}
+			if count < 3 {
+				Skip("Not enough available filesystem local storage PVs available")
+			}
 			vm = createAndStartWFFCStorageHotplugVM()
 		})
 
 		table.DescribeTable("Should be able to add and use WFFC local storage", func(addVolumeFunc func(name, namespace, volumeName, claimName, bus string), removeVolumeFunc func(name, namespace, volumeName string)) {
+			tests.SkipIfNonRoot(virtClient, "root owned disk.img")
 			vmi, err := virtClient.VirtualMachineInstance(vm.Namespace).Get(vm.Name, &metav1.GetOptions{})
 			Expect(err).ToNot(HaveOccurred())
 			tests.WaitForSuccessfulVMIStartWithTimeout(vmi, 240)
 			dvNames := make([]string, 0)
 			for i := 0; i < 3; i++ {
-				dv := tests.NewRandomBlankDataVolume(tests.NamespaceTestDefault, tests.Config.StorageClassLocal, "64Mi", corev1.ReadWriteOnce, corev1.PersistentVolumeFilesystem)
-				_, err := virtClient.CdiClient().CdiV1alpha1().DataVolumes(dv.Namespace).Create(context.TODO(), dv, metav1.CreateOptions{})
+				dv := tests.NewRandomBlankDataVolume(util.NamespaceTestDefault, tests.Config.StorageClassLocal, "64Mi", corev1.ReadWriteOnce, corev1.PersistentVolumeFilesystem)
+				_, err := virtClient.CdiClient().CdiV1beta1().DataVolumes(dv.Namespace).Create(context.TODO(), dv, metav1.CreateOptions{})
 				Expect(err).To(BeNil())
 				dvNames = append(dvNames, dv.Name)
 			}
@@ -505,9 +590,12 @@ var _ = SIGDescribe("Hotplug", func() {
 			verifyVolumeStatus(vmi, kubevirtv1.VolumeReady, dvNames...)
 			getVmiConsoleAndLogin(vmi)
 			verifyHotplugAttachedAndUseable(vmi, dvNames)
+			verifySingleAttachmentPod(vmi)
 			for _, volumeName := range dvNames {
 				By("removing volume " + volumeName + " from VM")
 				removeVolumeFunc(vm.Name, vm.Namespace, volumeName)
+			}
+			for _, volumeName := range dvNames {
 				verifyVolumeNolongerAccessible(vmi, volumeName)
 			}
 		},
@@ -516,7 +604,7 @@ var _ = SIGDescribe("Hotplug", func() {
 		)
 	})
 
-	Context("rook-ceph", func() {
+	Context("[rook-ceph]", func() {
 		Context("Online VM", func() {
 			var (
 				vm *kubevirtv1.VirtualMachine
@@ -547,7 +635,7 @@ var _ = SIGDescribe("Hotplug", func() {
 					Skip("Skip OCS tests when Ceph is not present")
 				}
 
-				template := tests.NewRandomFedoraVMI()
+				template := libvmi.NewCirros()
 				node := findCPUManagerWorkerNode()
 				if node != "" {
 					template.Spec.NodeSelector = make(map[string]string)
@@ -555,7 +643,7 @@ var _ = SIGDescribe("Hotplug", func() {
 				}
 				vm = createVirtualMachine(true, template)
 				Eventually(func() bool {
-					vm, err := virtClient.VirtualMachine(tests.NamespaceTestDefault).Get(vm.Name, &metav1.GetOptions{})
+					vm, err := virtClient.VirtualMachine(util.NamespaceTestDefault).Get(vm.Name, &metav1.GetOptions{})
 					Expect(err).ToNot(HaveOccurred())
 					return vm.Status.Ready
 				}, 300*time.Second, 1*time.Second).Should(BeTrue())
@@ -581,6 +669,7 @@ var _ = SIGDescribe("Hotplug", func() {
 				verifyVolumeStatus(vmi, kubevirtv1.VolumeReady, "testvolume")
 				getVmiConsoleAndLogin(vmi)
 				targets := verifyHotplugAttachedAndUseable(vmi, []string{"testvolume"})
+				verifySingleAttachmentPod(vmi)
 				By("removing volume from VM")
 				removeVolumeFunc(vm.Name, vm.Namespace, "testvolume")
 				if !vmiOnly {
@@ -620,13 +709,16 @@ var _ = SIGDescribe("Hotplug", func() {
 				verifyVolumeAndDiskVMIAdded(vmi, testVolumes...)
 				verifyVolumeStatus(vmi, kubevirtv1.VolumeReady, testVolumes...)
 				targets := verifyHotplugAttachedAndUseable(vmi, testVolumes)
-				for i, volumeName := range testVolumes {
+				verifySingleAttachmentPod(vmi)
+				for _, volumeName := range testVolumes {
 					By("removing volume " + volumeName + " from VM")
 					removeVolumeFunc(vm.Name, vm.Namespace, volumeName)
 					if !vmiOnly {
 						By("Verifying the volume no longer exists in VM")
 						verifyVolumeAndDiskVMRemoved(vm, volumeName)
 					}
+				}
+				for i := range testVolumes {
 					verifyVolumeNolongerAccessible(vmi, targets[i])
 				}
 			},
@@ -660,8 +752,9 @@ var _ = SIGDescribe("Hotplug", func() {
 				vmi, err = virtClient.VirtualMachineInstance(vm.Namespace).Get(vm.Name, &metav1.GetOptions{})
 				Expect(err).ToNot(HaveOccurred())
 				verifyVolumeAndDiskVMIAdded(vmi, testVolumes[:len(testVolumes)-1]...)
+				waitForAttachmentPodToRun(vmi)
 				verifyVolumeStatus(vmi, kubevirtv1.VolumeReady, testVolumes[:len(testVolumes)-1]...)
-
+				verifySingleAttachmentPod(vmi)
 				By("removing volume sdc, with dv" + dvNames[2])
 				Eventually(func() string {
 					vmi, err = virtClient.VirtualMachineInstance(vm.Namespace).Get(vm.Name, &metav1.GetOptions{})
@@ -705,7 +798,7 @@ var _ = SIGDescribe("Hotplug", func() {
 					}
 					return ""
 				}, 40*time.Second, 2*time.Second).Should(Equal("sde"))
-
+				verifySingleAttachmentPod(vmi)
 				for _, volumeName := range testVolumes {
 					By("removing volume from VM")
 					removeVolumeFunc(vm.Name, vm.Namespace, volumeName)
@@ -717,7 +810,7 @@ var _ = SIGDescribe("Hotplug", func() {
 			},
 				table.Entry("with VMs", addDVVolumeVM, removeVolumeVM, corev1.PersistentVolumeFilesystem, false),
 				table.Entry("with VMIs", addDVVolumeVMI, removeVolumeVMI, corev1.PersistentVolumeFilesystem, true),
-				table.Entry("[QUARANTINE] with VMs and block", addDVVolumeVM, removeVolumeVM, corev1.PersistentVolumeBlock, false),
+				table.Entry("[Serial] with VMs and block", addDVVolumeVM, removeVolumeVM, corev1.PersistentVolumeBlock, false),
 			)
 
 			It("should hotplug and permanently add volume when added to VM", func() {
@@ -735,6 +828,7 @@ var _ = SIGDescribe("Hotplug", func() {
 				Expect(err).ToNot(HaveOccurred())
 				verifyVolumeAndDiskVMIAdded(vmi, "testvolume")
 				verifyVolumeStatus(vmi, kubevirtv1.VolumeReady, "testvolume")
+				verifySingleAttachmentPod(vmi)
 
 				By("stopping VM")
 				vm = tests.StopVirtualMachine(vm)
@@ -783,7 +877,7 @@ var _ = SIGDescribe("Hotplug", func() {
 				for i := 0; i < 2; i++ {
 					verifyVolumeAccessible(vmi, targets[i])
 				}
-
+				verifySingleAttachmentPod(vmi)
 				removeVolumeVMI(vmi.Name, vmi.Namespace, "block")
 				removeVolumeVMI(vmi.Name, vmi.Namespace, "fs")
 
@@ -793,10 +887,19 @@ var _ = SIGDescribe("Hotplug", func() {
 			})
 		})
 
-		Context("VMI only", func() {
+		Context("VMI migration", func() {
 			var (
 				vmi *kubevirtv1.VirtualMachineInstance
 				sc  string
+
+				numberOfMigrations int
+				sourceNode         string
+				targetNode         string
+			)
+
+			const (
+				hotplugLabelKey   = "kubevirt-test-migration-with-hotplug-disks"
+				hotplugLabelValue = "true"
 			)
 
 			verifyIsMigratable := func(vmi *kubevirtv1.VirtualMachineInstance, expectedValue bool) {
@@ -821,53 +924,46 @@ var _ = SIGDescribe("Hotplug", func() {
 					Skip("Skip OCS tests when Ceph is not present")
 				}
 
-				vmi = tests.NewRandomFedoraVMI()
-				vmi = tests.RunVMIAndExpectLaunch(vmi, 240)
-			})
-
-			It("should mark VMI failed, if an attachment pod is deleted", func() {
-				volumeMode := corev1.PersistentVolumeFilesystem
-				addVolumeFunc := addDVVolumeVMI
-				dv := createDataVolumeAndWaitForImport(sc, volumeMode)
-
-				vmi, err := virtClient.VirtualMachineInstance(vmi.Namespace).Get(vmi.Name, &metav1.GetOptions{})
-				Expect(err).ToNot(HaveOccurred())
-				tests.WaitForSuccessfulVMIStartWithTimeout(vmi, 240)
-				By("Adding volume to running VMI")
-				addVolumeFunc(vmi.Name, vmi.Namespace, "testvolume", dv.Name, "scsi")
-				By("Verifying the volume and disk are in the VMI")
-				vmi, err = virtClient.VirtualMachineInstance(vmi.Namespace).Get(vmi.Name, &metav1.GetOptions{})
-				Expect(err).ToNot(HaveOccurred())
-				verifyVolumeAndDiskVMIAdded(vmi, "testvolume")
-				verifyVolumeStatus(vmi, kubevirtv1.VolumeReady, "testvolume")
-
-				podName := ""
-				vmi, err = virtClient.VirtualMachineInstance(vmi.Namespace).Get(vmi.Name, &metav1.GetOptions{})
-				Expect(err).ToNot(HaveOccurred())
-				for _, volumeStatus := range vmi.Status.VolumeStatus {
-					if volumeStatus.HotplugVolume != nil {
-						podName = volumeStatus.HotplugVolume.AttachPodName
-						break
+				// Workaround for the issue with CPU manager and runc prior to version v1.0.0:
+				// CPU manager periodically updates cgroup settings via the container runtime
+				// interface. Runc prior to version v1.0.0 drops all 'custom' cgroup device
+				// rules on 'update' and that causes a race with live migration when block volumes
+				// are hotplugged. Try to setup the test in a way so that the VMI is migrated to
+				// a node without CPU manager.
+				sourceNode = ""
+				targetNode = ""
+				for _, node := range util.GetAllSchedulableNodes(virtClient).Items {
+					labels := node.GetLabels()
+					if val, ok := labels[v1.CPUManager]; ok && val == "true" {
+						// Use a node with CPU manager as migration source
+						sourceNode = node.Name
+					} else {
+						// Use a node without CPU manager as migration target
+						targetNode = node.Name
 					}
 				}
-				Expect(podName).ToNot(BeEmpty())
-				By("Deleting attachment pod:" + podName)
-				zero := int64(0)
-				err = virtClient.CoreV1().Pods(vmi.Namespace).Delete(context.Background(), podName, metav1.DeleteOptions{
-					GracePeriodSeconds: &zero,
-				})
-				Expect(err).ToNot(HaveOccurred())
-				By("Verifying that VMI goes into failed state")
-				Eventually(func() bool {
-					vmi, err := virtClient.VirtualMachineInstance(vmi.Namespace).Get(vmi.Name, &metav1.GetOptions{})
-					if err != nil {
-						return false
-					}
-					return vmi.Status.Phase == kubevirtv1.Failed
-				}, 90*time.Second, 1*time.Second).Should(BeTrue(), "VMI not in failed state")
+				if sourceNode == "" || targetNode == "" {
+					Skip("Two schedulable nodes are required for migration tests")
+				} else {
+					numberOfMigrations = 1
+				}
+				// Ensure the virt-launcher pod is scheduled on the chosen source node and then
+				// migrated to the proper target.
+				tests.AddLabelToNode(sourceNode, hotplugLabelKey, hotplugLabelValue)
+				vmi, _ = newVirtualMachineInstanceWithContainerDisk()
+				vmi.Spec.NodeSelector = map[string]string{hotplugLabelKey: hotplugLabelValue}
+				vmi = tests.RunVMIAndExpectLaunch(vmi, 240)
+				tests.AddLabelToNode(targetNode, hotplugLabelKey, hotplugLabelValue)
 			})
 
-			It("should mark VMI not migrateable, if a volume is attached", func() {
+			AfterEach(func() {
+				// Cleanup node labels
+				tests.RemoveLabelFromNode(sourceNode, hotplugLabelKey)
+				tests.RemoveLabelFromNode(targetNode, hotplugLabelKey)
+			})
+
+			It("should allow live migration with attached hotplug volumes", func() {
+				volumeName := "testvolume"
 				volumeMode := corev1.PersistentVolumeBlock
 				addVolumeFunc := addDVVolumeVMI
 				removeVolumeFunc := removeVolumeVMI
@@ -880,27 +976,55 @@ var _ = SIGDescribe("Hotplug", func() {
 				verifyIsMigratable(vmi, true)
 
 				By("Adding volume to running VMI")
-				addVolumeFunc(vmi.Name, vmi.Namespace, "testvolume", dv.Name, "scsi")
+				addVolumeFunc(vmi.Name, vmi.Namespace, volumeName, dv.Name, "scsi")
 				By("Verifying the volume and disk are in the VMI")
 				vmi, err = virtClient.VirtualMachineInstance(vmi.Namespace).Get(vmi.Name, &metav1.GetOptions{})
 				Expect(err).ToNot(HaveOccurred())
-				verifyVolumeAndDiskVMIAdded(vmi, "testvolume")
-				verifyVolumeStatus(vmi, kubevirtv1.VolumeReady, "testvolume")
+				verifyVolumeAndDiskVMIAdded(vmi, volumeName)
+				verifyVolumeStatus(vmi, kubevirtv1.VolumeReady, volumeName)
 
-				By("Verifying the VMI is not migrateable")
-				verifyIsMigratable(vmi, false)
+				By("Verifying the VMI is still migrateable")
+				verifyIsMigratable(vmi, true)
+
+				By("Verifying the volume is attached and usable")
+				getVmiConsoleAndLogin(vmi)
+				targets := verifyHotplugAttachedAndUseable(vmi, []string{volumeName})
+				Expect(len(targets) == 1).To(BeTrue())
+
+				By("Starting the migration multiple times")
+				for i := 0; i < numberOfMigrations; i++ {
+					vmi, err = virtClient.VirtualMachineInstance(vmi.Namespace).Get(vmi.Name, &metav1.GetOptions{})
+					Expect(err).ToNot(HaveOccurred())
+					sourceAttachmentPods := []string{}
+					for _, volumeStatus := range vmi.Status.VolumeStatus {
+						if volumeStatus.HotplugVolume != nil {
+							sourceAttachmentPods = append(sourceAttachmentPods, volumeStatus.HotplugVolume.AttachPodName)
+						}
+					}
+					Expect(len(sourceAttachmentPods) == 1).To(BeTrue())
+
+					migration := tests.NewRandomMigration(vmi.Name, vmi.Namespace)
+					migrationUID := tests.RunMigrationAndExpectCompletion(virtClient, migration, tests.MigrationWaitTime)
+					tests.ConfirmVMIPostMigration(virtClient, vmi, migrationUID)
+					By("Verifying the volume is still accessible and usable")
+					verifyVolumeAccessible(vmi, targets[0])
+					verifyWriteReadData(vmi, targets[0])
+
+					By("Verifying the source attachment pods are deleted")
+					Eventually(func() bool {
+						_, err := virtClient.CoreV1().Pods(vmi.Namespace).Get(context.Background(), sourceAttachmentPods[0], metav1.GetOptions{})
+						return errors.IsNotFound(err)
+					}, 60*time.Second, 1*time.Second).Should(BeTrue())
+				}
+
+				By("Verifying the volume can be detached and reattached after migration")
+				removeVolumeFunc(vmi.Name, vmi.Namespace, volumeName)
+				verifyVolumeNolongerAccessible(vmi, targets[0])
+				addVolumeFunc(vmi.Name, vmi.Namespace, volumeName, dv.Name, "scsi")
 				vmi, err = virtClient.VirtualMachineInstance(vmi.Namespace).Get(vmi.Name, &metav1.GetOptions{})
 				Expect(err).ToNot(HaveOccurred())
-				By("Verifying the migration disabled reason is hotplug")
-				for _, condition := range vmi.Status.Conditions {
-					if condition.Type == kubevirtv1.VirtualMachineInstanceIsMigratable {
-						Expect(condition.Reason).To(Equal(kubevirtv1.VirtualMachineInstanceReasonHotplugNotMigratable))
-						break
-					}
-				}
-				removeVolumeFunc(vmi.Name, vmi.Namespace, "testvolume")
-				By("Verifying the VMI is migrateable")
-				verifyIsMigratable(vmi, true)
+				verifyVolumeAndDiskVMIAdded(vmi, volumeName)
+				verifyVolumeStatus(vmi, kubevirtv1.VolumeReady, volumeName)
 			})
 		})
 	})
@@ -914,14 +1038,14 @@ var _ = SIGDescribe("Hotplug", func() {
 			// Setup second PVC to use in this context
 			pvNode := tests.CreateHostPathPv(tests.CustomHostPath, tests.HostPathCustom)
 			tests.CreateHostPathPVC(tests.CustomHostPath, "1Gi")
-			template := tests.NewRandomFedoraVMIWithGuestAgent()
+			template := libvmi.NewCirros()
 			if pvNode != "" {
 				template.Spec.NodeSelector = make(map[string]string)
 				template.Spec.NodeSelector[corev1.LabelHostname] = pvNode
 			}
 			vm = createVirtualMachine(true, template)
 			Eventually(func() bool {
-				vm, err := virtClient.VirtualMachine(tests.NamespaceTestDefault).Get(vm.Name, &metav1.GetOptions{})
+				vm, err := virtClient.VirtualMachine(util.NamespaceTestDefault).Get(vm.Name, &metav1.GetOptions{})
 				Expect(err).ToNot(HaveOccurred())
 				return vm.Status.Ready
 			}, 300*time.Second, 1*time.Second).Should(BeTrue())
@@ -945,6 +1069,7 @@ var _ = SIGDescribe("Hotplug", func() {
 			getVmiConsoleAndLogin(vmi)
 			targets := getTargetsFromVolumeStatus(vmi, "testvolume")
 			verifyVolumeAccessible(vmi, targets[0])
+			verifySingleAttachmentPod(vmi)
 			By("removing volume from VM")
 			removeVolumeVMI(vm.Name, vm.Namespace, "testvolume")
 			verifyVolumeNolongerAccessible(vmi, targets[0])
@@ -967,11 +1092,11 @@ var _ = SIGDescribe("Hotplug", func() {
 			vmi, err := virtClient.VirtualMachineInstance(vm.Namespace).Get(vm.Name, &metav1.GetOptions{})
 			Expect(err).ToNot(HaveOccurred())
 			tests.WaitForSuccessfulVMIStartWithTimeout(vmi, 240)
-			dv := tests.NewRandomBlankDataVolume(tests.NamespaceTestDefault, tests.Config.StorageClassLocal, "64Mi", corev1.ReadWriteOnce, corev1.PersistentVolumeFilesystem)
-			_, err = virtClient.CdiClient().CdiV1alpha1().DataVolumes(dv.Namespace).Create(context.TODO(), dv, metav1.CreateOptions{})
+			dv := tests.NewRandomBlankDataVolume(util.NamespaceTestDefault, tests.Config.StorageClassLocal, "64Mi", corev1.ReadWriteOnce, corev1.PersistentVolumeFilesystem)
+			_, err = virtClient.CdiClient().CdiV1beta1().DataVolumes(dv.Namespace).Create(context.TODO(), dv, metav1.CreateOptions{})
 			Expect(err).To(BeNil())
 			Eventually(func() error {
-				_, err = virtClient.CdiClient().CdiV1alpha1().DataVolumes(dv.Namespace).Get(context.TODO(), dv.Name, metav1.GetOptions{})
+				_, err = virtClient.CdiClient().CdiV1beta1().DataVolumes(dv.Namespace).Get(context.TODO(), dv.Name, metav1.GetOptions{})
 				return err
 			}, 40*time.Second, 2*time.Second).Should(Succeed())
 
@@ -984,6 +1109,7 @@ var _ = SIGDescribe("Hotplug", func() {
 			getVmiConsoleAndLogin(vmi)
 			targets := getTargetsFromVolumeStatus(vmi, dv.Name)
 			verifyVolumeAccessible(vmi, targets[0])
+			verifySingleAttachmentPod(vmi)
 
 			By("Invoking virtlctl removevolume")
 			removeVolumeCommand := tests.NewRepeatableVirtctlCommand(virtctl.COMMAND_REMOVEVOLUME, vmi.Name, fmt.Sprintf(virtCtlVolumeName, dv.Name), virtCtlNamespace, vmi.Namespace)

@@ -38,6 +38,7 @@ import (
 
 	v1 "kubevirt.io/client-go/api/v1"
 	"kubevirt.io/kubevirt/pkg/testutils"
+	utiltypes "kubevirt.io/kubevirt/pkg/util/types"
 	"kubevirt.io/kubevirt/pkg/virt-api/webhooks"
 	virtconfig "kubevirt.io/kubevirt/pkg/virt-config"
 	nodelabellerutil "kubevirt.io/kubevirt/pkg/virt-handler/node-labeller/util"
@@ -62,7 +63,7 @@ var _ = Describe("VirtualMachineInstance Mutator", func() {
 	machineTypeFromConfig := "pc-q35-3.0"
 	cpuRequestFromConfig := "800m"
 
-	getVMISpecMetaFromResponse := func() (*v1.VirtualMachineInstanceSpec, *k8smetav1.ObjectMeta) {
+	admitVMI := func() *admissionv1.AdmissionResponse {
 		vmiBytes, err := json.Marshal(vmi)
 		Expect(err).ToNot(HaveOccurred())
 		By("Creating the test admissions review from the VMI")
@@ -76,17 +77,21 @@ var _ = Describe("VirtualMachineInstance Mutator", func() {
 			},
 		}
 		By("Mutating the VMI")
-		resp := mutator.Mutate(ar)
+		return mutator.Mutate(ar)
+	}
+
+	getVMISpecMetaFromResponse := func() (*v1.VirtualMachineInstanceSpec, *k8smetav1.ObjectMeta) {
+		resp := admitVMI()
 		Expect(resp.Allowed).To(BeTrue())
 
 		By("Getting the VMI spec from the response")
 		vmiSpec := &v1.VirtualMachineInstanceSpec{}
 		vmiMeta := &k8smetav1.ObjectMeta{}
-		patch := []patchOperation{
+		patch := []utiltypes.PatchOperation{
 			{Value: vmiSpec},
 			{Value: vmiMeta},
 		}
-		err = json.Unmarshal(resp.Patch, &patch)
+		err := json.Unmarshal(resp.Patch, &patch)
 		Expect(err).ToNot(HaveOccurred())
 		Expect(patch).NotTo(BeEmpty())
 
@@ -120,7 +125,7 @@ var _ = Describe("VirtualMachineInstance Mutator", func() {
 
 		By("Getting the VMI spec from the response")
 		vmiStatus := &v1.VirtualMachineInstanceStatus{}
-		patch := []patchOperation{
+		patch := []utiltypes.PatchOperation{
 			{Value: vmiStatus},
 		}
 		err = json.Unmarshal(resp.Patch, &patch)
@@ -479,7 +484,7 @@ var _ = Describe("VirtualMachineInstance Mutator", func() {
 			k8sv1.ResourceMemory: resource.MustParse("512Mi"),
 		}
 		vmi.Spec.Domain.CPU = &v1.CPU{Model: "EPYC"}
-		vmi.Spec.Domain.Machine.Type = "q35"
+		vmi.Spec.Domain.Machine = &v1.Machine{Type: "q35"}
 
 		vmiSpec, _ := getVMISpecMetaFromResponse()
 		Expect(vmiSpec.Domain.CPU.Model).To(Equal(vmi.Spec.Domain.CPU.Model))
@@ -922,5 +927,46 @@ var _ = Describe("VirtualMachineInstance Mutator", func() {
 				Features: cpuFeatures,
 			}),
 	)
+
+	When("NonRoot feature gate is enabled", func() {
+
+		BeforeEach(func() {
+			testutils.UpdateFakeClusterConfig(configMapInformer, &k8sv1.ConfigMap{
+				Data: map[string]string{
+					virtconfig.FeatureGatesKey: virtconfig.NonRoot,
+				},
+			})
+		})
+
+		It("Should tag vmi as non-root ", func() {
+			_, meta := getVMISpecMetaFromResponse()
+			Expect(meta.Annotations).NotTo(BeNil())
+			Expect(meta.Annotations).To(HaveKeyWithValue("kubevirt.io/nonroot", ""))
+		})
+
+		It("Should reject SRIOV vmi", func() {
+			vmi.Spec.Domain.Devices.Interfaces = append(vmi.Spec.Domain.Devices.Interfaces,
+				v1.Interface{
+					InterfaceBindingMethod: v1.InterfaceBindingMethod{
+						SRIOV: &v1.InterfaceSRIOV{},
+					},
+				},
+			)
+
+			resp := admitVMI()
+			Expect(resp.Allowed).To(BeFalse())
+			Expect(resp.Result.Message).To(And(ContainSubstring("SRIOV"), ContainSubstring("nonroot")))
+		})
+
+		It("Should reject VirtioFS vmi", func() {
+			vmi.Spec.Domain.Devices.Filesystems = append(vmi.Spec.Domain.Devices.Filesystems, v1.Filesystem{
+				Virtiofs: &v1.FilesystemVirtiofs{},
+			})
+
+			resp := admitVMI()
+			Expect(resp.Allowed).To(BeFalse())
+			Expect(resp.Result.Message).To(And(ContainSubstring("VirtioFS"), ContainSubstring("nonroot")))
+		})
+	})
 
 })

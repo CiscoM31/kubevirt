@@ -22,8 +22,9 @@
 package nodelabeller
 
 import (
-	"os"
 	"path"
+
+	"kubevirt.io/kubevirt/tests"
 
 	"github.com/golang/mock/gomock"
 	. "github.com/onsi/ginkgo"
@@ -36,6 +37,12 @@ import (
 	"kubevirt.io/client-go/log"
 	"kubevirt.io/kubevirt/pkg/testutils"
 	util "kubevirt.io/kubevirt/pkg/virt-handler/node-labeller/util"
+)
+
+var features = []string{"apic", "clflush", "cmov"}
+
+const (
+	x86PenrynXml = "x86_Penryn.xml"
 )
 
 var _ = Describe("Node-labeller config", func() {
@@ -62,35 +69,24 @@ var _ = Describe("Node-labeller config", func() {
 		virtClient = kubecli.NewMockKubevirtClient(ctrl)
 
 		nlController = &NodeLabeller{
-			namespace:     k8sv1.NamespaceDefault,
-			clientset:     virtClient,
-			clusterConfig: clusterConfig,
-			logger:        log.DefaultLogger(),
+			namespace:               k8sv1.NamespaceDefault,
+			clientset:               virtClient,
+			clusterConfig:           clusterConfig,
+			logger:                  log.DefaultLogger(),
+			volumePath:              "testdata",
+			domCapabilitiesFileName: "virsh_domcapabilities.xml",
+			hostCPUModel:            hostCPUModel{requiredFeatures: make(map[string]bool, 0)},
 		}
-
-		os.MkdirAll(path.Join(nodeLabellerVolumePath, "cpu_map"), 0777)
 	})
 
-	AfterSuite(func() {
-		os.Remove(path.Join(nodeLabellerVolumePath, "cpu_map"))
-	})
-
-	BeforeEach(func() {
-		prepareFilesFeatures()
-	})
-
-	AfterEach(func() {
-		os.Remove(path.Join(nodeLabellerVolumePath, "virsh_domcapabilities.xml"))
-	})
 	It("should return correct cpu file path", func() {
-		fileName := "x86_Penryn.xml"
-		p := getPathCPUFeatures(fileName)
-		correctPath := path.Join(nodeLabellerVolumePath, "cpu_map", "x86_Penryn.xml")
+		p := getPathCPUFeatures(nlController.volumePath, x86PenrynXml)
+		correctPath := path.Join(nlController.volumePath, "cpu_map", x86PenrynXml)
 		Expect(p).To(Equal(correctPath), "cpu file path is not the same")
 	})
 
 	It("should load cpu features", func() {
-		fileName := "x86_Penryn.xml"
+		fileName := x86PenrynXml
 		f, err := nlController.loadFeatures(fileName)
 		Expect(err).ToNot(HaveOccurred())
 		for _, val := range features {
@@ -101,10 +97,8 @@ var _ = Describe("Node-labeller config", func() {
 
 	})
 
-	It("should return correct cpu models and features", func() {
-		prepareFileDomCapabilities()
-
-		err := nlController.loadHostCapabilities()
+	It("should return correct cpu models, features and tsc freqnency", func() {
+		err := nlController.loadDomCapabilities()
 		Expect(err).ToNot(HaveOccurred())
 
 		err = nlController.loadHostSupportedFeatures()
@@ -113,46 +107,62 @@ var _ = Describe("Node-labeller config", func() {
 		err = nlController.loadCPUInfo()
 		Expect(err).ToNot(HaveOccurred())
 
-		cpuModels, cpuFeatures := nlController.getCPUInfo()
+		err = nlController.loadHostCapabilities()
+		Expect(err).ToNot(HaveOccurred())
+
+		cpuModels := nlController.getSupportedCpuModels()
+		cpuFeatures := nlController.getSupportedCpuFeatures()
 
 		Expect(len(cpuModels)).To(Equal(3), "number of models must match")
 
 		Expect(len(cpuFeatures)).To(Equal(2), "number of features must match")
+		counter, err := nlController.capabilities.GetTSCCounter()
+		Expect(err).ToNot(HaveOccurred())
+		Expect(counter).ToNot(BeNil())
+		Expect(counter.Frequency).To(BeNumerically("==", 4008012000))
 
 	})
 
 	It("No cpu model is usable", func() {
-		prepareFileDomCapabilitiesNothingUsable()
-
-		err := nlController.loadHostCapabilities()
+		nlController.domCapabilitiesFileName = "virsh_domcapabilities_nothing_usable.xml"
+		err := nlController.loadDomCapabilities()
 		Expect(err).ToNot(HaveOccurred())
 
 		err = nlController.loadCPUInfo()
 		Expect(err).ToNot(HaveOccurred())
 
-		cpuModels, cpuFeatures := nlController.getCPUInfo()
+		cpuModels := nlController.getSupportedCpuModels()
+		cpuFeatures := nlController.getSupportedCpuFeatures()
 
 		Expect(len(cpuModels)).To(Equal(0), "number of models doesn't match")
 
 		Expect(len(cpuFeatures)).To(Equal(2), "number of features doesn't match")
 	})
 
+	Context("should return correct host cpu", func() {
+		var hostCpuModel hostCPUModel
+
+		tests.BeforeAll(func() {
+			err := nlController.loadHostSupportedFeatures()
+			Expect(err).ToNot(HaveOccurred())
+
+			hostCpuModel = nlController.getHostCpuModel()
+		})
+
+		It("model", func() {
+			Expect(hostCpuModel.name).To(Equal("Skylake-Client-IBRS"))
+			Expect(hostCpuModel.fallback).To(Equal("allow"))
+		})
+
+		It("required features", func() {
+			features := hostCpuModel.requiredFeatures
+			Expect(features).To(HaveLen(3))
+			Expect(features).Should(And(
+				HaveKey("ds"),
+				HaveKey("acpi"),
+				HaveKey("ss"),
+			))
+		})
+	})
+
 })
-
-func prepareFileDomCapabilities() {
-	err := writeMockDataFile(path.Join(nodeLabellerVolumePath, "virsh_domcapabilities.xml"), domainCapabilities)
-	Expect(err).ToNot(HaveOccurred())
-	err = writeMockDataFile(path.Join(nodeLabellerVolumePath+"supported_features.xml"), hostSupportedFeatures)
-	Expect(err).ToNot(HaveOccurred())
-}
-
-func prepareFileDomCapabilitiesNothingUsable() {
-	err := writeMockDataFile(path.Join(nodeLabellerVolumePath, "virsh_domcapabilities.xml"), domainCapabilitiesNothingUsable)
-	Expect(err).ToNot(HaveOccurred())
-}
-
-func prepareFilesFeatures() {
-	penrynPath := getPathCPUFeatures("x86_Penryn.xml")
-	err := writeMockDataFile(penrynPath, cpuModelPenrynFeatures)
-	Expect(err).ToNot(HaveOccurred())
-}

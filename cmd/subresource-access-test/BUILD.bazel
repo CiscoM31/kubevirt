@@ -6,6 +6,7 @@ go_library(
     importpath = "kubevirt.io/kubevirt/cmd/subresource-access-test",
     visibility = ["//visibility:private"],
     deps = [
+        "//staging/src/kubevirt.io/client-go/api/v1:go_default_library",
         "//staging/src/kubevirt.io/client-go/kubecli:go_default_library",
         "//vendor/k8s.io/client-go/rest:go_default_library",
     ],
@@ -26,7 +27,6 @@ load(
 container_image(
     name = "subresource-access-test-image",
     architecture = select({
-        "@io_bazel_rules_go//go/platform:linux_ppc64le": "ppc64le",
         "@io_bazel_rules_go//go/platform:linux_arm64": "arm64",
         "//conditions:default": "amd64",
     }),

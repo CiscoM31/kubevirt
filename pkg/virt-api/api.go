@@ -61,6 +61,7 @@ import (
 	validating_webhook "kubevirt.io/kubevirt/pkg/virt-api/webhooks/validating-webhook"
 	virtconfig "kubevirt.io/kubevirt/pkg/virt-config"
 	"kubevirt.io/kubevirt/pkg/virt-operator/resource/generate/components"
+	virtoperatorutils "kubevirt.io/kubevirt/pkg/virt-operator/util"
 )
 
 const (
@@ -78,8 +79,9 @@ const (
 	defaultHandlerCertFilePath = "/etc/virt-handler/clientcertificates/tls.crt"
 	defaultHandlerKeyFilePath  = "/etc/virt-handler/clientcertificates/tls.key"
 
-	httpStatusNotFoundMessage   = "Not Found"
-	httpStatusBadRequestMessage = "Bad Request"
+	httpStatusNotFoundMessage     = "Not Found"
+	httpStatusBadRequestMessage   = "Bad Request"
+	httpStatusInternalServerError = "Internal Server Error"
 )
 
 type VirtApi interface {
@@ -233,14 +235,33 @@ func (app *virtAPIApp) composeSubresources() {
 			Returns(http.StatusNotFound, httpStatusNotFoundMessage, "").
 			Returns(http.StatusBadRequest, httpStatusBadRequestMessage, ""))
 
-		subws.Route(subws.PUT(rest.ResourcePath(subresourcesvmGVR)+rest.SubResourcePath("stop")).
+		stopRouteBuilder := subws.PUT(rest.ResourcePath(subresourcesvmGVR)+rest.SubResourcePath("stop")).
 			To(subresourceApp.StopVMRequestHandler).
+			Reads(v1.StopOptions{}).
 			Param(rest.NamespaceParam(subws)).Param(rest.NameParam(subws)).
 			Operation(version.Version+"Stop").
 			Doc("Stop a VirtualMachine object.").
 			Returns(http.StatusOK, "OK", "").
 			Returns(http.StatusNotFound, httpStatusNotFoundMessage, "").
-			Returns(http.StatusBadRequest, httpStatusBadRequestMessage, ""))
+			Returns(http.StatusBadRequest, httpStatusBadRequestMessage, "")
+		stopRouteBuilder.ParameterNamed("body").Required(false)
+		subws.Route(stopRouteBuilder)
+
+		subws.Route(subws.PUT(rest.ResourcePath(subresourcesvmiGVR)+rest.SubResourcePath("freeze")).
+			To(subresourceApp.FreezeVMIRequestHandler).
+			Param(rest.NamespaceParam(subws)).Param(rest.NameParam(subws)).
+			Operation(version.Version+"Freeze").
+			Doc("Freeze a VirtualMachineInstance object.").
+			Returns(http.StatusOK, "OK", "").
+			Returns(http.StatusInternalServerError, httpStatusInternalServerError, ""))
+
+		subws.Route(subws.PUT(rest.ResourcePath(subresourcesvmiGVR)+rest.SubResourcePath("unfreeze")).
+			To(subresourceApp.UnfreezeVMIRequestHandler).
+			Param(rest.NamespaceParam(subws)).Param(rest.NameParam(subws)).
+			Operation(version.Version+"Unfreeze").
+			Doc("Unfreeze a VirtualMachineInstance object.").
+			Returns(http.StatusOK, "OK", "").
+			Returns(http.StatusInternalServerError, httpStatusInternalServerError, ""))
 
 		subws.Route(subws.PUT(rest.ResourcePath(subresourcesvmiGVR)+rest.SubResourcePath("pause")).
 			To(subresourceApp.PauseVMIRequestHandler).
@@ -272,6 +293,43 @@ func (app *virtAPIApp) composeSubresources() {
 			Operation(version.Version + "VNC").
 			Doc("Open a websocket connection to connect to VNC on the specified VirtualMachineInstance."))
 
+		subws.Route(subws.GET(rest.ResourcePath(subresourcesvmiGVR) + rest.SubResourcePath("usbredir")).
+			To(subresourceApp.USBRedirRequestHandler).
+			Param(rest.NamespaceParam(subws)).
+			Param(rest.NameParam(subws)).
+			Operation(version.Version + "usbredir").
+			Doc("Open a websocket connection to connect to USB device on the specified VirtualMachineInstance."))
+
+		// VMI endpoint
+		subws.Route(subws.GET(rest.ResourcePath(subresourcesvmiGVR) + rest.SubResourcePath("portforward") + rest.PortPath).
+			To(subresourceApp.PortForwardRequestHandler(subresourceApp.FetchVirtualMachineInstance)).
+			Param(rest.NamespaceParam(subws)).Param(rest.NameParam(subws)).
+			Param(rest.PortForwardPortParameter(subws)).
+			Operation(version.Version + "vmi-PortForward").
+			Doc("Open a websocket connection forwarding traffic to the specified VirtualMachineInstance and port."))
+		subws.Route(subws.GET(rest.ResourcePath(subresourcesvmiGVR) + rest.SubResourcePath("portforward") + rest.PortPath + rest.ProtocolPath).
+			To(subresourceApp.PortForwardRequestHandler(subresourceApp.FetchVirtualMachineInstance)).
+			Param(rest.NamespaceParam(subws)).Param(rest.NameParam(subws)).
+			Param(rest.PortForwardPortParameter(subws)).
+			Param(rest.PortForwardProtocolParameter(subws)).
+			Operation(version.Version + "vmi-PortForwardWithProtocol").
+			Doc("Open a websocket connection forwarding traffic of the specified protocol (either tcp or udp) to the specified VirtualMachineInstance and port."))
+
+		// VM endpoint
+		subws.Route(subws.GET(rest.ResourcePath(subresourcesvmGVR) + rest.SubResourcePath("portforward") + rest.PortPath).
+			To(subresourceApp.PortForwardRequestHandler(subresourceApp.FetchVirtualMachineInstanceForVM)).
+			Param(rest.NamespaceParam(subws)).Param(rest.NameParam(subws)).
+			Param(rest.PortForwardPortParameter(subws)).
+			Operation(version.Version + "vm-PortForward").
+			Doc("Open a websocket connection forwarding traffic to the running VMI for the specified VirtualMachine and port."))
+		subws.Route(subws.GET(rest.ResourcePath(subresourcesvmGVR) + rest.SubResourcePath("portforward") + rest.PortPath + rest.ProtocolPath).
+			To(subresourceApp.PortForwardRequestHandler(subresourceApp.FetchVirtualMachineInstanceForVM)).
+			Param(rest.NamespaceParam(subws)).Param(rest.NameParam(subws)).
+			Param(rest.PortForwardPortParameter(subws)).
+			Param(rest.PortForwardProtocolParameter(subws)).
+			Operation(version.Version + "vm-PortForwardWithProtocol").
+			Doc("Open a websocket connection forwarding traffic of the specified protocol (either tcp or udp) to the specified VirtualMachine and port."))
+
 		// An empty handler function would respond with HTTP OK by default
 		subws.Route(subws.GET(rest.ResourcePath(subresourcesvmiGVR) + rest.SubResourcePath("test")).
 			To(func(request *restful.Request, response *restful.Response) {}).
@@ -283,6 +341,11 @@ func (app *virtAPIApp) composeSubresources() {
 			To(func(request *restful.Request, response *restful.Response) {
 				response.WriteAsJson(virtversion.Get())
 			}).Operation(version.Version + "Version"))
+		subws.Route(subws.GET(rest.SubResourcePath("guestfs")).Produces(restful.MIME_JSON).
+			To(app.GetGsInfo()).
+			Operation(version.Version+"Guestfs").
+			Returns(http.StatusOK, "OK", "").
+			Returns(http.StatusBadRequest, httpStatusBadRequestMessage, ""))
 		subws.Route(subws.GET(rest.SubResourcePath("healthz")).
 			To(healthz.KubeConnectionHealthzFuncFactory(app.clusterConfig, apiHealthVersion)).
 			Consumes(restful.MIME_JSON).
@@ -378,11 +441,23 @@ func (app *virtAPIApp) composeSubresources() {
 						Namespaced: true,
 					},
 					{
+						Name:       "virtualmachineinstances/portforward",
+						Namespaced: true,
+					},
+					{
 						Name:       "virtualmachineinstances/pause",
 						Namespaced: true,
 					},
 					{
 						Name:       "virtualmachineinstances/unpause",
+						Namespaced: true,
+					},
+					{
+						Name:       "virtualmachineinstances/freeze",
+						Namespaced: true,
+					},
+					{
+						Name:       "virtualmachineinstances/unfreeze",
 						Namespaced: true,
 					},
 					{
@@ -711,7 +786,7 @@ func (app *virtAPIApp) startTLS(informerFactory controller.KubeInformerFactory) 
 		// remove this endpoint from rotation due to pod.DeletionTimestamp != nil
 		// By pausing, we reduce the chance that the load balancer will attempt to
 		// route new requests to the service after we've started the shutdown
-		// proceedure
+		// procedure
 		time.Sleep(5 * time.Second)
 
 		// by default, server.Shutdown() waits indefinitely for all existing
@@ -840,4 +915,32 @@ func (app *virtAPIApp) AddFlags() {
 		"Private key for the client certificate used to prove the identity of the virt-api when it must call virt-handler during a request")
 	flag.BoolVar(&app.externallyManaged, "externally-managed", false,
 		"Allow intermediate certificates to be used in building up the chain of trust when certificates are externally managed")
+}
+
+// GetGsInfo returns the libguestfs-tools image information based on the KubeVirt installation in the namespace.
+func (app *virtAPIApp) GetGsInfo() func(_ *restful.Request, response *restful.Response) {
+	return func(_ *restful.Request, response *restful.Response) {
+		var kvConfig virtoperatorutils.KubeVirtDeploymentConfig
+		kv := app.clusterConfig.GetConfigFromKubeVirtCR()
+		if kv == nil {
+			error_guestfs(fmt.Errorf("Failed getting KubeVirt config"), response)
+		}
+		err := json.Unmarshal([]byte(kv.Status.ObservedDeploymentConfig), &kvConfig)
+		if err != nil {
+			error_guestfs(err, response)
+			return
+		}
+		response.WriteAsJson(kubecli.GuestfsInfo{
+			Registry: kv.Status.ObservedKubeVirtRegistry,
+			Tag:      kv.Status.ObservedKubeVirtVersion,
+			Digest:   kvConfig.GsSha,
+		})
+		return
+	}
+}
+
+func error_guestfs(err error, response *restful.Response) {
+	res := map[string]interface{}{}
+	res["guestfs"] = map[string]interface{}{"status": "failed", "error": fmt.Sprintf("%v", err)}
+	response.WriteHeaderAndJson(http.StatusInternalServerError, res, restful.MIME_JSON)
 }

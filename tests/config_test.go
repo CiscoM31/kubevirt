@@ -19,12 +19,17 @@
 package tests_test
 
 import (
+	"fmt"
+	"strconv"
+	"strings"
 	"time"
 
 	expect "github.com/google/goexpect"
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
 	"github.com/pborman/uuid"
+
+	"kubevirt.io/kubevirt/tests/util"
 
 	v1 "kubevirt.io/client-go/api/v1"
 
@@ -40,11 +45,35 @@ var _ = Describe("[Serial][rfe_id:899][crit:medium][vendor:cnv-qe@redhat.com][le
 
 	var virtClient kubecli.KubevirtClient
 
+	var CheckIsoVolumeSizes = func(vmi *v1.VirtualMachineInstance) {
+		pod := tests.GetRunningPodByVirtualMachineInstance(vmi, vmi.Namespace)
+
+		for _, volume := range vmi.Spec.Volumes {
+			var path = ""
+			if volume.ConfigMap != nil {
+				path = config.GetConfigMapDiskPath(volume.Name)
+				By(fmt.Sprintf("Checking ConfigMap at '%s' is 4k-block fs compatible", path))
+			}
+			if volume.Secret != nil {
+				path = config.GetSecretDiskPath(volume.Name)
+				By(fmt.Sprintf("Checking Secret at '%s' is 4k-block fs compatible", path))
+			}
+			if len(path) > 0 {
+				cmdCheck := []string{"stat", "--printf='%s'", path}
+				out, err := tests.ExecuteCommandOnPod(virtClient, pod, "compute", cmdCheck)
+				Expect(err).NotTo(HaveOccurred())
+				size, err := strconv.Atoi(strings.Trim(out, "'"))
+				Expect(err).NotTo(HaveOccurred())
+				Expect(size % 4096).To(Equal(0))
+			}
+		}
+	}
+
 	BeforeEach(func() {
 		var err error
 
 		virtClient, err = kubecli.GetKubevirtClient()
-		tests.PanicOnError(err)
+		util.PanicOnError(err)
 
 		tests.BeforeTestCleanup()
 	})
@@ -80,8 +109,10 @@ var _ = Describe("[Serial][rfe_id:899][crit:medium][vendor:cnv-qe@redhat.com][le
 				vmi := tests.NewRandomVMIWithConfigMap(configMapName)
 				tests.RunVMIAndExpectLaunch(vmi, 90)
 
+				CheckIsoVolumeSizes(vmi)
+
 				By("Checking if ConfigMap has been attached to the pod")
-				vmiPod := tests.GetRunningPodByVirtualMachineInstance(vmi, tests.NamespaceTestDefault)
+				vmiPod := tests.GetRunningPodByVirtualMachineInstance(vmi, util.NamespaceTestDefault)
 				podOutput, err := tests.ExecuteCommandOnPod(
 					virtClient,
 					vmiPod,
@@ -137,6 +168,7 @@ var _ = Describe("[Serial][rfe_id:899][crit:medium][vendor:cnv-qe@redhat.com][le
 				tests.AddConfigMapDisk(vmi, configMaps[2], configMaps[2])
 
 				tests.RunVMIAndExpectLaunch(vmi, 90)
+				CheckIsoVolumeSizes(vmi)
 			})
 		})
 	})
@@ -171,8 +203,10 @@ var _ = Describe("[Serial][rfe_id:899][crit:medium][vendor:cnv-qe@redhat.com][le
 				vmi := tests.NewRandomVMIWithSecret(secretName)
 				tests.RunVMIAndExpectLaunch(vmi, 90)
 
+				CheckIsoVolumeSizes(vmi)
+
 				By("Checking if Secret has been attached to the pod")
-				vmiPod := tests.GetRunningPodByVirtualMachineInstance(vmi, tests.NamespaceTestDefault)
+				vmiPod := tests.GetRunningPodByVirtualMachineInstance(vmi, util.NamespaceTestDefault)
 				podOutput, err := tests.ExecuteCommandOnPod(
 					virtClient,
 					vmiPod,
@@ -227,6 +261,7 @@ var _ = Describe("[Serial][rfe_id:899][crit:medium][vendor:cnv-qe@redhat.com][le
 				tests.AddSecretDisk(vmi, secrets[2], secrets[2])
 
 				tests.RunVMIAndExpectLaunch(vmi, 90)
+				CheckIsoVolumeSizes(vmi)
 			})
 		})
 
@@ -240,9 +275,10 @@ var _ = Describe("[Serial][rfe_id:899][crit:medium][vendor:cnv-qe@redhat.com][le
 			By("Running VMI")
 			vmi := tests.NewRandomVMIWithServiceAccount("default")
 			tests.RunVMIAndExpectLaunch(vmi, 90)
+			CheckIsoVolumeSizes(vmi)
 
 			By("Checking if ServiceAccount has been attached to the pod")
-			vmiPod := tests.GetRunningPodByVirtualMachineInstance(vmi, tests.NamespaceTestDefault)
+			vmiPod := tests.GetRunningPodByVirtualMachineInstance(vmi, util.NamespaceTestDefault)
 			namespace, err := tests.ExecuteCommandOnPod(
 				virtClient,
 				vmiPod,
@@ -253,7 +289,7 @@ var _ = Describe("[Serial][rfe_id:899][crit:medium][vendor:cnv-qe@redhat.com][le
 			)
 
 			Expect(err).To(BeNil())
-			Expect(namespace).To(Equal(tests.NamespaceTestDefault))
+			Expect(namespace).To(Equal(util.NamespaceTestDefault))
 
 			token, err := tests.ExecuteCommandOnPod(
 				virtClient,
@@ -276,7 +312,7 @@ var _ = Describe("[Serial][rfe_id:899][crit:medium][vendor:cnv-qe@redhat.com][le
 				&expect.BSnd{S: "echo $?\n"},
 				&expect.BExp{R: console.RetValue("0")},
 				&expect.BSnd{S: "cat /mnt/namespace\n"},
-				&expect.BExp{R: tests.NamespaceTestDefault},
+				&expect.BExp{R: util.NamespaceTestDefault},
 				&expect.BSnd{S: "tail -c 20 /mnt/token\n"},
 				&expect.BExp{R: token},
 			}, 200)).To(Succeed())
@@ -327,9 +363,9 @@ var _ = Describe("[Serial][rfe_id:899][crit:medium][vendor:cnv-qe@redhat.com][le
 
 				By("Running VMI")
 
-				vmi := tests.NewRandomVMIWithEphemeralDiskAndUserdataHighMemory(
+				vmi := tests.NewRandomVMIWithEphemeralDiskHighMemory(
 					cd.ContainerDiskFor(
-						cd.ContainerDiskFedora), "#!/bin/bash\necho \"fedora\" | passwd fedora --stdin\n")
+						cd.ContainerDiskFedoraTestTooling))
 				tests.AddConfigMapDisk(vmi, configMapName, configMapName)
 				tests.AddSecretDisk(vmi, secretName, secretName)
 				tests.AddConfigMapDiskWithCustomLabel(vmi, configMapName, "random1", "configlabel")
@@ -341,9 +377,10 @@ var _ = Describe("[Serial][rfe_id:899][crit:medium][vendor:cnv-qe@redhat.com][le
 				}
 
 				vmi = tests.RunVMIAndExpectLaunch(vmi, 90)
+				CheckIsoVolumeSizes(vmi)
 
 				By("Checking if ConfigMap has been attached to the pod")
-				vmiPod := tests.GetRunningPodByVirtualMachineInstance(vmi, tests.NamespaceTestDefault)
+				vmiPod := tests.GetRunningPodByVirtualMachineInstance(vmi, util.NamespaceTestDefault)
 				podOutputCfgMap, err := tests.ExecuteCommandOnPod(
 					virtClient,
 					vmiPod,
@@ -364,7 +401,7 @@ var _ = Describe("[Serial][rfe_id:899][crit:medium][vendor:cnv-qe@redhat.com][le
 					// mount ConfigMap image
 					&expect.BSnd{S: "sudo su -\n"},
 					&expect.BExp{R: console.PromptExpression},
-					&expect.BSnd{S: "mount /dev/vdc /mnt\n"},
+					&expect.BSnd{S: "mount /dev/vdb /mnt\n"},
 					&expect.BExp{R: console.PromptExpression},
 					&expect.BSnd{S: "echo $?\n"},
 					&expect.BExp{R: console.RetValue("0")},
@@ -389,7 +426,7 @@ var _ = Describe("[Serial][rfe_id:899][crit:medium][vendor:cnv-qe@redhat.com][le
 
 				Expect(console.SafeExpectBatch(vmi, []expect.Batcher{
 					// mount Secret image
-					&expect.BSnd{S: "mount /dev/vdd /mnt\n"},
+					&expect.BSnd{S: "mount /dev/vdc /mnt\n"},
 					&expect.BExp{R: console.PromptExpression},
 					&expect.BSnd{S: "echo $?\n"},
 					&expect.BExp{R: console.RetValue("0")},
@@ -399,13 +436,13 @@ var _ = Describe("[Serial][rfe_id:899][crit:medium][vendor:cnv-qe@redhat.com][le
 
 				By("checking that all disk labels match the expectations")
 				Expect(console.SafeExpectBatch(vmi, []expect.Batcher{
+					&expect.BSnd{S: "blkid -s LABEL -o value /dev/vdb\n"},
+					&expect.BExp{R: "cfgdata"}, // default value
 					&expect.BSnd{S: "blkid -s LABEL -o value /dev/vdc\n"},
 					&expect.BExp{R: "cfgdata"}, // default value
 					&expect.BSnd{S: "blkid -s LABEL -o value /dev/vdd\n"},
-					&expect.BExp{R: "cfgdata"}, // default value
-					&expect.BSnd{S: "blkid -s LABEL -o value /dev/vde\n"},
 					&expect.BExp{R: "configlabel"}, // custom value
-					&expect.BSnd{S: "blkid -s LABEL -o value /dev/vdf\n"},
+					&expect.BSnd{S: "blkid -s LABEL -o value /dev/vde\n"},
 					&expect.BExp{R: "secretlabel"}, // custom value
 				}, 200)).To(Succeed())
 			})
@@ -445,14 +482,16 @@ var _ = Describe("[Serial][rfe_id:899][crit:medium][vendor:cnv-qe@redhat.com][le
 				expectedPublicKey := string(publicKeyBytes)
 
 				By("Running VMI")
-				vmi := tests.NewRandomVMIWithEphemeralDiskAndUserdataHighMemory(
+				vmi := tests.NewRandomVMIWithEphemeralDiskHighMemory(
 					cd.ContainerDiskFor(
-						cd.ContainerDiskFedora), "#!/bin/bash\necho \"fedora\" | passwd fedora --stdin\n")
+						cd.ContainerDiskFedoraTestTooling))
 				tests.AddSecretDisk(vmi, secretName, secretName)
 				vmi = tests.RunVMIAndExpectLaunch(vmi, 90)
 
+				CheckIsoVolumeSizes(vmi)
+
 				By("Checking if Secret has been attached to the pod")
-				vmiPod := tests.GetRunningPodByVirtualMachineInstance(vmi, tests.NamespaceTestDefault)
+				vmiPod := tests.GetRunningPodByVirtualMachineInstance(vmi, util.NamespaceTestDefault)
 				podOutput1, err := tests.ExecuteCommandOnPod(
 					virtClient,
 					vmiPod,
@@ -516,9 +555,10 @@ var _ = Describe("[Serial][rfe_id:899][crit:medium][vendor:cnv-qe@redhat.com][le
 			tests.AddLabelDownwardAPIVolume(vmi, downwardAPIName)
 
 			tests.RunVMIAndExpectLaunch(vmi, 90)
+			CheckIsoVolumeSizes(vmi)
 
 			By("Checking if DownwardAPI has been attached to the pod")
-			vmiPod := tests.GetRunningPodByVirtualMachineInstance(vmi, tests.NamespaceTestDefault)
+			vmiPod := tests.GetRunningPodByVirtualMachineInstance(vmi, util.NamespaceTestDefault)
 			podOutput, err := tests.ExecuteCommandOnPod(
 				virtClient,
 				vmiPod,

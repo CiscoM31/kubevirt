@@ -40,9 +40,10 @@ import (
 	v1 "kubevirt.io/client-go/api/v1"
 	"kubevirt.io/client-go/log"
 	"kubevirt.io/kubevirt/pkg/network/cache"
+	dhcpserver "kubevirt.io/kubevirt/pkg/network/dhcp/server"
+	dhcpserverv6 "kubevirt.io/kubevirt/pkg/network/dhcp/serverv6"
+	"kubevirt.io/kubevirt/pkg/network/link"
 	"kubevirt.io/kubevirt/pkg/virt-handler/selinux"
-	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/network/dhcp"
-	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/network/dhcpv6"
 )
 
 const (
@@ -65,11 +66,10 @@ type NetworkHandler interface {
 	LinkAdd(link netlink.Link) error
 	LinkSetLearningOff(link netlink.Link) error
 	ParseAddr(s string) (*netlink.Addr, error)
-	GetHostAndGwAddressesFromCIDR(s string) (string, string, error)
 	SetRandomMac(iface string) (net.HardwareAddr, error)
 	GetMacDetails(iface string) (net.HardwareAddr, error)
 	LinkSetMaster(link netlink.Link, master *netlink.Bridge) error
-	StartDHCP(nic *cache.DhcpConfig, serverAddr net.IP, bridgeInterfaceName string, dhcpOptions *v1.DHCPOptions, filterByMAC bool) error
+	StartDHCP(nic *cache.DHCPConfig, bridgeInterfaceName string, dhcpOptions *v1.DHCPOptions) error
 	HasNatIptables(proto iptables.Protocol) bool
 	IsIpv6Enabled(interfaceName string) (bool, error)
 	IsIpv4Primary() (bool, error)
@@ -291,35 +291,6 @@ func (h *NetworkUtilsHandler) ReadIPAddressesFromLink(interfaceName string) (str
 	return ipv4, ipv6, nil
 }
 
-func (h *NetworkUtilsHandler) GetHostAndGwAddressesFromCIDR(s string) (string, string, error) {
-	ip, ipnet, err := net.ParseCIDR(s)
-	if err != nil {
-		return "", "", err
-	}
-
-	subnet, _ := ipnet.Mask.Size()
-	var ips []string
-	for ip := ip.Mask(ipnet.Mask); ipnet.Contains(ip); inc(ip) {
-		ips = append(ips, fmt.Sprintf("%s/%d", ip.String(), subnet))
-
-		if len(ips) == 4 {
-			// remove network address and broadcast address
-			return ips[1], ips[2], nil
-		}
-	}
-
-	return "", "", fmt.Errorf("less than 4 addresses on network")
-}
-
-func inc(ip net.IP) {
-	for j := len(ip) - 1; j >= 0; j-- {
-		ip[j]++
-		if ip[j] > 0 {
-			break
-		}
-	}
-}
-
 // GetMacDetails from an interface
 func (h *NetworkUtilsHandler) GetMacDetails(iface string) (net.HardwareAddr, error) {
 	currentMac, err := lmf.GetCurrentMac(iface)
@@ -365,7 +336,7 @@ func (h *NetworkUtilsHandler) SetRandomMac(iface string) (net.HardwareAddr, erro
 	return currentMac, nil
 }
 
-func (h *NetworkUtilsHandler) StartDHCP(nic *cache.DhcpConfig, serverAddr net.IP, bridgeInterfaceName string, dhcpOptions *v1.DHCPOptions, filterByMAC bool) error {
+func (h *NetworkUtilsHandler) StartDHCP(nic *cache.DHCPConfig, bridgeInterfaceName string, dhcpOptions *v1.DHCPOptions) error {
 	log.Log.V(4).Infof("StartDHCP network Nic: %+v", nic)
 	nameservers, searchDomains, err := converter.GetResolvConfDetailsFromPod()
 	if err != nil {
@@ -377,11 +348,10 @@ func (h *NetworkUtilsHandler) StartDHCP(nic *cache.DhcpConfig, serverAddr net.IP
 	go func() {
 		if err = DHCPServer(
 			nic.MAC,
-			filterByMAC,
 			nic.IP.IP,
 			nic.IP.Mask,
 			bridgeInterfaceName,
-			serverAddr,
+			nic.AdvertisingIPAddr,
 			nic.Gateway,
 			nameservers,
 			nic.Routes,
@@ -462,7 +432,7 @@ func (h *NetworkUtilsHandler) BindTapDeviceToBridge(tapName string, bridgeName s
 }
 
 func (h *NetworkUtilsHandler) DisableTXOffloadChecksum(ifaceName string) error {
-	if err := dhcp.EthtoolTXOff(ifaceName); err != nil {
+	if err := link.EthtoolTXOff(ifaceName); err != nil {
 		log.Log.Reason(err).Errorf("Failed to set tx offload for interface %s off", ifaceName)
 		return err
 	}
@@ -471,12 +441,13 @@ func (h *NetworkUtilsHandler) DisableTXOffloadChecksum(ifaceName string) error {
 }
 
 // Allow mocking for tests
-var DHCPServer = dhcp.SingleClientDHCPServer
-var DHCPv6Server = dhcpv6.SingleClientDHCPv6Server
+var DHCPServer = dhcpserver.SingleClientDHCPServer
+var DHCPv6Server = dhcpserverv6.SingleClientDHCPv6Server
 
 // filter out irrelevant routes
-func FilterPodNetworkRoutes(routes []netlink.Route, nic *cache.DhcpConfig) (filteredRoutes []netlink.Route) {
+func FilterPodNetworkRoutes(routes []netlink.Route, nic *cache.DHCPConfig) (filteredRoutes []netlink.Route) {
 	for _, route := range routes {
+		log.Log.V(5).Infof("route: %s", route.String())
 		// don't create empty static routes
 		if route.Dst == nil && route.Src.Equal(nil) && route.Gw.Equal(nil) {
 			continue

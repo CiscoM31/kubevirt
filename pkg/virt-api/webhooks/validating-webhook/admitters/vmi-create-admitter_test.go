@@ -25,6 +25,8 @@ import (
 	"strconv"
 	"strings"
 
+	"kubevirt.io/kubevirt/tools/vms-generator/utils"
+
 	"kubevirt.io/kubevirt/pkg/virt-operator/resource/generate/rbac"
 
 	. "github.com/onsi/ginkgo"
@@ -176,7 +178,7 @@ var _ = Describe("Validating VMICreate Admitter", func() {
 	})
 
 	Context("with probes given", func() {
-		It("should reject probes with not probe action configured", func() {
+		It("should reject probes with no probe action configured", func() {
 			vmi := v1.NewMinimalVMI("testvmi")
 			vmi.Spec.ReadinessProbe = &v1.Probe{InitialDelaySeconds: 2}
 			vmi.Spec.LivenessProbe = &v1.Probe{InitialDelaySeconds: 2}
@@ -195,15 +197,17 @@ var _ = Describe("Validating VMICreate Admitter", func() {
 			}
 			resp := vmiCreateAdmitter.Admit(ar)
 			Expect(resp.Allowed).To(BeFalse())
-			Expect(resp.Result.Message).To(Equal(`either spec.readinessProbe.tcpSocket or spec.readinessProbe.httpGet must be set if a spec.readinessProbe is specified, either spec.livenessProbe.tcpSocket or spec.livenessProbe.httpGet must be set if a spec.livenessProbe is specified`))
+			Expect(resp.Result.Message).To(Equal(`either spec.readinessProbe.tcpSocket, spec.readinessProbe.exec or spec.readinessProbe.httpGet must be set if a spec.readinessProbe is specified, either spec.livenessProbe.tcpSocket, spec.livenessProbe.exec or spec.livenessProbe.httpGet must be set if a spec.livenessProbe is specified`))
 		})
 		It("should reject probes with more than one action per probe configured", func() {
 			vmi := v1.NewMinimalVMI("testvmi")
 			vmi.Spec.ReadinessProbe = &v1.Probe{
 				InitialDelaySeconds: 2,
 				Handler: v1.Handler{
-					HTTPGet:   &k8sv1.HTTPGetAction{Host: "test", Port: intstr.Parse("80")},
-					TCPSocket: &k8sv1.TCPSocketAction{Host: "lal", Port: intstr.Parse("80")},
+					HTTPGet:        &k8sv1.HTTPGetAction{Host: "test", Port: intstr.Parse("80")},
+					TCPSocket:      &k8sv1.TCPSocketAction{Host: "lal", Port: intstr.Parse("80")},
+					Exec:           &k8sv1.ExecAction{Command: []string{"uname", "-a"}},
+					GuestAgentPing: &v1.GuestAgentPing{},
 				},
 			}
 			vmi.Spec.LivenessProbe = &v1.Probe{
@@ -211,6 +215,7 @@ var _ = Describe("Validating VMICreate Admitter", func() {
 				Handler: v1.Handler{
 					HTTPGet:   &k8sv1.HTTPGetAction{Host: "test", Port: intstr.Parse("80")},
 					TCPSocket: &k8sv1.TCPSocketAction{Host: "lal", Port: intstr.Parse("80")},
+					Exec:      &k8sv1.ExecAction{Command: []string{"uname", "-a"}},
 				},
 			}
 			vmi.Spec.Domain.Devices.Interfaces = []v1.Interface{*v1.DefaultBridgeNetworkInterface()}
@@ -260,7 +265,7 @@ var _ = Describe("Validating VMICreate Admitter", func() {
 			resp := vmiCreateAdmitter.Admit(ar)
 			Expect(resp.Allowed).To(BeTrue())
 		})
-		It("should reject properly configured readiness and liveness probes if no Pod Network is present", func() {
+		It("should reject properly configured network-based readiness and liveness probes if no Pod Network is present", func() {
 			vmi := v1.NewMinimalVMI("testvmi")
 			vmi.Spec.ReadinessProbe = &v1.Probe{
 				InitialDelaySeconds: 2,
@@ -287,7 +292,7 @@ var _ = Describe("Validating VMICreate Admitter", func() {
 			}
 			resp := vmiCreateAdmitter.Admit(ar)
 			Expect(resp.Allowed).To(BeFalse())
-			Expect(resp.Result.Message).To(Equal(`spec.livenessProbe is only allowed if the Pod Network is attached, spec.readinessProbe is only allowed if the Pod Network is attached`))
+			Expect(resp.Result.Message).To(Equal(`spec.readinessProbe.tcpSocket is only allowed if the Pod Network is attached, spec.livenessProbe.httpGet is only allowed if the Pod Network is attached`))
 		})
 	})
 
@@ -299,7 +304,7 @@ var _ = Describe("Validating VMICreate Admitter", func() {
 		vmi.Spec.Volumes = append(vmi.Spec.Volumes, v1.Volume{
 			Name: "testdisk",
 			VolumeSource: v1.VolumeSource{
-				ContainerDisk: &v1.ContainerDiskSource{},
+				ContainerDisk: testutils.NewFakeContainerDiskSource(),
 			},
 		})
 		vmiBytes, _ := json.Marshal(&vmi)
@@ -451,11 +456,11 @@ var _ = Describe("Validating VMICreate Admitter", func() {
 		It("should accept valid machine type", func() {
 			vmi := v1.NewMinimalVMI("testvmi")
 			if webhooks.IsPPC64() {
-				vmi.Spec.Domain.Machine.Type = "pseries"
+				vmi.Spec.Domain.Machine = &v1.Machine{Type: "pseries"}
 			} else if webhooks.IsARM64() {
-				vmi.Spec.Domain.Machine.Type = "virt"
+				vmi.Spec.Domain.Machine = &v1.Machine{Type: "virt"}
 			} else {
-				vmi.Spec.Domain.Machine.Type = "q35"
+				vmi.Spec.Domain.Machine = &v1.Machine{Type: "q35"}
 			}
 
 			causes := ValidateVirtualMachineInstanceSpec(k8sfield.NewPath("fake"), &vmi.Spec, config)
@@ -463,7 +468,7 @@ var _ = Describe("Validating VMICreate Admitter", func() {
 		})
 		It("should reject invalid machine type", func() {
 			vmi := v1.NewMinimalVMI("testvmi")
-			vmi.Spec.Domain.Machine.Type = "test"
+			vmi.Spec.Domain.Machine = &v1.Machine{Type: "test"}
 
 			causes := ValidateVirtualMachineInstanceSpec(k8sfield.NewPath("fake"), &vmi.Spec, config)
 			Expect(len(causes)).To(Equal(1))
@@ -515,7 +520,7 @@ var _ = Describe("Validating VMICreate Admitter", func() {
 				vmi.Spec.Volumes = append(vmi.Spec.Volumes, v1.Volume{
 					Name: diskName,
 					VolumeSource: v1.VolumeSource{
-						ContainerDisk: &v1.ContainerDiskSource{},
+						ContainerDisk: testutils.NewFakeContainerDiskSource(),
 					},
 				})
 			}
@@ -547,7 +552,7 @@ var _ = Describe("Validating VMICreate Admitter", func() {
 				vmi.Spec.Volumes = append(vmi.Spec.Volumes, v1.Volume{
 					Name: volumeName,
 					VolumeSource: v1.VolumeSource{
-						ContainerDisk: &v1.ContainerDiskSource{},
+						ContainerDisk: testutils.NewFakeContainerDiskSource(),
 					},
 				})
 			}
@@ -597,7 +602,7 @@ var _ = Describe("Validating VMICreate Admitter", func() {
 			vmi.Spec.Volumes = append(vmi.Spec.Volumes, v1.Volume{
 				Name: "testdisk",
 				VolumeSource: v1.VolumeSource{
-					ContainerDisk: &v1.ContainerDiskSource{},
+					ContainerDisk: testutils.NewFakeContainerDiskSource(),
 				},
 			})
 			causes := ValidateVirtualMachineInstanceSpec(k8sfield.NewPath("fake"), &vmi.Spec, config)
@@ -939,7 +944,7 @@ var _ = Describe("Validating VMICreate Admitter", func() {
 				&v1.Volume{
 					Name: "testdisk",
 					VolumeSource: v1.VolumeSource{
-						ContainerDisk: &v1.ContainerDiskSource{},
+						ContainerDisk: testutils.NewFakeContainerDiskSource(),
 					},
 				}, 1),
 			table.Entry("and accept PVC sources",
@@ -1007,25 +1012,6 @@ var _ = Describe("Validating VMICreate Admitter", func() {
 			Expect(causes[0].Message).To(Equal(fmt.Sprintf("fake.networks "+
 				"list exceeds the %d element limit in length", arrayLenMax)))
 		})
-		It("should reject volume lists greater than max element length", func() {
-			vmi := v1.NewMinimalVMI("testvmi")
-
-			for i := 0; i <= arrayLenMax; i++ {
-				volumeName := "testVolume"
-				vmi.Spec.Volumes = append(vmi.Spec.Volumes, v1.Volume{
-					Name: volumeName,
-					VolumeSource: v1.VolumeSource{
-						ContainerDisk: &v1.ContainerDiskSource{},
-					},
-				})
-			}
-
-			causes := ValidateVirtualMachineInstanceSpec(k8sfield.NewPath("fake"), &vmi.Spec, config)
-			// if this is processed correctly, it should result in a single error
-			// If multiple causes occurred, then the spec was processed too far.
-			Expect(len(causes)).To(Equal(1))
-			Expect(causes[0].Field).To(Equal("fake.volumes"))
-		})
 		It("should reject disks with the same boot order", func() {
 			vmi := v1.NewMinimalVMI("testvmi")
 			order := uint(1)
@@ -1037,9 +1023,9 @@ var _ = Describe("Validating VMICreate Admitter", func() {
 
 			vmi.Spec.Volumes = append(vmi.Spec.Volumes, []v1.Volume{
 				{Name: "testvolume1", VolumeSource: v1.VolumeSource{
-					ContainerDisk: &v1.ContainerDiskSource{}}},
+					ContainerDisk: testutils.NewFakeContainerDiskSource()}},
 				{Name: "testvolume2", VolumeSource: v1.VolumeSource{
-					ContainerDisk: &v1.ContainerDiskSource{}}}}...)
+					ContainerDisk: testutils.NewFakeContainerDiskSource()}}}...)
 
 			causes := ValidateVirtualMachineInstanceSpec(k8sfield.NewPath("fake"), &vmi.Spec, config)
 			Expect(len(causes)).To(Equal(1))
@@ -1464,6 +1450,28 @@ var _ = Describe("Validating VMICreate Admitter", func() {
 			causes := ValidateVirtualMachineInstanceSpec(k8sfield.NewPath("fake"), &vm.Spec, config)
 			Expect(len(causes)).To(Equal(1))
 			Expect(causes[0].Field).To(Equal("fake.domain.devices.interfaces[0].name"))
+		})
+		It("should reject a masquerade interface with a specified MAC address which is reserved by the BindMechanism", func() {
+			vmi := v1.NewMinimalVMI("testvm")
+			vmi.Spec.Domain.Devices.Interfaces = []v1.Interface{{
+				Name: "default",
+				InterfaceBindingMethod: v1.InterfaceBindingMethod{
+					Masquerade: &v1.InterfaceMasquerade{},
+				},
+				MacAddress: "02:00:00:00:00:00",
+			}}
+
+			vmi.Spec.Networks = []v1.Network{
+				{
+					Name:          "default",
+					NetworkSource: v1.NetworkSource{Pod: &v1.PodNetwork{}},
+				},
+			}
+
+			causes := ValidateVirtualMachineInstanceSpec(k8sfield.NewPath("fake"), &vmi.Spec, config)
+			Expect(len(causes)).To(Equal(1))
+			Expect(causes[0].Message).To(Equal("The requested MAC address is reserved for the in-pod bridge. Please choose another one."))
+			Expect(causes[0].Field).To(Equal("fake.domain.devices.interfaces[0].macAddress"))
 		})
 		It("should accept a bridge interface on a pod network when it is permitted", func() {
 			vm := v1.NewMinimalVMI("testvm")
@@ -1961,31 +1969,6 @@ var _ = Describe("Validating VMICreate Admitter", func() {
 			causes := ValidateVirtualMachineInstanceSpec(k8sfield.NewPath("fake"), &vmi.Spec, config)
 			Expect(len(causes)).To(Equal(0))
 		})
-
-		It("should reject GPU devices that are not permitted in the hostdev config", func() {
-			kvConfig := kv.DeepCopy()
-			kvConfig.Spec.Configuration.DeveloperConfiguration.FeatureGates = []string{virtconfig.GPUGate}
-			kvConfig.Spec.Configuration.PermittedHostDevices = &v1.PermittedHostDevices{
-				PciHostDevices: []v1.PciHostDevice{
-					{
-						PCIVendorSelector: "DEAD:BEEF",
-						ResourceName:      "example.org/deadbeef",
-					},
-				},
-			}
-			testutils.UpdateFakeKubeVirtClusterConfig(kvInformer, kvConfig)
-
-			vmi := v1.NewMinimalVMI("testvm")
-			vmi.Spec.Domain.Devices.GPUs = []v1.GPU{
-				{
-					Name:       "gpu1",
-					DeviceName: "example.org/deadbeef1",
-				},
-			}
-			causes := ValidateVirtualMachineInstanceSpec(k8sfield.NewPath("fake"), &vmi.Spec, config)
-			Expect(len(causes)).To(Equal(1))
-			Expect(causes[0].Field).To(Equal("fake.GPUs"))
-		})
 		It("should accept legacy GPU devices if PermittedHostDevices aren't set", func() {
 			kvConfig := kv.DeepCopy()
 			kvConfig.Spec.Configuration.DeveloperConfiguration.FeatureGates = []string{virtconfig.GPUGate}
@@ -2037,7 +2020,7 @@ var _ = Describe("Validating VMICreate Admitter", func() {
 			Expect(len(causes)).To(Equal(1))
 			Expect(causes[0].Field).To(Equal("fake.HostDevices"))
 		})
-		It("should reject host devices that are not permitted in the hostdev config", func() {
+		It("should accept host devices that are not permitted in the hostdev config", func() {
 			kvConfig := kv.DeepCopy()
 			kvConfig.Spec.Configuration.DeveloperConfiguration.FeatureGates = []string{virtconfig.HostDevicesGate}
 			kvConfig.Spec.Configuration.PermittedHostDevices = &v1.PermittedHostDevices{
@@ -2057,8 +2040,7 @@ var _ = Describe("Validating VMICreate Admitter", func() {
 				},
 			}
 			causes := ValidateVirtualMachineInstanceSpec(k8sfield.NewPath("fake"), &vmi.Spec, config)
-			Expect(len(causes)).To(Equal(1))
-			Expect(causes[0].Field).To(Equal("fake.HostDevices"))
+			Expect(len(causes)).To(Equal(0))
 		})
 		It("should accept permitted host devices", func() {
 			kvConfig := kv.DeepCopy()
@@ -2132,7 +2114,7 @@ var _ = Describe("Validating VMICreate Admitter", func() {
 			}, 1, []string{"must not have more than 6 search paths"}),
 			table.Entry("with DNSPolicy None and search domain exceeding max length", k8sv1.DNSNone, &k8sv1.PodDNSConfig{
 				Nameservers: []string{"1.2.3.4"},
-				Searches:    []string{strings.Repeat("a", maxDNSSearchListChars/2), strings.Repeat("b", (maxDNSSearchListChars / 2))},
+				Searches:    []string{strings.Repeat("a", maxDNSSearchListChars/2), strings.Repeat("b", maxDNSSearchListChars/2)},
 			}, 1, []string{fmt.Sprintf("must not have more than %v characters (including spaces) in the search list", maxDNSSearchListChars)}),
 			table.Entry("with DNSPolicy None and bad IsDNS1123Subdomain", k8sv1.DNSNone, &k8sv1.PodDNSConfig{
 				Nameservers: []string{"1.2.3.4"},
@@ -2191,12 +2173,108 @@ var _ = Describe("Validating VMICreate Admitter", func() {
 			Expect(causes[0].Field).To(Equal("fake.startStrategy"))
 			Expect(causes[0].Message).To(Equal("either fake.startStrategy or fake.livenessProbe should be provided.Pausing VMI with LivenessProbe is not supported"))
 		})
+		Context("with kernel boot defined", func() {
+
+			const (
+				fakeKernelArgs = "args"
+				fakeImage      = "image"
+				fakeInitrd     = "initrd"
+				fakeKernel     = "kernel"
+			)
+
+			table.DescribeTable("", func(kernelArgs, initrdPath, kernelPath, image string, defineContainerNil bool, shouldBeValid bool) {
+				vmi := utils.GetVMIKernelBoot()
+
+				kb := vmi.Spec.Domain.Firmware.KernelBoot
+
+				if defineContainerNil {
+					kb.Container = nil
+				} else {
+					kb.KernelArgs = kernelArgs
+					kb.Container.KernelPath = kernelPath
+					kb.Container.InitrdPath = initrdPath
+					kb.Container.Image = image
+				}
+
+				kernelBootField := k8sfield.NewPath("spec").Child("domain").Child("firmware").Child("kernelBoot")
+				causes := validateKernelBoot(kernelBootField, kb)
+
+				if shouldBeValid {
+					Expect(causes).To(BeEmpty())
+				} else {
+					Expect(causes).ToNot(BeEmpty())
+				}
+			},
+				table.Entry("without kernel args and null container - should approve",
+					"", "", "", "", true, true),
+				table.Entry("with kernel args and null container - should approve",
+					fakeKernelArgs, "", "", "", true, true),
+				table.Entry("without kernel args, with container that has image & kernel & initrd defined - should approve",
+					"", fakeInitrd, fakeKernel, fakeImage, false, true),
+				table.Entry("with kernel args, with container that has image & kernel & initrd defined - should approve",
+					fakeKernelArgs, fakeInitrd, fakeKernel, fakeImage, false, true),
+				table.Entry("with kernel args, with container that has image & kernel defined - should approve",
+					fakeKernelArgs, "", fakeKernel, fakeImage, false, true),
+				table.Entry("with kernel args, with container that has image & initrd defined - should approve",
+					fakeKernelArgs, fakeInitrd, "", fakeImage, false, true),
+				table.Entry("with kernel args, with container that has only image defined - should reject",
+					fakeKernelArgs, "", "", fakeImage, false, false),
+				table.Entry("with kernel args, with container that has initrd and kernel defined but without image - should reject",
+					fakeKernelArgs, fakeInitrd, fakeKernel, "", false, false),
+				table.Entry("with kernel args, with container that has nothing defined", "", "", "", "", false, false),
+			)
+		})
 	})
+
 	Context("with cpu pinning", func() {
 		var vmi *v1.VirtualMachineInstance
 		BeforeEach(func() {
 			vmi = v1.NewMinimalVMI("testvmi")
 			vmi.Spec.Domain.CPU = &v1.CPU{DedicatedCPUPlacement: true}
+			enableFeatureGate(virtconfig.NUMAFeatureGate)
+		})
+		It("should reject NUMA passthrough without DedicatedCPUPlacement without the NUMA feature gate", func() {
+			disableFeatureGates()
+			vmi.Spec.Domain.Memory = &v1.Memory{Hugepages: &v1.Hugepages{PageSize: "2Mi"}}
+			vmi.Spec.Domain.CPU.Cores = 4
+			vmi.Spec.Domain.CPU.NUMA = &v1.NUMA{GuestMappingPassthrough: &v1.NUMAGuestMappingPassthrough{}}
+			causes := ValidateVirtualMachineInstanceSpec(k8sfield.NewPath("fake"), &vmi.Spec, config)
+			Expect(causes).To(HaveLen(1))
+			Expect(causes[0].Field).To(Equal("fake.domain.cpu.numa.guestMappingPassthrough"))
+			Expect(causes[0].Message).To(ContainSubstring("NUMA feature gate"))
+		})
+		It("should reject NUMA passthrough without DedicatedCPUPlacement", func() {
+			vmi.Spec.Domain.CPU.NUMA = &v1.NUMA{GuestMappingPassthrough: &v1.NUMAGuestMappingPassthrough{}}
+			vmi.Spec.Domain.CPU.DedicatedCPUPlacement = false
+			vmi.Spec.Domain.Memory = &v1.Memory{Hugepages: &v1.Hugepages{PageSize: "2Mi"}}
+			causes := ValidateVirtualMachineInstanceSpec(k8sfield.NewPath("fake"), &vmi.Spec, config)
+			Expect(causes).To(HaveLen(1))
+			Expect(causes[0].Field).To(Equal("fake.domain.cpu.numa.guestMappingPassthrough"))
+		})
+		table.DescribeTable("should reject NUMA passthrough without hugepages", func(memory *v1.Memory) {
+			vmi.Spec.Domain.CPU.NUMA = &v1.NUMA{GuestMappingPassthrough: &v1.NUMAGuestMappingPassthrough{}}
+			vmi.Spec.Domain.CPU.Cores = 4
+			vmi.Spec.Domain.Resources.Limits = k8sv1.ResourceList{
+				k8sv1.ResourceCPU: resource.MustParse("4"),
+			}
+			vmi.Spec.Domain.CPU.DedicatedCPUPlacement = true
+			vmi.Spec.Domain.Memory = memory
+			causes := ValidateVirtualMachineInstanceSpec(k8sfield.NewPath("fake"), &vmi.Spec, config)
+			Expect(causes).To(HaveLen(1))
+			Expect(causes[0].Field).To(Equal("fake.domain.cpu.numa.guestMappingPassthrough"))
+		},
+			table.Entry("with no memory element", nil),
+			table.Entry("with no hugepages element", &v1.Memory{Hugepages: nil}),
+		)
+		It("should accept NUMA passthrough with DedicatedCPUPlacement", func() {
+			vmi.Spec.Domain.Memory = &v1.Memory{Hugepages: &v1.Hugepages{PageSize: "2Mi"}}
+			vmi.Spec.Domain.CPU.Cores = 4
+			vmi.Spec.Domain.CPU.NUMA = &v1.NUMA{GuestMappingPassthrough: &v1.NUMAGuestMappingPassthrough{}}
+			vmi.Spec.Domain.Resources.Limits = k8sv1.ResourceList{
+				k8sv1.ResourceCPU: resource.MustParse("4"),
+			}
+			causes := ValidateVirtualMachineInstanceSpec(k8sfield.NewPath("fake"), &vmi.Spec, config)
+			Expect(causes).To(BeEmpty())
 		})
 		It("should reject specs without cpu reqirements", func() {
 			causes := ValidateVirtualMachineInstanceSpec(k8sfield.NewPath("fake"), &vmi.Spec, config)
@@ -2440,8 +2518,6 @@ var _ = Describe("Validating VMICreate Admitter", func() {
 				},
 			}
 			causes := ValidateVirtualMachineInstanceSpec(k8sfield.NewPath("fake"), &vmi.Spec, config)
-
-			fmt.Printf("%v\n", causes)
 
 			Expect(len(causes)).To(Equal(1))
 		})
@@ -3038,6 +3114,56 @@ var _ = Describe("Validating VMICreate Admitter", func() {
 	})
 
 	Context("with volume", func() {
+		It("should accept a single downwardmetrics volume", func() {
+			enableFeatureGate(virtconfig.DownwardMetricsFeatureGate)
+			vmi := v1.NewMinimalVMI("testvmi")
+
+			vmi.Spec.Volumes = append(vmi.Spec.Volumes, v1.Volume{
+				Name: "testDownwardMetrics",
+				VolumeSource: v1.VolumeSource{
+					DownwardMetrics: &v1.DownwardMetricsVolumeSource{},
+				},
+			})
+
+			causes := validateVolumes(k8sfield.NewPath("fake"), vmi.Spec.Volumes, config)
+			Expect(causes).To(BeEmpty())
+		})
+		It("should reject downwardMetrics volumes if the feature gate is not enabled", func() {
+			vmi := v1.NewMinimalVMI("testvmi")
+
+			vmi.Spec.Volumes = append(vmi.Spec.Volumes, v1.Volume{
+				Name: "testDownwardMetrics",
+				VolumeSource: v1.VolumeSource{
+					DownwardMetrics: &v1.DownwardMetricsVolumeSource{},
+				},
+			})
+
+			causes := validateVolumes(k8sfield.NewPath("fake"), vmi.Spec.Volumes, config)
+			Expect(causes).To(HaveLen(1))
+			Expect(causes[0].Message).To(ContainSubstring("downwardMetrics disks are not allowed: DownwardMetrics feature gate is not enabled."))
+		})
+		It("should reject downwardMetrics volumes if more than one exist", func() {
+			enableFeatureGate(virtconfig.DownwardMetricsFeatureGate)
+			vmi := v1.NewMinimalVMI("testvmi")
+
+			vmi.Spec.Volumes = append(vmi.Spec.Volumes,
+				v1.Volume{
+					Name: "testDownwardMetrics",
+					VolumeSource: v1.VolumeSource{
+						DownwardMetrics: &v1.DownwardMetricsVolumeSource{},
+					},
+				},
+				v1.Volume{
+					Name: "testDownwardMetrics1",
+					VolumeSource: v1.VolumeSource{
+						DownwardMetrics: &v1.DownwardMetricsVolumeSource{},
+					},
+				},
+			)
+			causes := validateVolumes(k8sfield.NewPath("fake"), vmi.Spec.Volumes, config)
+			Expect(causes).To(HaveLen(1))
+			Expect(causes[0].Message).To(ContainSubstring("fake must have max one downwardMetric volume set"))
+		})
 		It("should reject hostDisk volumes if the feature gate is not enabled", func() {
 			vmi := v1.NewMinimalVMI("testvmi")
 
@@ -3474,7 +3600,7 @@ var _ = Describe("Function getNumberOfPodInterfaces()", func() {
 		volume := v1.Volume{
 			Name: "testdisk",
 			VolumeSource: v1.VolumeSource{
-				ContainerDisk: &v1.ContainerDiskSource{},
+				ContainerDisk: testutils.NewFakeContainerDiskSource(),
 			},
 		}
 
@@ -3507,7 +3633,7 @@ var _ = Describe("Function getNumberOfPodInterfaces()", func() {
 		volume := v1.Volume{
 			Name: "testdisk",
 			VolumeSource: v1.VolumeSource{
-				ContainerDisk: &v1.ContainerDiskSource{},
+				ContainerDisk: testutils.NewFakeContainerDiskSource(),
 			},
 		}
 		spec.Volumes = []v1.Volume{volume}
@@ -3585,7 +3711,7 @@ var _ = Describe("Function getNumberOfPodInterfaces()", func() {
 		Expect(len(causes)).To(Equal(0))
 	})
 
-	It("Should validate VMIs with hyperv EVMCS configuration without deps", func() {
+	It("Should validate VMIs with hyperv EVMCS configuration without deps and detect multiple issues", func() {
 		_true := true
 		vmi := v1.NewMinimalVMI("testvmi")
 		vmi.Spec.Domain.Features = &v1.Features{

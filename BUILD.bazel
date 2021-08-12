@@ -74,7 +74,8 @@ nogo(
         "@org_golang_x_tools//go/analysis/passes/structtag:go_tool_library",
         "@org_golang_x_tools//go/analysis/passes/tests:go_tool_library",
         "@org_golang_x_tools//go/analysis/passes/unreachable:go_tool_library",
-        "@org_golang_x_tools//go/analysis/passes/unsafeptr:go_tool_library",
+        # FIXME: Nogo fails analysis although configured to be disabled on nogo_config.json.
+        # "@org_golang_x_tools//go/analysis/passes/unsafeptr:go_tool_library",
         "@org_golang_x_tools//go/analysis/passes/unusedresult:go_tool_library",
     ],
 )
@@ -157,12 +158,10 @@ load(
 container_image(
     name = "passwd-image",
     architecture = select({
-        "@io_bazel_rules_go//go/platform:linux_ppc64le": "ppc64le",
         "@io_bazel_rules_go//go/platform:linux_arm64": "arm64",
         "//conditions:default": "amd64",
     }),
     base = select({
-        "@io_bazel_rules_go//go/platform:linux_ppc64le": "@go_image_base_ppc64le//image",
         "@io_bazel_rules_go//go/platform:linux_arm64": "@go_image_base_aarch64//image",
         "//conditions:default": "@go_image_base//image",
     }),
@@ -192,11 +191,11 @@ container_bundle(
         "$(container_prefix)/$(image_prefix)alpine-container-disk-demo:$(container_tag)": "//containerimages:alpine-container-disk-image",
         "$(container_prefix)/$(image_prefix)cirros-container-disk-demo:$(container_tag)": "//containerimages:cirros-container-disk-image",
         "$(container_prefix)/$(image_prefix)cirros-custom-container-disk-demo:$(container_tag)": "//containerimages:cirros-custom-container-disk-image",
-        "$(container_prefix)/$(image_prefix)fedora-cloud-container-disk-demo:$(container_tag)": "//containerimages:fedora-cloud-container-disk-image",
         "$(container_prefix)/$(image_prefix)microlivecd-container-disk-demo:$(container_tag)": "//containerimages:microlivecd-container-disk-image",
         "$(container_prefix)/$(image_prefix)virtio-container-disk:$(container_tag)": "//containerimages:virtio-container-disk-image",
+        # Kernel boot container
+        "$(container_prefix)/$(image_prefix)alpine-ext-kernel-boot-demo:$(container_tag)": "//containerimages:alpine-ext-kernel-boot-demo-container",
         # Customized container-disk images
-        "$(container_prefix)/$(image_prefix)fedora-sriov-lane-container-disk:$(container_tag)": "//containerimages:fedora-sriov-lane-container-disk-image",
         "$(container_prefix)/$(image_prefix)fedora-with-test-tooling-container-disk:$(container_tag)": "//containerimages:fedora-with-test-tooling",
         # testing images
         "$(container_prefix)/$(image_prefix)disks-images-provider:$(container_tag)": "//images/disks-images-provider:disks-images-provider-image",
@@ -204,6 +203,18 @@ container_bundle(
         "$(container_prefix)/$(image_prefix)nfs-server:$(container_tag)": "//images/nfs-server:nfs-server-image",
         "$(container_prefix)/$(image_prefix)vm-killer:$(container_tag)": "//images/vm-killer:vm-killer-image",
         "$(container_prefix)/$(image_prefix)winrmcli:$(container_tag)": "//images/winrmcli:winrmcli-image",
+    },
+)
+
+# This is for generating a bundle of the core components for external processing
+container_bundle(
+    name = "virt-components-bundle",
+    images = {
+        "$(container_prefix)/$(image_prefix)virt-api:$(container_tag)": "//cmd/virt-api:virt-api-image",
+        "$(container_prefix)/$(image_prefix)virt-controller:$(container_tag)": "//cmd/virt-controller:virt-controller-image",
+        "$(container_prefix)/$(image_prefix)virt-handler:$(container_tag)": "//cmd/virt-handler:virt-handler-image",
+        "$(container_prefix)/$(image_prefix)virt-launcher:$(container_tag)": "//cmd/virt-launcher:virt-launcher-image",
+        "$(container_prefix)/$(image_prefix)virt-operator:$(container_tag)": "//cmd/virt-operator:virt-operator-image",
     },
 )
 
@@ -271,6 +282,15 @@ container_push(
     tag = "$(container_tag)",
 )
 
+container_push(
+    name = "push-libguestfs",
+    format = "Docker",
+    image = "//cmd/libguestfs:libguestfs-tools-image",
+    registry = "$(container_prefix)",
+    repository = "$(image_prefix)libguestfs-tools",
+    tag = "$(container_tag)",
+)
+
 genrule(
     name = "build-virtctl",
     srcs = [
@@ -327,6 +347,16 @@ genrule(
         "//tools/manifest-templator:templator",
     ],
     outs = ["manifest-templator-copier"],
+    cmd = "echo '#!/bin/sh\n\ncp -f $(SRCS) $$1' > \"$@\"",
+    executable = 1,
+)
+
+genrule(
+    name = "build-perfscale-audit",
+    srcs = [
+        "//tools/perfscale-audit",
+    ],
+    outs = ["perfscale-audit-copier"],
     cmd = "echo '#!/bin/sh\n\ncp -f $(SRCS) $$1' > \"$@\"",
     executable = 1,
 )

@@ -67,8 +67,10 @@ var _ = Describe("CloudInit", func() {
 	}
 
 	BeforeEach(func() {
-		tmpDir, _ = ioutil.TempDir("", "cloudinittest")
-		err := SetLocalDirectory(tmpDir)
+		var err error
+		tmpDir, err = ioutil.TempDir("", "cloudinittest")
+		Expect(err).ToNot(HaveOccurred())
+		err = SetLocalDirectory(tmpDir)
 		if err != nil {
 			panic(err)
 		}
@@ -516,5 +518,17 @@ var _ = Describe("CloudInit", func() {
 			Expect(err).NotTo(HaveOccurred())
 		})
 
+	})
+
+	Describe("PrepareLocalPath", func() {
+		It("should create the correct directory structure", func() {
+			namespace := "fake-namespace"
+			domain := "fake-domain"
+			expectedPath := filepath.Join(tmpDir, namespace, domain)
+			err := PrepareLocalPath(domain, namespace)
+			Expect(err).ToNot(HaveOccurred())
+			_, err = os.Stat(expectedPath)
+			Expect(err).ToNot(HaveOccurred())
+		})
 	})
 })

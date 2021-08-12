@@ -7,7 +7,7 @@ aliases:
       - rmohr
       - stu-gott
       - fabiand
-      - codificat
+      - mazzystr
       - danielBelenky
       - AlonaKaplan
       - dhiller
@@ -20,6 +20,7 @@ aliases:
       - slintes
       - mfranczy
       - SchSeba
+      - codificat
   code-reviewers:
       - davidvossel
       - rmohr
@@ -37,6 +38,8 @@ aliases:
       - maiqueb
       - EdDev
       - yuhaohaoyu
+      - acardace
+      - zcahana
   ux-reviewers:
       - matthewcarleton
   test-reviewers:

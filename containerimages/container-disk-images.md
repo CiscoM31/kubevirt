@@ -47,7 +47,7 @@ We can do that with `virt-sysprep`:
 Once the image is ready it is necessary to convert it to   
 container image with `kubevirt/container-disk-v1alpha` layer, 
 so KubeVirt VM's can consume it according to  
-https://github.com/kubevirt/kubevirt/blob/master/docs/container-register-disks.md
+https://github.com/kubevirt/kubevirt/blob/main/docs/container-register-disks.md
 
 ```bash
 cat > Dockerfile <<EOF
@@ -88,11 +88,11 @@ Next we need to add `contaier_image` rule for the new image to `containerdisks/B
 container_image(
     name = "fedora-sriov-lane-container-disk-image",
     architecture = select({
-        "@io_bazel_rules_go//go/platform:linux_ppc64le": "ppc64le",
+        "@io_bazel_rules_go//go/platform:linux_arm64": "arm64",
         "//conditions:default": "amd64",
     }),
     base = select({
-        "@io_bazel_rules_go//go/platform:linux_ppc64le": "@fedora_sriov_lane_ppc64le//image",
+        "@io_bazel_rules_go//go/platform:linux_arm64": "@fedora_sriov_lane_aarch64//image",
         "//conditions:default": "@fedora_sriov_lane//image",
     }),
     visibility = ["//visibility:public"],

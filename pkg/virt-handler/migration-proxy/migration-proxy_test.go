@@ -27,20 +27,28 @@ import (
 	"strings"
 
 	. "github.com/onsi/ginkgo"
+	"github.com/onsi/ginkgo/extensions/table"
 	. "github.com/onsi/gomega"
+	"k8s.io/utils/pointer"
 
+	v1 "kubevirt.io/client-go/api/v1"
 	"kubevirt.io/kubevirt/pkg/certificates"
+	ephemeraldiskutils "kubevirt.io/kubevirt/pkg/ephemeral-disk-utils"
+	"kubevirt.io/kubevirt/pkg/testutils"
 )
 
 var _ = Describe("MigrationProxy", func() {
-	tmpDir, _ := ioutil.TempDir("", "migrationproxytest")
 	var tlsConfig *tls.Config
+	var tmpDir string
 
 	BeforeEach(func() {
-
+		var err error
+		tmpDir, err = ioutil.TempDir("", "migrationproxytest")
+		Expect(err).ToNot(HaveOccurred())
 		os.MkdirAll(tmpDir, 0755)
 		store, err := certificates.GenerateSelfSignedCert(tmpDir, "test", "test")
 
+		ephemeraldiskutils.MockDefaultOwnershipManager()
 		tlsConfig = &tls.Config{
 			InsecureSkipVerify: true,
 			MinVersion:         tls.VersionTLS12,
@@ -142,7 +150,7 @@ var _ = Describe("MigrationProxy", func() {
 				Expect(num).To(Equal(sentLen))
 			})
 
-			It("by creating both ends with a manager and sending a message", func() {
+			table.DescribeTable("by creating both ends with a manager and sending a message", func(migrationConfig *v1.MigrationConfiguration) {
 				directMigrationPort := "49152"
 				libvirtdSock := tmpDir + "/libvirtd-sock"
 				libvirtdListener, err := net.Listen("unix", libvirtdSock)
@@ -152,7 +160,10 @@ var _ = Describe("MigrationProxy", func() {
 
 				Expect(err).ShouldNot(HaveOccurred())
 
-				manager := NewMigrationProxyManager(tlsConfig, tlsConfig)
+				config, _, _, _ := testutils.NewFakeClusterConfigUsingKVConfig(&v1.KubeVirtConfiguration{
+					MigrationConfiguration: migrationConfig,
+				})
+				manager := NewMigrationProxyManager(tlsConfig, tlsConfig, config)
 				manager.StartTargetListener("mykey", []string{libvirtdSock, directSock})
 				destSrcPortMap := manager.GetTargetListenerPorts("mykey")
 				manager.StartSourceListener("mykey", "127.0.0.1", destSrcPortMap, tmpDir)
@@ -197,9 +208,12 @@ var _ = Describe("MigrationProxy", func() {
 						msgWriter(sockFile, libvirtChan, "some libvirt message")
 					}
 				}
-			})
+			},
+				table.Entry("with TLS enabled", &v1.MigrationConfiguration{DisableTLS: pointer.BoolPtr(false)}),
+				table.Entry("with TLS disabled", &v1.MigrationConfiguration{DisableTLS: pointer.BoolPtr(true)}),
+			)
 
-			It("by ensuring no new listeners can be created after shutdown", func() {
+			table.DescribeTable("by ensuring no new listeners can be created after shutdown", func(migrationConfig *v1.MigrationConfiguration) {
 
 				key1 := "key1"
 				key2 := "key2"
@@ -214,8 +228,10 @@ var _ = Describe("MigrationProxy", func() {
 				defer directListener.Close()
 
 				Expect(err).ShouldNot(HaveOccurred())
-
-				manager := NewMigrationProxyManager(tlsConfig, tlsConfig)
+				config, _, _, _ := testutils.NewFakeClusterConfigUsingKVConfig(&v1.KubeVirtConfiguration{
+					MigrationConfiguration: migrationConfig,
+				})
+				manager := NewMigrationProxyManager(tlsConfig, tlsConfig, config)
 				err = manager.StartTargetListener(key1, []string{libvirtdSock, directSock})
 				Expect(err).ShouldNot(HaveOccurred())
 				destSrcPortMap := manager.GetTargetListenerPorts(key1)
@@ -238,7 +254,10 @@ var _ = Describe("MigrationProxy", func() {
 				Expect(err).Should(HaveOccurred())
 				Expect(err.Error()).To(Equal("unable to process new migration connections during virt-handler shutdown"))
 
-			})
+			},
+				table.Entry("with TLS enabled", &v1.MigrationConfiguration{DisableTLS: pointer.BoolPtr(false)}),
+				table.Entry("with TLS disabled", &v1.MigrationConfiguration{DisableTLS: pointer.BoolPtr(true)}),
+			)
 		})
 	})
 })

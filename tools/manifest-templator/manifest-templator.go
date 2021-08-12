@@ -24,7 +24,7 @@ import (
 	"encoding/base64"
 	"flag"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -64,6 +64,7 @@ type templateData struct {
 	VirtControllerSha      string
 	VirtHandlerSha         string
 	VirtLauncherSha        string
+	GsSha                  string
 	PriorityClassSpec      string
 	FeatureGates           []string
 	GeneratedManifests     map[string]string
@@ -92,6 +93,7 @@ func main() {
 	virtControllerSha := flag.String("virt-controller-sha", "", "")
 	virtHandlerSha := flag.String("virt-handler-sha", "", "")
 	virtLauncherSha := flag.String("virt-launcher-sha", "", "")
+	gsSha := flag.String("gs-sha", "", "")
 	featureGates := flag.String("feature-gates", "", "")
 
 	pflag.CommandLine.AddGoFlagSet(flag.CommandLine)
@@ -128,6 +130,7 @@ func main() {
 		data.VirtControllerSha = *virtControllerSha
 		data.VirtHandlerSha = *virtHandlerSha
 		data.VirtLauncherSha = *virtLauncherSha
+		data.GsSha = *gsSha
 		data.OperatorRules = getOperatorRules()
 		data.KubeVirtLogo = getKubeVirtLogo(*kubeVirtLogoPath)
 		data.PackageName = *packageName
@@ -186,7 +189,7 @@ func main() {
 	}
 
 	if *processFiles {
-		manifests, err := ioutil.ReadDir(*genDir)
+		manifests, err := os.ReadDir(*genDir)
 		if err != nil {
 			panic(err)
 		}
@@ -195,7 +198,7 @@ func main() {
 			if manifest.IsDir() {
 				continue
 			}
-			b, err := ioutil.ReadFile(filepath.Join(*genDir, manifest.Name()))
+			b, err := os.ReadFile(filepath.Join(*genDir, manifest.Name()))
 			if err != nil {
 				panic(err)
 			}
@@ -249,7 +252,8 @@ func getOperatorDeploymentSpec(data templateData, indentation int) string {
 		data.VirtApiSha,
 		data.VirtControllerSha,
 		data.VirtHandlerSha,
-		data.VirtLauncherSha)
+		data.VirtLauncherSha,
+		data.GsSha)
 	if err != nil {
 		panic(err)
 	}
@@ -294,7 +298,7 @@ func getKubeVirtLogo(path string) string {
 
 	// Read entire file into byte slice.
 	reader := bufio.NewReader(file)
-	content, err := ioutil.ReadAll(reader)
+	content, err := io.ReadAll(reader)
 	if err != nil {
 		panic(err)
 	}

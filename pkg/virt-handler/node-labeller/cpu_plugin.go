@@ -22,63 +22,95 @@ package nodelabeller
 import (
 	"encoding/xml"
 	"fmt"
-	"io/ioutil"
-	"path"
+	"os"
+	"path/filepath"
 	"strings"
+
+	v1 "kubevirt.io/client-go/api/v1"
+	"kubevirt.io/client-go/log"
+	"kubevirt.io/kubevirt/pkg/virt-handler/node-labeller/api"
 
 	util "kubevirt.io/kubevirt/pkg/virt-handler/node-labeller/util"
 )
 
 const (
 	isUnusable             string = "no"
+	isRequired             string = "require"
 	nodeLabellerVolumePath        = "/var/lib/kubevirt-node-labeller/"
+
+	supportedFeaturesXml = "supported_features.xml"
 )
 
-// getCPUInfo processes all cpu info data and returns
-// slice of usable cpu models and features.
-func (n *NodeLabeller) getCPUInfo() ([]string, cpuFeatures) {
+func (n *NodeLabeller) getMinCpuFeature() cpuFeatures {
 	minCPUModel := n.clusterConfig.GetMinCPUModel()
 	if minCPUModel == "" {
 		minCPUModel = util.DefaultMinCPUModel
 	}
+	return n.cpuInfo.models[minCPUModel]
+}
+
+func (n *NodeLabeller) getSupportedCpuModels() []string {
+	supportedCPUModels := make([]string, 0)
 
 	obsoleteCPUsx86 := n.clusterConfig.GetObsoleteCPUModels()
 	if obsoleteCPUsx86 == nil {
 		obsoleteCPUsx86 = util.DefaultObsoleteCPUModels
 	}
 
-	basicFeaturesMap := n.cpuInfo.models[minCPUModel]
-
-	cpus := make([]string, 0)
-	features := make(cpuFeatures)
-
 	for _, model := range n.hostCapabilities.items {
 		if _, ok := obsoleteCPUsx86[model]; ok {
 			continue
 		}
-		cpus = append(cpus, model)
+		supportedCPUModels = append(supportedCPUModels, model)
 	}
 
+	return supportedCPUModels
+}
+
+func (n *NodeLabeller) getSupportedCpuFeatures() cpuFeatures {
+	supportedCpuFeatures := make(cpuFeatures)
+	minCpuFeatures := n.getMinCpuFeature()
+
 	for _, feature := range n.supportedFeatures {
-		if _, exist := basicFeaturesMap[feature]; !exist {
-			features[feature] = true
+		if _, exist := minCpuFeatures[feature]; !exist {
+			supportedCpuFeatures[feature] = true
 		}
 	}
 
-	return cpus, features
+	return supportedCpuFeatures
 }
 
-//loadHostCapabilities loads info about cpu models, which can host emulate
-func (n *NodeLabeller) loadHostCapabilities() error {
+func (n *NodeLabeller) getHostCpuModel() hostCPUModel {
+	return n.hostCPUModel
+}
+
+//loadDomCapabilities loads info about cpu models, which can host emulate
+func (n *NodeLabeller) loadDomCapabilities() error {
 	hostDomCapabilities, err := n.getDomCapabilities()
 	if err != nil {
 		return err
 	}
 
 	usableModels := make([]string, 0)
+	minCpuFeatures := n.getMinCpuFeature()
+	log.Log.Infof("CPU features of a minimum baseline CPU model: %+v", minCpuFeatures)
 	for _, mode := range hostDomCapabilities.CPU.Mode {
-		if mode.Vendor.Name != "" {
+		if mode.Name == v1.CPUModeHostModel {
 			n.cpuModelVendor = mode.Vendor.Name
+
+			hostCpuModel := mode.Model[0]
+			if len(mode.Model) > 0 {
+				log.Log.Warning("host model mode is expected to contain only one model")
+			}
+
+			n.hostCPUModel.name = hostCpuModel.Name
+			n.hostCPUModel.fallback = hostCpuModel.Fallback
+
+			for _, feature := range mode.Feature {
+				if _, isMinCpuFeature := minCpuFeatures[feature.Name]; !isMinCpuFeature && feature.Policy == isRequired {
+					n.hostCPUModel.requiredFeatures[feature.Name] = true
+				}
+			}
 		}
 
 		for _, model := range mode.Model {
@@ -96,7 +128,7 @@ func (n *NodeLabeller) loadHostCapabilities() error {
 
 //loadHostSupportedFeatures loads supported features
 func (n *NodeLabeller) loadHostSupportedFeatures() error {
-	featuresFile := path.Join(nodeLabellerVolumePath + "supported_features.xml")
+	featuresFile := filepath.Join(n.volumePath, supportedFeaturesXml)
 
 	hostFeatures := SupportedHostFeature{}
 	err := n.getStructureFromXMLFile(featuresFile, &hostFeatures)
@@ -117,9 +149,19 @@ func (n *NodeLabeller) loadHostSupportedFeatures() error {
 	return nil
 }
 
+func (n *NodeLabeller) loadHostCapabilities() error {
+	capsFile := filepath.Join(n.volumePath, "capabilities.xml")
+	n.capabilities = &api.Capabilities{}
+	err := n.getStructureFromXMLFile(capsFile, n.capabilities)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
 //loadCPUInfo load info about all cpu models
 func (n *NodeLabeller) loadCPUInfo() error {
-	files, err := ioutil.ReadDir(path.Join(nodeLabellerVolumePath, "cpu_map"))
+	files, err := os.ReadDir(filepath.Join(n.volumePath, "cpu_map"))
 	if err != nil {
 		return err
 	}
@@ -143,7 +185,7 @@ func (n *NodeLabeller) loadCPUInfo() error {
 }
 
 func (n *NodeLabeller) getDomCapabilities() (HostDomCapabilities, error) {
-	domCapabilitiesFile := path.Join(nodeLabellerVolumePath + "virsh_domcapabilities.xml")
+	domCapabilitiesFile := filepath.Join(n.volumePath, n.domCapabilitiesFileName)
 	hostDomCapabilities := HostDomCapabilities{}
 	err := n.getStructureFromXMLFile(domCapabilitiesFile, &hostDomCapabilities)
 
@@ -156,7 +198,7 @@ func (n *NodeLabeller) loadFeatures(fileName string) (cpuFeatures, error) {
 		return nil, fmt.Errorf("file name can't be empty")
 	}
 
-	cpuFeaturepath := getPathCPUFeatures(fileName)
+	cpuFeaturepath := getPathCPUFeatures(n.volumePath, fileName)
 	features := FeatureModel{}
 	err := n.getStructureFromXMLFile(cpuFeaturepath, &features)
 	if err != nil {
@@ -171,14 +213,14 @@ func (n *NodeLabeller) loadFeatures(fileName string) (cpuFeatures, error) {
 }
 
 //getPathCPUFeatures creates path where folder with cpu models is
-func getPathCPUFeatures(name string) string {
-	return path.Join(nodeLabellerVolumePath, "cpu_map", name)
+func getPathCPUFeatures(volumePath string, name string) string {
+	return filepath.Join(volumePath, "cpu_map", name)
 }
 
 //GetStructureFromXMLFile load data from xml file and unmarshals them into given structure
 //Given structure has to be pointer
 func (n *NodeLabeller) getStructureFromXMLFile(path string, structure interface{}) error {
-	rawFile, err := ioutil.ReadFile(path)
+	rawFile, err := os.ReadFile(path)
 	if err != nil {
 		return err
 	}

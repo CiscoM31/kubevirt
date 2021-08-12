@@ -58,6 +58,13 @@ func ReplacePVCByHostDisk(vmi *v1.VirtualMachineInstance, clientset kubecli.Kube
 		passthoughFSVolumes[vmi.Spec.Domain.Devices.Filesystems[i].Name] = struct{}{}
 	}
 
+	hotplugVolumes := make(map[string]bool)
+	for _, volumeStatus := range vmi.Status.VolumeStatus {
+		if volumeStatus.HotplugVolume != nil {
+			hotplugVolumes[volumeStatus.Name] = true
+		}
+	}
+
 	for i := range vmi.Spec.Volumes {
 		volume := vmi.Spec.Volumes[i]
 		if volumeSource := &vmi.Spec.Volumes[i].VolumeSource; volumeSource.PersistentVolumeClaim != nil {
@@ -65,6 +72,11 @@ func ReplacePVCByHostDisk(vmi *v1.VirtualMachineInstance, clientset kubecli.Kube
 			// not be created.
 			if _, isPassthoughFSVolume := passthoughFSVolumes[volume.Name]; isPassthoughFSVolume {
 				log.Log.V(4).Infof("this volume %s is mapped as a filesystem passthrough, will not be replaced by HostDisk", volume.Name)
+				continue
+			}
+
+			if hotplugVolumes[volume.Name] {
+				log.Log.V(4).Infof("this volume %s is hotplugged, will not be replaced by HostDisk", volume.Name)
 				continue
 			}
 
@@ -97,13 +109,13 @@ func ReplacePVCByHostDisk(vmi *v1.VirtualMachineInstance, clientset kubecli.Kube
 	return nil
 }
 
-func dirBytesAvailable(path string) (uint64, error) {
+func dirBytesAvailable(path string, reserve uint64) (uint64, error) {
 	var stat syscall.Statfs_t
 	err := syscall.Statfs(path, &stat)
 	if err != nil {
 		return 0, err
 	}
-	return stat.Bavail * uint64(stat.Bsize), nil
+	return stat.Bavail*uint64(stat.Bsize) - reserve, nil
 }
 
 func createSparseRaw(fullPath string, size int64) (err error) {
@@ -133,20 +145,22 @@ func GetMountedHostDiskDir(volumeName string) string {
 }
 
 type DiskImgCreator struct {
-	dirBytesAvailableFunc  func(path string) (uint64, error)
+	dirBytesAvailableFunc  func(path string, reserve uint64) (uint64, error)
 	notifier               k8sNotifier
 	lessPVCSpaceToleration int
+	minimumPVCReserveBytes uint64
 }
 
 type k8sNotifier interface {
 	SendK8sEvent(vmi *v1.VirtualMachineInstance, severity string, reason string, message string) error
 }
 
-func NewHostDiskCreator(notifier k8sNotifier, lessPVCSpaceToleration int) DiskImgCreator {
+func NewHostDiskCreator(notifier k8sNotifier, lessPVCSpaceToleration int, minimumPVCReserveBytes uint64) DiskImgCreator {
 	return DiskImgCreator{
 		dirBytesAvailableFunc:  dirBytesAvailable,
 		notifier:               notifier,
 		lessPVCSpaceToleration: lessPVCSpaceToleration,
+		minimumPVCReserveBytes: minimumPVCReserveBytes,
 	}
 }
 
@@ -190,7 +204,7 @@ func (hdc *DiskImgCreator) mountHostDiskAndSetOwnership(vmi *v1.VirtualMachineIn
 }
 
 func (hdc *DiskImgCreator) handleRequestedSizeAndCreateSparseRaw(vmi *v1.VirtualMachineInstance, diskDir string, diskPath string, hostDisk *v1.HostDisk) error {
-	size, err := hdc.dirBytesAvailableFunc(diskDir)
+	size, err := hdc.dirBytesAvailableFunc(diskDir, hdc.minimumPVCReserveBytes)
 	availableSize := int64(size)
 	if err != nil {
 		return err

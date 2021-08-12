@@ -30,6 +30,7 @@ import (
 	"github.com/blang/semver"
 	promv1 "github.com/coreos/prometheus-operator/pkg/apis/monitoring/v1"
 	secv1 "github.com/openshift/api/security/v1"
+
 	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -214,15 +215,7 @@ func injectPlacementMetadata(componentConfig *v1.ComponentConfig, podSpec *corev
 }
 
 func generatePatchBytes(ops []string) []byte {
-	opsStr := "["
-	for idx, entry := range ops {
-		sep := ", "
-		if len(ops)-1 == idx {
-			sep = "]"
-		}
-		opsStr = fmt.Sprintf("%s%s%s", opsStr, entry, sep)
-	}
-	return []byte(opsStr)
+	return controller.GeneratePatchBytes(ops)
 }
 
 func createLabelsAndAnnotationsPatch(objectMeta *metav1.ObjectMeta) ([]string, error) {

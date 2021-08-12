@@ -1,7 +1,6 @@
 ARG ARCH
 FROM ${ARCH}/fedora:32
 
-COPY qemu-ppc64le-static /usr/bin/qemu-ppc64le-static
 COPY qemu-aarch64-static /usr/bin/qemu-aarch64-static
 
 ARG SONOBUOY_ARCH
@@ -49,7 +48,7 @@ RUN wget https://services.gradle.org/distributions/gradle-6.6-bin.zip && \
 ENV PATH=$PATH:/opt/gradle/gradle-6.6/bin \
     JAVA_HOME=/usr/lib/jvm/java-11
 
-ENV GIMME_GO_VERSION=1.13.14
+ENV GIMME_GO_VERSION=1.16.6
 
 RUN mkdir -p /gimme && curl -sL \
     https://raw.githubusercontent.com/travis-ci/gimme/master/gimme | \
@@ -96,7 +95,7 @@ RUN set -x && \
     rm -rf /test-infra && \
     rm -rf /go && mkdir /go
 
-RUN pip3 install --upgrade j2cli operator-courier==2.1.11
+RUN pip3 install --upgrade operator-courier==2.1.11
 
 ENV SONOBUOY_VERSION=0.19.0
 RUN set -x && \

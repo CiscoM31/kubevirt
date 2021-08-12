@@ -25,10 +25,12 @@ import (
 	"strings"
 	"time"
 
+	v1 "k8s.io/api/apps/v1"
 	k8sv1 "k8s.io/api/core/v1"
-	v1 "k8s.io/api/core/v1"
 	"k8s.io/api/policy/v1beta1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	"kubevirt.io/kubevirt/tests/util"
 
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
@@ -60,14 +62,14 @@ var _ = Describe("[Serial][ref_id:2717][sig-compute]KubeVirt control plane resil
 	Context("pod eviction", func() {
 		var nodeList []k8sv1.Node
 
-		getRunningReadyPods := func(podList *v1.PodList, podNames []string, nodeNames ...string) (pods []*v1.Pod) {
-			pods = make([]*v1.Pod, 0)
+		getRunningReadyPods := func(podList *k8sv1.PodList, podNames []string, nodeNames ...string) (pods []*k8sv1.Pod) {
+			pods = make([]*k8sv1.Pod, 0)
 			for _, pod := range podList.Items {
-				if pod.Status.Phase != v1.PodRunning {
+				if pod.Status.Phase != k8sv1.PodRunning {
 					continue
 				}
 				podReady := tests.PodReady(&pod)
-				if podReady != v1.ConditionTrue {
+				if podReady != k8sv1.ConditionTrue {
 					continue
 				}
 				for _, podName := range podNames {
@@ -89,7 +91,7 @@ var _ = Describe("[Serial][ref_id:2717][sig-compute]KubeVirt control plane resil
 			return
 		}
 
-		getPodList := func() (podList *v1.PodList, err error) {
+		getPodList := func() (podList *k8sv1.PodList, err error) {
 			podList, err = virtCli.CoreV1().Pods(flags.KubeVirtInstallNamespace).List(context.Background(), metav1.ListOptions{})
 			return
 		}
@@ -148,7 +150,7 @@ var _ = Describe("[Serial][ref_id:2717][sig-compute]KubeVirt control plane resil
 		BeforeEach(func() {
 			tests.BeforeTestCleanup()
 
-			nodeList = tests.GetAllSchedulableNodes(virtCli).Items
+			nodeList = util.GetAllSchedulableNodes(virtCli).Items
 			for _, node := range nodeList {
 				setNodeUnschedulable(node.Name)
 			}
@@ -234,10 +236,14 @@ var _ = Describe("[Serial][ref_id:2717][sig-compute]KubeVirt control plane resil
 			// virt-handler is the only component that has the tools to add blackhole routes for testing healthz. Ideally we would test all component healthz endpoints.
 			componentName := "virt-handler"
 
-			readyFunc := func() int32 {
+			getVirtHandler := func() *v1.DaemonSet {
 				daemonSet, err := virtCli.AppsV1().DaemonSets(flags.KubeVirtInstallNamespace).Get(context.Background(), componentName, metav1.GetOptions{})
-				Expect(err).NotTo(HaveOccurred())
-				return daemonSet.Status.NumberReady
+				ExpectWithOffset(1, err).NotTo(HaveOccurred())
+				return daemonSet
+			}
+
+			readyFunc := func() int32 {
+				return getVirtHandler().Status.NumberReady
 			}
 
 			blackHolePodFunc := func(addOrDel string) {
@@ -254,6 +260,8 @@ var _ = Describe("[Serial][ref_id:2717][sig-compute]KubeVirt control plane resil
 			}
 
 			It("should fail health checks when connectivity is lost, and recover when connectivity is regained", func() {
+				desiredDeamonsSetCount := getVirtHandler().Status.DesiredNumberScheduled
+
 				By("ensuring we have ready pods")
 				Eventually(readyFunc, 30*time.Second, time.Second).Should(BeNumerically(">", 0))
 
@@ -267,7 +275,7 @@ var _ = Describe("[Serial][ref_id:2717][sig-compute]KubeVirt control plane resil
 				blackHolePodFunc("del")
 
 				By("ensuring we now have a ready virt-handler daemonset")
-				Eventually(readyFunc, 30*time.Second, time.Second).Should(BeNumerically(">", 0))
+				Eventually(readyFunc, 30*time.Second, time.Second).Should(BeNumerically("==", desiredDeamonsSetCount))
 			})
 		})
 

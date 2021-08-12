@@ -161,6 +161,7 @@ func NewVirtualMachineInstanceCrd() (*extv1.CustomResourceDefinition, error) {
 		{Name: "Phase", Type: "string", JSONPath: ".status.phase"},
 		{Name: "IP", Type: "string", JSONPath: ".status.interfaces[0].ipAddress"},
 		{Name: "NodeName", Type: "string", JSONPath: ".status.nodeName"},
+		{Name: "Ready", Type: "string", JSONPath: ".status.conditions[?(@.type=='Ready')].status"},
 		{Name: "Live-Migratable", Type: "string", JSONPath: ".status.conditions[?(@.type=='LiveMigratable')].status", Priority: 1},
 		{Name: "Paused", Type: "string", JSONPath: ".status.conditions[?(@.type=='Paused')].status", Priority: 1},
 	})
@@ -195,8 +196,9 @@ func NewVirtualMachineCrd() (*extv1.CustomResourceDefinition, error) {
 	}
 	err := addFieldsToAllVersions(crd, []extv1.CustomResourceColumnDefinition{
 		{Name: "Age", Type: "date", JSONPath: creationTimestampJSONPath},
-		{Name: "Volume", Description: "Primary Volume", Type: "string", JSONPath: ".spec.volumes[0].name"},
-		{Name: "Created", Type: "boolean", JSONPath: ".status.created", Priority: 1}}, &extv1.CustomResourceSubresources{
+		{Name: "Status", Description: "Human Readable Status", Type: "string", JSONPath: ".status.printableStatus"},
+		{Name: "Ready", Type: "string", JSONPath: ".status.conditions[?(@.type=='Ready')].status"},
+	}, &extv1.CustomResourceSubresources{
 		Status: &extv1.CustomResourceSubresourceStatus{}})
 	if err != nil {
 		return nil, err
@@ -389,6 +391,7 @@ func NewVirtualMachineSnapshotCrd() (*extv1.CustomResourceDefinition, error) {
 	err := addFieldsToAllVersions(crd, []extv1.CustomResourceColumnDefinition{
 		{Name: "SourceKind", Type: "string", JSONPath: ".spec.source.kind"},
 		{Name: "SourceName", Type: "string", JSONPath: ".spec.source.name"},
+		{Name: "Phase", Type: "string", JSONPath: ".status.phase"},
 		{Name: "ReadyToUse", Type: "boolean", JSONPath: ".status.readyToUse"},
 		{Name: "CreationTime", Type: "date", JSONPath: ".status.creationTime"},
 		{Name: "Error", Type: "string", JSONPath: errorMessageJSONPath},
@@ -565,6 +568,9 @@ func NewPrometheusRuleSpec(ns string, workloadUpdatesEnabled bool) *promv1.Prome
 						Annotations: map[string]string{
 							"summary": "All virt-api servers are down.",
 						},
+						Labels: map[string]string{
+							"severity": "critical",
+						},
 					},
 					{
 						Record: "num_of_allocatable_nodes",
@@ -576,6 +582,9 @@ func NewPrometheusRuleSpec(ns string, workloadUpdatesEnabled bool) *promv1.Prome
 						For:   "60m",
 						Annotations: map[string]string{
 							"summary": "More than one virt-api should be running if more than one worker nodes exist.",
+						},
+						Labels: map[string]string{
+							"severity": "warning",
 						},
 					},
 					{
@@ -613,6 +622,9 @@ func NewPrometheusRuleSpec(ns string, workloadUpdatesEnabled bool) *promv1.Prome
 						Annotations: map[string]string{
 							"summary": "Some virt controllers are running but not ready.",
 						},
+						Labels: map[string]string{
+							"severity": "warning",
+						},
 					},
 					{
 						Alert: "NoReadyVirtController",
@@ -620,6 +632,9 @@ func NewPrometheusRuleSpec(ns string, workloadUpdatesEnabled bool) *promv1.Prome
 						For:   "5m",
 						Annotations: map[string]string{
 							"summary": "No ready virt-controller was detected for the last 5 min.",
+						},
+						Labels: map[string]string{
+							"severity": "critical",
 						},
 					},
 					{
@@ -629,6 +644,9 @@ func NewPrometheusRuleSpec(ns string, workloadUpdatesEnabled bool) *promv1.Prome
 						Annotations: map[string]string{
 							"summary": "No running virt-controller was detected for the last 5 min.",
 						},
+						Labels: map[string]string{
+							"severity": "critical",
+						},
 					},
 					{
 						Alert: "LowVirtControllersCount",
@@ -636,6 +654,9 @@ func NewPrometheusRuleSpec(ns string, workloadUpdatesEnabled bool) *promv1.Prome
 						For:   "5m",
 						Annotations: map[string]string{
 							"summary": "More than one virt-controller should be ready if more than one worker node.",
+						},
+						Labels: map[string]string{
+							"severity": "warning",
 						},
 					},
 					{
@@ -669,6 +690,9 @@ func NewPrometheusRuleSpec(ns string, workloadUpdatesEnabled bool) *promv1.Prome
 						Annotations: map[string]string{
 							"summary": "More than 5% of the rest calls failed in virt-controller for the last hour",
 						},
+						Labels: map[string]string{
+							"severity": "warning",
+						},
 					},
 					{
 						Alert: "VirtControllerRESTErrorsBurst",
@@ -676,6 +700,9 @@ func NewPrometheusRuleSpec(ns string, workloadUpdatesEnabled bool) *promv1.Prome
 						For:   "5m",
 						Annotations: map[string]string{
 							"summary": "More than 80% of the rest calls failed in virt-controller for the last 5 minutes",
+						},
+						Labels: map[string]string{
+							"severity": "critical",
 						},
 					},
 					{
@@ -691,6 +718,9 @@ func NewPrometheusRuleSpec(ns string, workloadUpdatesEnabled bool) *promv1.Prome
 						Annotations: map[string]string{
 							"summary": "All virt-operator servers are down.",
 						},
+						Labels: map[string]string{
+							"severity": "critical",
+						},
 					},
 					{
 						Alert: "LowVirtOperatorCount",
@@ -698,6 +728,9 @@ func NewPrometheusRuleSpec(ns string, workloadUpdatesEnabled bool) *promv1.Prome
 						For:   "60m",
 						Annotations: map[string]string{
 							"summary": "More than one virt-operator should be running if more than one worker nodes exist.",
+						},
+						Labels: map[string]string{
+							"severity": "warning",
 						},
 					},
 					{
@@ -731,6 +764,9 @@ func NewPrometheusRuleSpec(ns string, workloadUpdatesEnabled bool) *promv1.Prome
 						Annotations: map[string]string{
 							"summary": "More than 5% of the rest calls failed in virt-operator for the last hour",
 						},
+						Labels: map[string]string{
+							"severity": "warning",
+						},
 					},
 					{
 						Alert: "VirtOperatorRESTErrorsBurst",
@@ -738,6 +774,9 @@ func NewPrometheusRuleSpec(ns string, workloadUpdatesEnabled bool) *promv1.Prome
 						For:   "5m",
 						Annotations: map[string]string{
 							"summary": "More than 80% of the rest calls failed in virt-operator for the last 5 minutes",
+						},
+						Labels: map[string]string{
+							"severity": "critical",
 						},
 					},
 					{
@@ -759,6 +798,9 @@ func NewPrometheusRuleSpec(ns string, workloadUpdatesEnabled bool) *promv1.Prome
 						Annotations: map[string]string{
 							"summary": "Some virt-operators are running but not ready.",
 						},
+						Labels: map[string]string{
+							"severity": "warning",
+						},
 					},
 					{
 						Alert: "NoReadyVirtOperator",
@@ -767,6 +809,9 @@ func NewPrometheusRuleSpec(ns string, workloadUpdatesEnabled bool) *promv1.Prome
 						Annotations: map[string]string{
 							"summary": "No ready virt-operator was detected for the last 5 min.",
 						},
+						Labels: map[string]string{
+							"severity": "critical",
+						},
 					},
 					{
 						Alert: "NoLeadingVirtOperator",
@@ -774,6 +819,9 @@ func NewPrometheusRuleSpec(ns string, workloadUpdatesEnabled bool) *promv1.Prome
 						For:   "5m",
 						Annotations: map[string]string{
 							"summary": "No leading virt-operator was detected for the last 5 min.",
+						},
+						Labels: map[string]string{
+							"severity": "critical",
 						},
 					},
 					{
@@ -789,6 +837,9 @@ func NewPrometheusRuleSpec(ns string, workloadUpdatesEnabled bool) *promv1.Prome
 						For: "15m",
 						Annotations: map[string]string{
 							"summary": "Some virt-handlers failed to roll out",
+						},
+						Labels: map[string]string{
+							"severity": "warning",
 						},
 					},
 					{
@@ -822,6 +873,9 @@ func NewPrometheusRuleSpec(ns string, workloadUpdatesEnabled bool) *promv1.Prome
 						Annotations: map[string]string{
 							"summary": "More than 5% of the rest calls failed in virt-handler for the last hour",
 						},
+						Labels: map[string]string{
+							"severity": "warning",
+						},
 					},
 					{
 						Alert: "VirtHandlerRESTErrorsBurst",
@@ -829,6 +883,9 @@ func NewPrometheusRuleSpec(ns string, workloadUpdatesEnabled bool) *promv1.Prome
 						For:   "5m",
 						Annotations: map[string]string{
 							"summary": "More than 80% of the rest calls failed in virt-handler for the last 5 minutes",
+						},
+						Labels: map[string]string{
+							"severity": "critical",
 						},
 					},
 					{
@@ -869,6 +926,32 @@ func NewPrometheusRuleSpec(ns string, workloadUpdatesEnabled bool) *promv1.Prome
 						Annotations: map[string]string{
 							"description": "Eviction policy for {{ $labels.name }} (on node {{ $labels.node }}) is set to Live Migration but the VM is not migratable",
 							"summary":     "The VM's eviction strategy is set to Live Migration but the VM is not migratable",
+						},
+						Labels: map[string]string{
+							"severity": "warning",
+						},
+					},
+					{
+						Alert: "KubeVirtComponentExceedsRequestedMemory",
+						Expr:  intstr.FromString(fmt.Sprintf(`((kube_pod_container_resource_requests{namespace="%s",container=~"virt-controller|virt-api|virt-handler|virt-operator",resource="memory"}) - on(pod) group_left(node) container_memory_usage_bytes{namespace="%s"}) < 0`, ns, ns)),
+						For:   "5m",
+						Annotations: map[string]string{
+							"description": "Container {{ $labels.container }} in pod {{ $labels.pod }} memory usage exceeds the memory requested",
+							"summary":     "The container is using more memory than what is defined in the containers resource requests",
+						},
+						Labels: map[string]string{
+							"severity": "warning",
+						},
+					},
+					{
+						Alert: "KubeVirtComponentExceedsRequestedCPU",
+						Expr: intstr.FromString(
+							fmt.Sprintf(`((kube_pod_container_resource_requests{namespace="%s",container=~"virt-controller|virt-api|virt-handler|virt-operator",resource="cpu"}) - on(pod) group_left(node) node_namespace_pod_container:container_cpu_usage_seconds_total:sum_rate{namespace="%s"}) < 0`, ns, ns),
+						),
+						For: "5m",
+						Annotations: map[string]string{
+							"description": "Container {{ $labels.container }} in pod {{ $labels.pod }} cpu usage exceeds the CPU requested",
+							"summary":     "The container is using more CPU than what is defined in the containers resource requests",
 						},
 						Labels: map[string]string{
 							"severity": "warning",

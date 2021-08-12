@@ -68,8 +68,7 @@ func NewHandlerDaemonSet(namespace string, repository string, imagePrefix string
 	pod.HostPID = true
 
 	// nodelabeller currently only support x86
-	arch := virtconfig.NewDefaultArch(runtime.GOARCH)
-	if !arch.IsARM64() && !arch.IsPPC64() {
+	if virtconfig.IsAMD64(runtime.GOARCH) {
 		launcherVersion = AddVersionSeparatorPrefix(launcherVersion)
 		pod.InitContainers = []corev1.Container{
 			{
@@ -80,7 +79,7 @@ func NewHandlerDaemonSet(namespace string, repository string, imagePrefix string
 				Image: fmt.Sprintf("%s/%s%s%s", repository, imagePrefix, "virt-launcher", launcherVersion),
 				Name:  "virt-launcher",
 				Args: []string{
-					"/bin/node-labeller.sh",
+					"node-labeller.sh",
 				},
 				SecurityContext: &corev1.SecurityContext{
 					Privileged: boolPtr(true),

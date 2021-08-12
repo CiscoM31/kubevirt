@@ -37,7 +37,7 @@ import (
 
 	"github.com/fsnotify/fsnotify"
 	"github.com/golang/mock/gomock"
-	libvirt "libvirt.org/libvirt-go"
+	"libvirt.org/go/libvirt"
 
 	v1 "kubevirt.io/client-go/api/v1"
 	cmdv1 "kubevirt.io/kubevirt/pkg/handler-launcher-com/cmd/v1"
@@ -55,13 +55,15 @@ var _ = Describe("AccessCredentials", func() {
 	var lock sync.Mutex
 
 	BeforeEach(func() {
+		var err error
 		ctrl = gomock.NewController(GinkgoT())
 		mockConn = cli.NewMockConnection(ctrl)
 		mockDomain = cli.NewMockVirDomain(ctrl)
 
 		manager = NewManager(mockConn, &lock)
 		manager.resyncCheckIntervalSeconds = 1
-		tmpDir, _ = ioutil.TempDir("", "credential-test")
+		tmpDir, err = ioutil.TempDir("", "credential-test")
+		Expect(err).ToNot(HaveOccurred())
 		unitTestSecretDir = tmpDir
 	})
 	AfterEach(func() {

@@ -42,6 +42,8 @@ import (
 	"k8s.io/client-go/tools/leaderelection/resourcelock"
 	"k8s.io/client-go/tools/record"
 
+	"kubevirt.io/kubevirt/pkg/virt-controller/watch/topology"
+
 	"kubevirt.io/kubevirt/pkg/healthz"
 
 	snapshotv1 "kubevirt.io/client-go/apis/snapshot/v1alpha1"
@@ -51,6 +53,9 @@ import (
 	"kubevirt.io/kubevirt/pkg/certificates/bootstrap"
 	containerdisk "kubevirt.io/kubevirt/pkg/container-disk"
 	"kubevirt.io/kubevirt/pkg/controller"
+
+	"kubevirt.io/kubevirt/pkg/monitoring/perfscale"
+	vmiprom "kubevirt.io/kubevirt/pkg/monitoring/vmistats" // import for prometheus metrics
 	"kubevirt.io/kubevirt/pkg/service"
 	"kubevirt.io/kubevirt/pkg/util"
 	"kubevirt.io/kubevirt/pkg/util/webhooks"
@@ -68,7 +73,8 @@ const (
 
 	defaultHost = "0.0.0.0"
 
-	launcherImage = "virt-launcher"
+	launcherImage       = "virt-launcher"
+	launcherQemuTimeout = 240
 
 	imagePullSecret = ""
 
@@ -76,11 +82,13 @@ const (
 
 	ephemeralDiskDir = virtShareDir + "-ephemeral-disks"
 
-	defaultControllerThreads    = 3
-	defaultVMIControllerThreads = 10
+	defaultControllerThreads         = 3
+	defaultSnapshotControllerThreads = 6
+	defaultVMIControllerThreads      = 10
 
 	defaultLauncherSubGid                 = 107
 	defaultSnapshotControllerResyncPeriod = 5 * time.Minute
+	defaultNodeTopologyUpdatePeriod       = 30 * time.Second
 
 	defaultPromCertFilePath = "/etc/virt-controller/certificates/tls.crt"
 	defaultPromKeyFilePath  = "/etc/virt-controller/certificates/tls.key"
@@ -157,6 +165,7 @@ type VirtControllerApp struct {
 	LeaderElection leaderelectionconfig.Configuration
 
 	launcherImage              string
+	launcherQemuTimeout        int
 	imagePullSecret            string
 	virtShareDir               string
 	virtLibDir                 string
@@ -189,9 +198,11 @@ type VirtControllerApp struct {
 	restoreControllerThreads          int
 	snapshotControllerResyncPeriod    time.Duration
 
-	caConfigMapName  string
-	promCertFilePath string
-	promKeyFilePath  string
+	caConfigMapName          string
+	promCertFilePath         string
+	promKeyFilePath          string
+	nodeTopologyUpdater      topology.NodeTopologyUpdater
+	nodeTopologyUpdatePeriod time.Duration
 }
 
 var _ service.Service = &VirtControllerApp{}
@@ -312,10 +323,8 @@ func Execute() {
 	app.initWorkloadUpdaterController()
 	go app.Run()
 
-	select {
-	case <-app.reInitChan:
-		cancel()
-	}
+	<-app.reInitChan
+	cancel()
 }
 
 // Detects if a config has been applied that requires
@@ -409,6 +418,9 @@ func (vca *VirtControllerApp) onStartedLeading() func(ctx context.Context) {
 			vca.vmControllerThreads, vca.migrationControllerThreads, vca.evacuationControllerThreads,
 			vca.disruptionBudgetControllerThreads)
 
+		vmiprom.SetupVMICollector(vca.vmiInformer)
+		perfscale.RegisterPerfScaleMetrics(vca.vmiInformer)
+
 		go vca.evacuationController.Run(vca.evacuationControllerThreads, stop)
 		go vca.disruptionBudgetController.Run(vca.disruptionBudgetControllerThreads, stop)
 		go vca.nodeController.Run(vca.nodeControllerThreads, stop)
@@ -419,6 +431,8 @@ func (vca *VirtControllerApp) onStartedLeading() func(ctx context.Context) {
 		go vca.snapshotController.Run(vca.snapshotControllerThreads, stop)
 		go vca.restoreController.Run(vca.restoreControllerThreads, stop)
 		go vca.workloadUpdateController.Run(stop)
+		go vca.nodeTopologyUpdater.Run(vca.nodeTopologyUpdatePeriod, stop)
+
 		cache.WaitForCacheSync(stop, vca.persistentVolumeClaimInformer.HasSynced)
 		close(vca.readyChan)
 		leaderGauge.Set(1)
@@ -441,6 +455,7 @@ func (vca *VirtControllerApp) initCommon() {
 
 	containerdisk.SetLocalDirectory(vca.ephemeralDiskDir + "/container-disk-data")
 	vca.templateService = services.NewTemplateService(vca.launcherImage,
+		vca.launcherQemuTimeout,
 		vca.virtShareDir,
 		vca.virtLibDir,
 		vca.ephemeralDiskDir,
@@ -451,13 +466,36 @@ func (vca *VirtControllerApp) initCommon() {
 		virtClient,
 		vca.clusterConfig,
 		vca.launcherSubGid,
-		runtime.GOARCH,
 	)
 
-	vca.vmiController = NewVMIController(vca.templateService, vca.vmiInformer, vca.kvPodInformer, vca.persistentVolumeClaimInformer, vca.vmiRecorder, vca.clientSet, vca.dataVolumeInformer)
+	topologyHinter := topology.NewTopologyHinter(vca.nodeInformer.GetStore(), vca.vmiInformer.GetStore(), runtime.GOARCH, vca.clusterConfig)
+
+	vca.vmiController = NewVMIController(vca.templateService,
+		vca.vmiInformer,
+		vca.vmInformer,
+		vca.kvPodInformer,
+		vca.persistentVolumeClaimInformer,
+		vca.vmiRecorder,
+		vca.clientSet,
+		vca.dataVolumeInformer,
+		topologyHinter,
+	)
+
 	recorder := vca.getNewRecorder(k8sv1.NamespaceAll, "node-controller")
 	vca.nodeController = NewNodeController(vca.clientSet, vca.nodeInformer, vca.vmiInformer, recorder)
-	vca.migrationController = NewMigrationController(vca.templateService, vca.vmiInformer, vca.kvPodInformer, vca.migrationInformer, vca.vmiRecorder, vca.clientSet, vca.clusterConfig)
+	vca.migrationController = NewMigrationController(
+		vca.templateService,
+		vca.vmiInformer,
+		vca.kvPodInformer,
+		vca.migrationInformer,
+		vca.nodeInformer,
+		vca.persistentVolumeClaimInformer,
+		vca.vmiRecorder,
+		vca.clientSet,
+		vca.clusterConfig,
+	)
+
+	vca.nodeTopologyUpdater = topology.NewNodeTopologyUpdater(vca.clientSet, topologyHinter, vca.nodeInformer)
 }
 
 func (vca *VirtControllerApp) initReplicaSet() {
@@ -482,6 +520,8 @@ func (vca *VirtControllerApp) initDisruptionBudgetController() {
 	vca.disruptionBudgetController = disruptionbudget.NewDisruptionBudgetController(
 		vca.vmiInformer,
 		vca.informerFactory.K8SInformerFactory().Policy().V1beta1().PodDisruptionBudgets().Informer(),
+		vca.allPodInformer,
+		vca.migrationInformer,
 		recorder,
 		vca.clientSet,
 	)
@@ -579,6 +619,9 @@ func (vca *VirtControllerApp) AddFlags() {
 	flag.StringVar(&vca.launcherImage, "launcher-image", launcherImage,
 		"Shim container for containerized VMIs")
 
+	flag.IntVar(&vca.launcherQemuTimeout, "launcher-qemu-timeout", launcherQemuTimeout,
+		"Amount of time to wait for qemu")
+
 	flag.StringVar(&vca.imagePullSecret, "image-pull-secret", imagePullSecret,
 		"Secret to use for pulling virt-launcher and/or registry disks")
 
@@ -622,7 +665,7 @@ func (vca *VirtControllerApp) AddFlags() {
 	flag.Int64Var(&vca.launcherSubGid, "launcher-subgid", defaultLauncherSubGid,
 		"ID of subgroup to virt-launcher")
 
-	flag.IntVar(&vca.snapshotControllerThreads, "snapshot-controller-threads", defaultControllerThreads,
+	flag.IntVar(&vca.snapshotControllerThreads, "snapshot-controller-threads", defaultSnapshotControllerThreads,
 		"Number of goroutines to run for snapshot controller")
 
 	flag.IntVar(&vca.restoreControllerThreads, "restore-controller-threads", defaultControllerThreads,
@@ -630,6 +673,9 @@ func (vca *VirtControllerApp) AddFlags() {
 
 	flag.DurationVar(&vca.snapshotControllerResyncPeriod, "snapshot-controller-resync-period", defaultSnapshotControllerResyncPeriod,
 		"Number of goroutines to run for snapshot controller")
+
+	flag.DurationVar(&vca.nodeTopologyUpdatePeriod, "node-topology-update-period", defaultNodeTopologyUpdatePeriod,
+		"Update period for the node topology updater")
 
 	flag.StringVar(&vca.promCertFilePath, "prom-cert-file", defaultPromCertFilePath,
 		"Client certificate used to prove the identity of the virt-controller when it must call out Promethus during a request")

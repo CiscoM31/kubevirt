@@ -36,7 +36,7 @@ import (
 	snapshotv1 "kubevirt.io/client-go/apis/snapshot/v1alpha1"
 	"kubevirt.io/client-go/kubecli"
 	"kubevirt.io/client-go/log"
-	cdiv1 "kubevirt.io/containerized-data-importer/pkg/apis/core/v1alpha1"
+	cdiv1 "kubevirt.io/containerized-data-importer/pkg/apis/core/v1beta1"
 	"kubevirt.io/kubevirt/pkg/controller"
 	"kubevirt.io/kubevirt/pkg/util/status"
 )
@@ -79,7 +79,6 @@ type VMSnapshotController struct {
 	crdQueue               workqueue.RateLimitingInterface
 	vmSnapshotStatusQueue  workqueue.RateLimitingInterface
 	vmQueue                workqueue.RateLimitingInterface
-	dvQueue                workqueue.RateLimitingInterface
 
 	dynamicInformerMap map[string]*dynamicInformer
 	eventHandlerMap    map[string]cache.ResourceEventHandlerFuncs
@@ -91,12 +90,11 @@ var supportedCRDVersions = []string{"v1beta1"}
 
 // Init initializes the snapshot controller
 func (ctrl *VMSnapshotController) Init() {
-	ctrl.vmSnapshotQueue = workqueue.NewNamedRateLimitingQueue(workqueue.DefaultControllerRateLimiter(), "snapshot-controller-vmsnapshot")
-	ctrl.vmSnapshotContentQueue = workqueue.NewNamedRateLimitingQueue(workqueue.DefaultControllerRateLimiter(), "snapshot-controller-vmsnapshotcontent")
-	ctrl.crdQueue = workqueue.NewNamedRateLimitingQueue(workqueue.DefaultControllerRateLimiter(), "snapshot-controller-crd")
-	ctrl.vmSnapshotStatusQueue = workqueue.NewNamedRateLimitingQueue(workqueue.DefaultControllerRateLimiter(), "snapshot-controller-vmsnashotstatus")
-	ctrl.vmQueue = workqueue.NewNamedRateLimitingQueue(workqueue.DefaultControllerRateLimiter(), "snapshot-controller-vm")
-	ctrl.dvQueue = workqueue.NewNamedRateLimitingQueue(workqueue.DefaultControllerRateLimiter(), "snapshot-controller-dv")
+	ctrl.vmSnapshotQueue = workqueue.NewNamedRateLimitingQueue(workqueue.DefaultControllerRateLimiter(), "virt-controller-snapshot-vmsnapshot")
+	ctrl.vmSnapshotContentQueue = workqueue.NewNamedRateLimitingQueue(workqueue.DefaultControllerRateLimiter(), "virt-controller-snapshot-vmsnapshotcontent")
+	ctrl.crdQueue = workqueue.NewNamedRateLimitingQueue(workqueue.DefaultControllerRateLimiter(), "virt-controller-snapshot-crd")
+	ctrl.vmSnapshotStatusQueue = workqueue.NewNamedRateLimitingQueue(workqueue.DefaultControllerRateLimiter(), "virt-controller-snapshot-vmsnashotstatus")
+	ctrl.vmQueue = workqueue.NewNamedRateLimitingQueue(workqueue.DefaultControllerRateLimiter(), "virt-controller-snapshot-vm")
 
 	ctrl.dynamicInformerMap = map[string]*dynamicInformer{
 		volumeSnapshotCRD:      {informerFunc: controller.VolumeSnapshotInformer},
@@ -136,6 +134,14 @@ func (ctrl *VMSnapshotController) Init() {
 		cache.ResourceEventHandlerFuncs{
 			AddFunc:    ctrl.handleVM,
 			UpdateFunc: func(oldObj, newObj interface{}) { ctrl.handleVM(newObj) },
+		},
+		ctrl.ResyncPeriod,
+	)
+
+	ctrl.VMIInformer.AddEventHandlerWithResyncPeriod(
+		cache.ResourceEventHandlerFuncs{
+			AddFunc:    ctrl.handleVMI,
+			UpdateFunc: func(oldObj, newObj interface{}) { ctrl.handleVMI(newObj) },
 		},
 		ctrl.ResyncPeriod,
 	)
@@ -194,7 +200,6 @@ func (ctrl *VMSnapshotController) Run(threadiness int, stopCh <-chan struct{}) e
 		go wait.Until(ctrl.crdWorker, time.Second, stopCh)
 		go wait.Until(ctrl.vmSnapshotStatusWorker, time.Second, stopCh)
 		go wait.Until(ctrl.vmWorker, time.Second, stopCh)
-		go wait.Until(ctrl.dvWorker, time.Second, stopCh)
 	}
 
 	<-stopCh
@@ -228,11 +233,6 @@ func (ctrl *VMSnapshotController) vmSnapshotStatusWorker() {
 
 func (ctrl *VMSnapshotController) vmWorker() {
 	for ctrl.processVMWorkItem() {
-	}
-}
-
-func (ctrl *VMSnapshotController) dvWorker() {
-	for ctrl.processDVWorkItem() {
 	}
 }
 
@@ -349,28 +349,6 @@ func (ctrl *VMSnapshotController) processVMWorkItem() bool {
 	})
 }
 
-func (ctrl *VMSnapshotController) processDVWorkItem() bool {
-	return processWorkItem(ctrl.dvQueue, func(key string) (time.Duration, error) {
-		log.Log.V(3).Infof("DV worker processing VM [%s]", key)
-
-		storeObj, exists, err := ctrl.DVInformer.GetStore().GetByKey(key)
-		if err != nil {
-			return 0, err
-		}
-
-		if exists {
-			dv, ok := storeObj.(*cdiv1.DataVolume)
-			if !ok {
-				return 0, fmt.Errorf("unexpected resource %+v", storeObj)
-			}
-
-			ctrl.handleDV(dv)
-		}
-
-		return 0, nil
-	})
-}
-
 func (ctrl *VMSnapshotController) handleVMSnapshot(obj interface{}) {
 	if unknown, ok := obj.(cache.DeletedFinalStateUnknown); ok && unknown.Obj != nil {
 		obj = unknown.Obj
@@ -431,6 +409,24 @@ func (ctrl *VMSnapshotController) handleVM(obj interface{}) {
 			log.Log.Error("Failed to extract vmKey from VirtualMachine.")
 		} else {
 			ctrl.vmSnapshotStatusQueue.Add(key)
+		}
+	}
+}
+
+func (ctrl *VMSnapshotController) handleVMI(obj interface{}) {
+	if unknown, ok := obj.(cache.DeletedFinalStateUnknown); ok && unknown.Obj != nil {
+		obj = unknown.Obj
+	}
+
+	if vmi, ok := obj.(*kubevirtv1.VirtualMachineInstance); ok {
+		keys, err := ctrl.VMSnapshotInformer.GetIndexer().IndexKeys("vm", vmi.Name)
+		if err != nil {
+			utilruntime.HandleError(err)
+			return
+		}
+
+		for _, k := range keys {
+			ctrl.vmSnapshotQueue.Add(k)
 		}
 	}
 }

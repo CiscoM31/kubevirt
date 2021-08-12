@@ -38,8 +38,9 @@ import (
 	k8sfield "k8s.io/apimachinery/pkg/util/validation/field"
 
 	v1 "kubevirt.io/client-go/api/v1"
+	cdifake "kubevirt.io/client-go/generated/containerized-data-importer/clientset/versioned/fake"
 	"kubevirt.io/client-go/kubecli"
-	cdiv1 "kubevirt.io/containerized-data-importer/pkg/apis/core/v1alpha1"
+	cdiv1 "kubevirt.io/containerized-data-importer/pkg/apis/core/v1beta1"
 	"kubevirt.io/kubevirt/pkg/testutils"
 	"kubevirt.io/kubevirt/pkg/virt-api/webhooks"
 	virtconfig "kubevirt.io/kubevirt/pkg/virt-config"
@@ -120,7 +121,7 @@ var _ = Describe("Validating VM Admitter", func() {
 		vmi.Spec.Volumes = append(vmi.Spec.Volumes, v1.Volume{
 			Name: "testdisk",
 			VolumeSource: v1.VolumeSource{
-				ContainerDisk: &v1.ContainerDiskSource{},
+				ContainerDisk: testutils.NewFakeContainerDiskSource(),
 			},
 		})
 
@@ -147,6 +148,80 @@ var _ = Describe("Validating VM Admitter", func() {
 		Expect(resp.Allowed).To(BeTrue())
 	})
 
+	table.DescribeTable("should reject VolumeRequests on a migrating vm", func(requests []v1.VirtualMachineVolumeRequest) {
+		now := metav1.Now()
+		vmi := v1.NewMinimalVMI("testvmi")
+		vmi.Status = v1.VirtualMachineInstanceStatus{
+			MigrationState: &v1.VirtualMachineInstanceMigrationState{
+				StartTimestamp: &now,
+			},
+		}
+		vmi.Spec.Domain.Devices.Disks = append(vmi.Spec.Domain.Devices.Disks, v1.Disk{
+			Name: "testdisk",
+		})
+		vmi.Spec.Volumes = append(vmi.Spec.Volumes, v1.Volume{
+			Name: "testdisk",
+			VolumeSource: v1.VolumeSource{
+				ContainerDisk: testutils.NewFakeContainerDiskSource(),
+			},
+		})
+
+		vm := &v1.VirtualMachine{
+			Spec: v1.VirtualMachineSpec{
+				Running: &notRunning,
+				Template: &v1.VirtualMachineInstanceTemplateSpec{
+					Spec: *vmi.Spec.DeepCopy(),
+				},
+			},
+			Status: v1.VirtualMachineStatus{
+				VolumeRequests: requests,
+				Ready:          true,
+			},
+		}
+		vmBytes, _ := json.Marshal(&vm)
+
+		ar := &admissionv1.AdmissionReview{
+			Request: &admissionv1.AdmissionRequest{
+				Resource: webhooks.VirtualMachineGroupVersionResource,
+				Object: runtime.RawExtension{
+					Raw: vmBytes,
+				},
+			},
+		}
+
+		vmiInterface.EXPECT().Get(gomock.Any(), gomock.Any()).Return(vmi, nil)
+		resp := vmsAdmitter.Admit(ar)
+		Expect(resp.Allowed).To(Equal(false))
+	},
+		table.Entry("with valid request to add volume", []v1.VirtualMachineVolumeRequest{
+			{
+				AddVolumeOptions: &v1.AddVolumeOptions{
+					Name: "testdisk2",
+					Disk: &v1.Disk{
+						Name: "testdisk2",
+						DiskDevice: v1.DiskDevice{
+							Disk: &v1.DiskTarget{
+								Bus: "scsi",
+							},
+						},
+					},
+					VolumeSource: &v1.HotplugVolumeSource{
+						PersistentVolumeClaim: &k8sv1.PersistentVolumeClaimVolumeSource{
+							ClaimName: "madeup",
+						},
+					},
+				},
+			},
+		}),
+		table.Entry("with valid request to remove volume", []v1.VirtualMachineVolumeRequest{
+			{
+				RemoveVolumeOptions: &v1.RemoveVolumeOptions{
+					Name: "testdisk",
+				},
+			},
+		}),
+	)
+
 	table.DescribeTable("should validate VolumeRequest on running vm", func(requests []v1.VirtualMachineVolumeRequest, isValid bool) {
 		vmi := v1.NewMinimalVMI("testvmi")
 		vmi.Spec.Domain.Devices.Disks = append(vmi.Spec.Domain.Devices.Disks, v1.Disk{
@@ -158,7 +233,7 @@ var _ = Describe("Validating VM Admitter", func() {
 		vmi.Spec.Volumes = append(vmi.Spec.Volumes, v1.Volume{
 			Name: "testdisk",
 			VolumeSource: v1.VolumeSource{
-				ContainerDisk: &v1.ContainerDiskSource{},
+				ContainerDisk: testutils.NewFakeContainerDiskSource(),
 			},
 		})
 		vmi.Spec.Volumes = append(vmi.Spec.Volumes, v1.Volume{
@@ -383,7 +458,7 @@ var _ = Describe("Validating VM Admitter", func() {
 		vmi.Spec.Volumes = append(vmi.Spec.Volumes, v1.Volume{
 			Name: "testdisk",
 			VolumeSource: v1.VolumeSource{
-				ContainerDisk: &v1.ContainerDiskSource{},
+				ContainerDisk: testutils.NewFakeContainerDiskSource(),
 			},
 		})
 		vmi.Spec.Volumes = append(vmi.Spec.Volumes, v1.Volume{
@@ -698,7 +773,7 @@ var _ = Describe("Validating VM Admitter", func() {
 			},
 			table.Entry("with pvc volume source", v1.VolumeSource{PersistentVolumeClaim: &k8sv1.PersistentVolumeClaimVolumeSource{}}),
 			table.Entry("with cloud-init volume source", v1.VolumeSource{CloudInitNoCloud: &v1.CloudInitNoCloudSource{UserData: "fake", NetworkData: "fake"}}),
-			table.Entry("with containerDisk volume source", v1.VolumeSource{ContainerDisk: &v1.ContainerDiskSource{}}),
+			table.Entry("with containerDisk volume source", v1.VolumeSource{ContainerDisk: testutils.NewFakeContainerDiskSource()}),
 			table.Entry("with ephemeral volume source", v1.VolumeSource{Ephemeral: &v1.EphemeralVolumeSource{}}),
 			table.Entry("with emptyDisk volume source", v1.VolumeSource{EmptyDisk: &v1.EmptyDiskSource{}}),
 			table.Entry("with dataVolume volume source", v1.VolumeSource{DataVolume: &v1.DataVolumeSource{Name: "fake"}}),
@@ -752,7 +827,7 @@ var _ = Describe("Validating VM Admitter", func() {
 			vmi.Spec.Volumes = append(vmi.Spec.Volumes, v1.Volume{
 				Name: "testvolume",
 				VolumeSource: v1.VolumeSource{
-					ContainerDisk:         &v1.ContainerDiskSource{},
+					ContainerDisk:         testutils.NewFakeContainerDiskSource(),
 					PersistentVolumeClaim: &k8sv1.PersistentVolumeClaimVolumeSource{},
 				},
 			})
@@ -767,13 +842,13 @@ var _ = Describe("Validating VM Admitter", func() {
 			vmi.Spec.Volumes = append(vmi.Spec.Volumes, v1.Volume{
 				Name: "testvolume",
 				VolumeSource: v1.VolumeSource{
-					ContainerDisk: &v1.ContainerDiskSource{},
+					ContainerDisk: testutils.NewFakeContainerDiskSource(),
 				},
 			})
 			vmi.Spec.Volumes = append(vmi.Spec.Volumes, v1.Volume{
 				Name: "testvolume",
 				VolumeSource: v1.VolumeSource{
-					ContainerDisk: &v1.ContainerDiskSource{},
+					ContainerDisk: testutils.NewFakeContainerDiskSource(),
 				},
 			})
 
@@ -789,7 +864,7 @@ var _ = Describe("Validating VM Admitter", func() {
 				vmi.Spec.Volumes = append(vmi.Spec.Volumes, v1.Volume{
 					Name: "testvolume" + name,
 					VolumeSource: v1.VolumeSource{
-						ContainerDisk: &v1.ContainerDiskSource{},
+						ContainerDisk: testutils.NewFakeContainerDiskSource(),
 					},
 				})
 			}
@@ -1076,7 +1151,7 @@ var _ = Describe("Validating VM Admitter", func() {
 								Name: "whatever",
 							},
 							Spec: cdiv1.DataVolumeSpec{
-								Source: cdiv1.DataVolumeSource{
+								Source: &cdiv1.DataVolumeSource{
 									PVC: &cdiv1.DataVolumeSourcePVC{
 										Name:      "whocares",
 										Namespace: sourceNamespace,
@@ -1112,10 +1187,94 @@ var _ = Describe("Validating VM Admitter", func() {
 		},
 			table.Entry("when source namespace suppied", "ns1", "", "ns3", "", "ns3", "ns1", "default"),
 			table.Entry("when vm namespace suppied and source not", "ns1", "ns2", "", "", "ns2", "ns2", "default"),
-			table.Entry("when source namespace suppied", "ns1", "", "ns3", "", "ns3", "ns1", "default"),
 			table.Entry("when ar namespace suppied and vm/source not", "ns1", "", "", "", "ns1", "ns1", "default"),
-			table.Entry("when everything suppied", "ns1", "ns2", "ns3", "", "ns3", "ns2", "default"),
-			table.Entry("when everything suppied", "ns1", "ns2", "ns3", "sa", "ns3", "ns2", "sa"),
+			table.Entry("when everything suppied with default service account", "ns1", "ns2", "ns3", "", "ns3", "ns2", "default"),
+			table.Entry("when everything suppied with 'sa' service account", "ns1", "ns2", "ns3", "sa", "ns3", "ns2", "sa"),
+		)
+
+		table.DescribeTable("should successfully authorize clone from sourceRef", func(arNamespace, vmNamespace, sourceRefNamespace,
+			sourceNamespace, serviceAccount, expectedSourceNamespace, expectedTargetNamespace, expectedServiceAccount string) {
+			sourceRefName := "sourceRef"
+			ds := &cdiv1.DataSource{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: vmNamespace,
+					Name:      sourceRefName,
+				},
+				Spec: cdiv1.DataSourceSpec{
+					Source: cdiv1.DataSourceSource{
+						PVC: &cdiv1.DataVolumeSourcePVC{
+							Name: "whocares",
+						},
+					},
+				},
+			}
+
+			vm := &v1.VirtualMachine{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: vmNamespace,
+				},
+				Spec: v1.VirtualMachineSpec{
+					Template: &v1.VirtualMachineInstanceTemplateSpec{},
+					DataVolumeTemplates: []v1.DataVolumeTemplateSpec{
+						{
+							ObjectMeta: metav1.ObjectMeta{
+								Name: "whatever",
+							},
+							Spec: cdiv1.DataVolumeSpec{
+								SourceRef: &cdiv1.DataVolumeSourceRef{
+									Kind: "DataSource",
+									Name: sourceRefName,
+								},
+							},
+						},
+					},
+				},
+			}
+
+			if sourceRefNamespace != "" {
+				ds.Namespace = sourceRefNamespace
+				vm.Spec.DataVolumeTemplates[0].Spec.SourceRef.Namespace = &sourceRefNamespace
+			}
+
+			if sourceNamespace != "" {
+				ds.Spec.Source.PVC.Namespace = sourceNamespace
+			}
+
+			if serviceAccount != "" {
+				vm.Spec.Template.Spec.Volumes = []v1.Volume{
+					{
+						VolumeSource: v1.VolumeSource{
+							ServiceAccount: &v1.ServiceAccountVolumeSource{
+								ServiceAccountName: serviceAccount,
+							},
+						},
+					},
+				}
+			}
+
+			ar := &admissionv1.AdmissionRequest{
+				Namespace: arNamespace,
+			}
+
+			cdiClient := cdifake.NewSimpleClientset(ds)
+			virtClient.EXPECT().CdiClient().Return(cdiClient).AnyTimes()
+
+			vmsAdmitter.cloneAuthFunc = makeCloneAdmitFunc(expectedSourceNamespace, "whocares",
+				expectedTargetNamespace, expectedServiceAccount)
+			causes, err := vmsAdmitter.authorizeVirtualMachineSpec(ar, vm)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(causes).To(BeEmpty())
+		},
+			table.Entry("when source namespace suppied", "ns1", "", "", "ns3", "", "ns3", "ns1", "default"),
+			table.Entry("when vm namespace suppied and source not", "ns1", "ns2", "", "", "", "ns2", "ns2", "default"),
+			table.Entry("when ar namespace suppied and vm/source not", "ns1", "", "", "", "", "ns1", "ns1", "default"),
+			table.Entry("when everything suppied with default service account", "ns1", "ns2", "", "ns3", "", "ns3", "ns2", "default"),
+			table.Entry("when everything suppied with 'sa' service account", "ns1", "ns2", "", "ns3", "sa", "ns3", "ns2", "sa"),
+			table.Entry("when source namespace and sourceRef namespace suppied", "ns1", "", "foo", "ns3", "", "ns3", "ns1", "default"),
+			table.Entry("when vm namespace and sourceRef namespace suppied and source not", "ns1", "ns2", "foo", "", "", "foo", "ns2", "default"),
+			table.Entry("when ar namespace and sourceRef namespace suppied and vm/source not", "ns1", "", "foo", "", "", "foo", "ns1", "default"),
+			table.Entry("when everything and sourceRef suppied with default service account", "ns1", "ns2", "foo", "ns3", "", "ns3", "ns2", "default"),
+			table.Entry("when everything and sourceRef suppied with 'sa' service account", "ns1", "ns2", "foo", "ns3", "sa", "ns3", "ns2", "sa"),
 		)
 
 		table.DescribeTable("should deny clone", func(sourceNamespace, sourceName, failMessage string, failErr error, expectedMessage string) {
@@ -1128,7 +1287,7 @@ var _ = Describe("Validating VM Admitter", func() {
 								Name: "whatever",
 							},
 							Spec: cdiv1.DataVolumeSpec{
-								Source: cdiv1.DataVolumeSource{
+								Source: &cdiv1.DataVolumeSource{
 									PVC: &cdiv1.DataVolumeSourcePVC{
 										Name:      sourceName,
 										Namespace: sourceNamespace,

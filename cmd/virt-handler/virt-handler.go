@@ -45,6 +45,10 @@ import (
 	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/certificate"
 
+	"kubevirt.io/kubevirt/pkg/virt-handler/node-labeller/api"
+
+	"kubevirt.io/kubevirt/pkg/monitoring/domainstats/downwardmetrics"
+
 	"kubevirt.io/kubevirt/pkg/healthz"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -57,10 +61,10 @@ import (
 	containerdisk "kubevirt.io/kubevirt/pkg/container-disk"
 	"kubevirt.io/kubevirt/pkg/controller"
 	inotifyinformer "kubevirt.io/kubevirt/pkg/inotify-informer"
-	_ "kubevirt.io/kubevirt/pkg/monitoring/client/prometheus"    // import for prometheus metrics
-	_ "kubevirt.io/kubevirt/pkg/monitoring/reflector/prometheus" // import for prometheus metrics
-	promvm "kubevirt.io/kubevirt/pkg/monitoring/vms/prometheus"  // import for prometheus metrics
-	_ "kubevirt.io/kubevirt/pkg/monitoring/workqueue/prometheus" // import for prometheus metrics
+	_ "kubevirt.io/kubevirt/pkg/monitoring/client/prometheus"               // import for prometheus metrics
+	promdomain "kubevirt.io/kubevirt/pkg/monitoring/domainstats/prometheus" // import for prometheus metrics
+	_ "kubevirt.io/kubevirt/pkg/monitoring/reflector/prometheus"            // import for prometheus metrics
+	_ "kubevirt.io/kubevirt/pkg/monitoring/workqueue/prometheus"            // import for prometheus metrics
 	"kubevirt.io/kubevirt/pkg/service"
 	"kubevirt.io/kubevirt/pkg/util"
 	"kubevirt.io/kubevirt/pkg/util/webhooks"
@@ -93,8 +97,8 @@ const (
 
 	podIpAddress = ""
 
-	// This value is derived from default MaxPods in Kubelet Config
-	maxDevices = 110
+	// This value reflects in the max number of VMIs per node
+	maxDevices = 1000
 
 	maxRequestsInFlight = 3
 	// Default port that virt-handler listens to console requests
@@ -287,7 +291,26 @@ func (app *virtHandlerApp) Run() {
 	// set log verbosity
 	app.clusterConfig.SetConfigModifiedCallback(app.shouldChangeLogVerbosity)
 
-	migrationProxy := migrationproxy.NewMigrationProxyManager(app.serverTLSConfig, app.clientTLSConfig)
+	migrationProxy := migrationproxy.NewMigrationProxyManager(app.serverTLSConfig, app.clientTLSConfig, app.clusterConfig)
+
+	stop := make(chan struct{})
+	defer close(stop)
+	// Currently nodeLabeller only support x86_64
+	var capabilities *api.Capabilities
+	if virtconfig.IsAMD64(runtime.GOARCH) {
+		deviceController := &devicemanager.DeviceController{}
+		if deviceController.NodeHasDevice(nodelabellerutil.KVMPath) {
+			nodeLabellerController, err := nodelabeller.NewNodeLabeller(app.clusterConfig, app.virtCli, app.HostOverride, app.namespace)
+			if err != nil {
+				panic(err)
+			}
+			capabilities = nodeLabellerController.HostCapabilities()
+
+			go nodeLabellerController.Run(10, stop)
+		} else {
+			logger.V(1).Level(log.INFO).Log("node-labeller is disabled, cannot work without KVM device.")
+		}
+	}
 
 	vmController := virthandler.NewController(
 		recorder,
@@ -305,6 +328,7 @@ func (app *virtHandlerApp) Run() {
 		app.clusterConfig,
 		podIsolationDetector,
 		migrationProxy,
+		capabilities,
 	)
 
 	promErrCh := make(chan error)
@@ -320,14 +344,15 @@ func (app *virtHandlerApp) Run() {
 		app.VirtShareDir,
 	)
 
-	promvm.SetupCollector(app.virtCli, app.VirtShareDir, app.HostOverride, app.MaxRequestsInFlight, vmiSourceInformer)
+	promdomain.SetupDomainStatsCollector(app.virtCli, app.VirtShareDir, app.HostOverride, app.MaxRequestsInFlight, vmiSourceInformer)
+	if err := downwardmetrics.RunDownwardMetricsCollector(context.Background(), app.HostOverride, vmiSourceInformer, podIsolationDetector); err != nil {
+		panic(fmt.Errorf("failed to set up the downwardMetrics collector: %v", err))
+	}
 
 	go app.clientcertmanager.Start()
 	go app.servercertmanager.Start()
 
 	// Bootstrapping. From here on the startup order matters
-	stop := make(chan struct{})
-	defer close(stop)
 
 	factory.Start(stop)
 	go gracefulShutdownInformer.Run(stop)
@@ -356,22 +381,6 @@ func (app *virtHandlerApp) Run() {
 	cache.WaitForCacheSync(stop, factory.ConfigMap().HasSynced, vmiSourceInformer.HasSynced, factory.CRD().HasSynced)
 
 	go vmController.Run(10, stop)
-
-	// Currently nodeLabeller only support x86_64
-	arch := virtconfig.NewDefaultArch(runtime.GOARCH)
-	if !arch.IsARM64() && !arch.IsPPC64() {
-		deviceController := &devicemanager.DeviceController{}
-		if deviceController.NodeHasDevice(nodelabellerutil.KVMPath) {
-			nodeLabellerController, err := nodelabeller.NewNodeLabeller(app.clusterConfig, app.virtCli, app.HostOverride, app.namespace)
-			if err != nil {
-				panic(err)
-			}
-
-			go nodeLabellerController.Run(10, stop)
-		} else {
-			logger.V(1).Level(log.INFO).Log("node-labeller is disabled, cannot work without KVM device.")
-		}
-	}
 
 	doneCh := make(chan string)
 	defer close(doneCh)
@@ -437,7 +446,7 @@ func (app *virtHandlerApp) runPrometheusServer(errCh chan error) {
 	webService.Route(webService.GET("/healthz").To(healthz.KubeConnectionHealthzFuncFactory(app.clusterConfig, apiHealthVersion)).Doc("Health endpoint"))
 	mux.Add(webService)
 	log.Log.V(1).Infof("metrics: max concurrent requests=%d", app.MaxRequestsInFlight)
-	mux.Handle("/metrics", promvm.Handler(app.MaxRequestsInFlight))
+	mux.Handle("/metrics", promdomain.Handler(app.MaxRequestsInFlight))
 	server := http.Server{
 		Addr:      app.ServiceListen.Address(),
 		Handler:   mux,
@@ -450,8 +459,11 @@ func (app *virtHandlerApp) runServer(errCh chan error, consoleHandler *rest.Cons
 	ws := new(restful.WebService)
 	ws.Route(ws.GET("/v1/namespaces/{namespace}/virtualmachineinstances/{name}/console").To(consoleHandler.SerialHandler))
 	ws.Route(ws.GET("/v1/namespaces/{namespace}/virtualmachineinstances/{name}/vnc").To(consoleHandler.VNCHandler))
+	ws.Route(ws.GET("/v1/namespaces/{namespace}/virtualmachineinstances/{name}/usbredir").To(consoleHandler.USBRedirHandler))
 	ws.Route(ws.PUT("/v1/namespaces/{namespace}/virtualmachineinstances/{name}/pause").To(lifecycleHandler.PauseHandler))
 	ws.Route(ws.PUT("/v1/namespaces/{namespace}/virtualmachineinstances/{name}/unpause").To(lifecycleHandler.UnpauseHandler))
+	ws.Route(ws.PUT("/v1/namespaces/{namespace}/virtualmachineinstances/{name}/freeze").To(lifecycleHandler.FreezeHandler))
+	ws.Route(ws.PUT("/v1/namespaces/{namespace}/virtualmachineinstances/{name}/unfreeze").To(lifecycleHandler.UnfreezeHandler))
 	ws.Route(ws.GET("/v1/namespaces/{namespace}/virtualmachineinstances/{name}/guestosinfo").To(lifecycleHandler.GetGuestInfo).Produces(restful.MIME_JSON).Consumes(restful.MIME_JSON).Returns(http.StatusOK, "OK", v1.VirtualMachineInstanceGuestAgentInfo{}))
 	ws.Route(ws.GET("/v1/namespaces/{namespace}/virtualmachineinstances/{name}/userlist").To(lifecycleHandler.GetUsers).Produces(restful.MIME_JSON).Consumes(restful.MIME_JSON).Returns(http.StatusOK, "OK", v1.VirtualMachineInstanceGuestOSUserList{}))
 	ws.Route(ws.GET("/v1/namespaces/{namespace}/virtualmachineinstances/{name}/filesystemlist").To(lifecycleHandler.GetFilesystems).Produces(restful.MIME_JSON).Consumes(restful.MIME_JSON).Returns(http.StatusOK, "OK", v1.VirtualMachineInstanceFileSystemList{}))

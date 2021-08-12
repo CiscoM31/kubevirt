@@ -22,7 +22,7 @@ set -e
 source hack/common.sh
 source hack/config.sh
 
-PUSH_TARGETS=(${PUSH_TARGETS:-other-images virt-operator virt-api virt-controller virt-handler virt-launcher conformance})
+PUSH_TARGETS=(${PUSH_TARGETS:-other-images virt-operator virt-api virt-controller virt-handler virt-launcher conformance libguestfs})
 
 for tag in ${docker_tag} ${docker_tag_alt}; do
     for target in ${PUSH_TARGETS[@]}; do
@@ -50,3 +50,12 @@ if [[ $image_prefix_alt ]]; then
 
     done
 fi
+
+rm -rf ${DIGESTS_DIR}
+mkdir -p ${DIGESTS_DIR}
+
+for f in $(find bazel-bin/ -name '*.digest'); do
+    dir=${DIGESTS_DIR}/$(dirname $f)
+    mkdir -p ${dir}
+    cp -f ${f} ${dir}/$(basename ${f})
+done

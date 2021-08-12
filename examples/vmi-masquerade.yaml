@@ -23,8 +23,6 @@ spec:
           port: 80
           protocol: TCP
       rng: {}
-    machine:
-      type: ""
     resources:
       requests:
         memory: 1024M
@@ -34,7 +32,7 @@ spec:
   terminationGracePeriodSeconds: 0
   volumes:
   - containerDisk:
-      image: registry:5000/kubevirt/fedora-cloud-container-disk-demo:devel
+      image: registry:5000/kubevirt/fedora-with-test-tooling-container-disk:devel
     name: containerdisk
   - cloudInitNoCloud:
       networkData: |

@@ -15,7 +15,7 @@ export DOCKER_TAG=mybuild
 Then build the manifests and images:
 
 ```bash
-make && make push
+make && make push && make manifests
 ```
 
 Finally, push the manifests to your cluster:
@@ -73,7 +73,7 @@ dockerized environment, clone the KubeVirt repository, `cd` into it, and:
 
 ```bash
 # Build and deploy KubeVirt on Kubernetes in our vms inside containers
-export KUBEVIRT_PROVIDER=k8s-1.18 # this is also the default if no KUBEVIRT_PROVIDER is set
+# export KUBEVIRT_PROVIDER=k8s-1.20 #  uncomment to use a non-default KUBEVIRT_PROVIDER
 make cluster-up
 make cluster-sync
 ```
@@ -118,6 +118,29 @@ make cluster-down
 
 **Note:** Whenever you type `make cluster-down && make cluster-up`, you will
 have a completely fresh cluster to play with.
+
+#### Sync specific components
+
+**Note:** The following is meant for allowing faster iteration on small changes to components that support it.
+Not every component is that simply exchangable without a full re-deploy. Always test with the final SHA based method in the end.
+
+In situations where you just want to work on a single component and rollout updates
+without re-deploying the whole environment, you can tell kubevirt to deploy using tags.
+
+```sh
+export KUBEVIRT_ONLY_USE_TAGS=true
+```
+
+After this any `make cluster-sync` will use the `DOCKER_TAG` for pulling images instead of SHAs.
+This means you can simply rebuild the component that changed and then kill the respective pods to
+cause a fresh pull:
+
+```sh
+PUSH_TARGETS='virt-api' ./hack/bazel-push-images.sh
+kubectl delete po -n kubevirt -l kubevirt.io=virt-api
+```
+
+Once the respective component is back, it should be using your new build.
 
 ### Accessing the containerized nodes via ssh
 

@@ -28,9 +28,9 @@ import (
 	"strings"
 
 	restful "github.com/emicklei/go-restful"
-	authorization "k8s.io/api/authorization/v1beta1"
+	authorization "k8s.io/api/authorization/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	authorizationclient "k8s.io/client-go/kubernetes/typed/authorization/v1beta1"
+	authorizationclient "k8s.io/client-go/kubernetes/typed/authorization/v1"
 	restclient "k8s.io/client-go/rest"
 
 	"kubevirt.io/client-go/kubecli"
@@ -142,7 +142,7 @@ func (a *authorizor) generateAccessReview(req *restful.Request) (*authorization.
 	// URL example
 	// /apis/subresources.kubevirt.io/v1alpha3/namespaces/default/virtualmachineinstances/testvmi/console
 	pathSplit := strings.Split(url.Path, "/")
-	if len(pathSplit) != 9 {
+	if len(pathSplit) < 9 {
 		return nil, fmt.Errorf("unknown api endpoint %s", url.Path)
 	}
 
@@ -230,7 +230,7 @@ func isInfoOrHealthEndpoint(req *restful.Request) bool {
 	// /apis/subresources.kubevirt.io/v1alpha3/namespaces/default/virtualmachineinstances/testvmi/console
 	// The /apis/<group>/<version> part of the urls should be accessible without needing authorization
 	pathSplit := strings.Split(httpRequest.URL.Path, "/")
-	if len(pathSplit) <= 4 || (len(pathSplit) > 4 && (pathSplit[4] == "version" || pathSplit[4] == "healthz")) {
+	if len(pathSplit) <= 4 || (len(pathSplit) > 4 && (pathSplit[4] == "version" || pathSplit[4] == "healthz" || pathSplit[4] == "guestfs")) {
 		return true
 	}
 

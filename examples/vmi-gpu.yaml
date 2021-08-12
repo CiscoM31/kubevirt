@@ -19,15 +19,13 @@ spec:
       - deviceName: nvidia.com/GP102GL_Tesla_P40
         name: gpu1
       rng: {}
-    machine:
-      type: ""
     resources:
       requests:
         memory: 1024M
   terminationGracePeriodSeconds: 0
   volumes:
   - containerDisk:
-      image: registry:5000/kubevirt/fedora-cloud-container-disk-demo:devel
+      image: registry:5000/kubevirt/fedora-with-test-tooling-container-disk:devel
     name: containerdisk
   - cloudInitNoCloud:
       userData: |-

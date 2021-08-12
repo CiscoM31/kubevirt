@@ -25,7 +25,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"runtime"
 	"time"
 
 	restful "github.com/emicklei/go-restful"
@@ -33,6 +32,9 @@ import (
 	. "github.com/onsi/ginkgo"
 	"github.com/onsi/ginkgo/extensions/table"
 	. "github.com/onsi/gomega"
+	"k8s.io/client-go/tools/cache"
+
+	"kubevirt.io/kubevirt/pkg/virt-controller/watch/topology"
 
 	k8sv1 "k8s.io/api/core/v1"
 	kubev1 "k8s.io/api/core/v1"
@@ -44,7 +46,7 @@ import (
 	v1 "kubevirt.io/client-go/api/v1"
 	snapshotv1 "kubevirt.io/client-go/apis/snapshot/v1alpha1"
 	"kubevirt.io/client-go/kubecli"
-	cdiv1 "kubevirt.io/containerized-data-importer/pkg/apis/core/v1alpha1"
+	cdiv1 "kubevirt.io/containerized-data-importer/pkg/apis/core/v1beta1"
 	"kubevirt.io/kubevirt/pkg/controller"
 	"kubevirt.io/kubevirt/pkg/rest"
 	testutils "kubevirt.io/kubevirt/pkg/testutils"
@@ -63,11 +65,13 @@ func newValidGetRequest() *http.Request {
 }
 
 var _ = Describe("Application", func() {
-	var app VirtControllerApp = VirtControllerApp{}
+	var app = VirtControllerApp{}
 
 	It("Reports leader prometheus metric when onStartedLeading is called ", func() {
 		ctrl := gomock.NewController(GinkgoT())
 		virtClient := kubecli.NewMockKubevirtClient(ctrl)
+		topologyUpdater := topology.NewMockNodeTopologyUpdater(ctrl)
+		topologyUpdater.EXPECT().Run(gomock.Any(), gomock.Any())
 
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
@@ -79,6 +83,7 @@ var _ = Describe("Application", func() {
 		migrationInformer, _ := testutils.NewFakeInformerFor(&v1.VirtualMachineInstanceMigration{})
 		nodeInformer, _ := testutils.NewFakeInformerFor(&kubev1.Node{})
 		recorder := record.NewFakeRecorder(100)
+		recorder.IncludeObject = true
 		config, _, _, _ := testutils.NewFakeClusterConfig(&kubev1.ConfigMap{})
 		pdbInformer, _ := testutils.NewFakeInformerFor(&v1beta1.PodDisruptionBudget{})
 		podInformer, _ := testutils.NewFakeInformerFor(&k8sv1.Pod{})
@@ -92,24 +97,30 @@ var _ = Describe("Application", func() {
 
 		var qemuGid int64 = 107
 
+		app.vmiInformer = vmiInformer
+		app.nodeTopologyUpdater = topologyUpdater
 		app.informerFactory = controller.NewKubeInformerFactory(nil, nil, nil, "test")
 		app.evacuationController = evacuation.NewEvacuationController(vmiInformer, migrationInformer, nodeInformer, podInformer, recorder, virtClient, config)
-		app.disruptionBudgetController = disruptionbudget.NewDisruptionBudgetController(vmiInformer, pdbInformer, recorder, virtClient)
+		app.disruptionBudgetController = disruptionbudget.NewDisruptionBudgetController(vmiInformer, pdbInformer, podInformer, migrationInformer, recorder, virtClient)
 		app.nodeController = NewNodeController(virtClient, nodeInformer, vmiInformer, recorder)
-		app.vmiController = NewVMIController(services.NewTemplateService("a", "b", "c", "d", "e", "f", "g", pvcInformer.GetStore(), virtClient, config, qemuGid, runtime.GOARCH),
+		app.vmiController = NewVMIController(services.NewTemplateService("a", 240, "b", "c", "d", "e", "f", "g", pvcInformer.GetStore(), virtClient, config, qemuGid),
 			vmiInformer,
+			vmInformer,
 			podInformer,
 			pvcInformer,
 			recorder,
 			virtClient,
 			dataVolumeInformer,
+			topology.NewTopologyHinter(&cache.FakeCustomStore{}, &cache.FakeCustomStore{}, "amd64", nil),
 		)
 		app.rsController = NewVMIReplicaSet(vmiInformer, rsInformer, recorder, virtClient, uint(10))
 		app.vmController = NewVMController(vmiInformer, vmInformer, dataVolumeInformer, pvcInformer, recorder, virtClient)
-		app.migrationController = NewMigrationController(services.NewTemplateService("a", "b", "c", "d", "e", "f", "g", pvcInformer.GetStore(), virtClient, config, qemuGid, runtime.GOARCH),
+		app.migrationController = NewMigrationController(services.NewTemplateService("a", 240, "b", "c", "d", "e", "f", "g", pvcInformer.GetStore(), virtClient, config, qemuGid),
 			vmiInformer,
 			podInformer,
 			migrationInformer,
+			nodeInformer,
+			pvcInformer,
 			recorder,
 			virtClient,
 			config,
@@ -143,6 +154,7 @@ var _ = Describe("Application", func() {
 		}
 		app.restoreController.Init()
 		app.persistentVolumeClaimInformer = pvcInformer
+		app.nodeInformer = nodeInformer
 
 		app.readyChan = make(chan bool)
 
@@ -158,6 +170,7 @@ var _ = Describe("Application", func() {
 
 		// for sync
 		go pvcInformer.Run(ctx.Done())
+		go nodeInformer.Run(ctx.Done())
 		time.Sleep(time.Second)
 
 		By("Checking prometheus metric")

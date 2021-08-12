@@ -59,8 +59,12 @@ func (m MockNotifier) SendK8sEvent(vmi *v1.VirtualMachineInstance, severity stri
 }
 
 var _ = Describe("HostDisk", func() {
-	var tempDir string
-
+	var (
+		notifier                   MockNotifier
+		tempDir                    string
+		hostDiskCreator            DiskImgCreator
+		hostDiskCreatorWithReserve DiskImgCreator
+	)
 	addHostDisk := func(vmi *v1.VirtualMachineInstance, volumeName string, hostDiskType v1.HostDiskType, capacity string) {
 		var quantity resource.Quantity
 
@@ -106,16 +110,17 @@ var _ = Describe("HostDisk", func() {
 		tempDir, err = ioutil.TempDir("", "host-disk-images")
 		setDiskDirectory(tempDir)
 		Expect(err).NotTo(HaveOccurred())
+		notifier = MockNotifier{
+			Events: make(chan k8sv1.Event, 10),
+		}
+
+		hostDiskCreator = NewHostDiskCreator(notifier, 0, 0)
+		hostDiskCreatorWithReserve = NewHostDiskCreator(notifier, 10, 1048576)
 	})
 
 	AfterEach(func() {
 		os.RemoveAll(tempDir)
 	})
-
-	notifier := MockNotifier{
-		Events: make(chan k8sv1.Event, 10),
-	}
-	hostDiskCreator := NewHostDiskCreator(notifier, 0)
 
 	Describe("HostDisk with 'Disk' type", func() {
 		It("Should not create a disk.img when it exists", func() {
@@ -210,6 +215,69 @@ var _ = Describe("HostDisk", func() {
 					Expect(true).To(Equal(os.IsNotExist(err)))
 				})
 
+				It("Should NOT subtract reserve if there is enough space on storage for requested size", func(done Done) {
+					By("Creating a new minimal vmi")
+					vmi := v1.NewMinimalVMI("fake-vmi")
+
+					By("Adding HostDisk volumes")
+					addHostDisk(vmi, "volume1", v1.HostDiskExistsOrCreate, "64Mi")
+
+					By("Executing CreateHostDisks func which should create a full-size disk.img")
+					err := hostDiskCreatorWithReserve.Create(vmi)
+					Expect(err).NotTo(HaveOccurred())
+
+					img1, err := os.Stat(vmi.Spec.Volumes[0].HostDisk.Path)
+					Expect(err).NotTo(HaveOccurred())
+					Expect(img1.Size()).To(Equal(int64(67108864))) // 64Mi
+					close(done)
+				}, 5)
+
+				It("Should subtract reserve if there is NOT enough space on storage for requested size", func(done Done) {
+					By("Creating a new minimal vmi")
+					vmi := v1.NewMinimalVMI("fake-vmi")
+					dirAvailable := uint64(64 << 20)
+
+					hostDiskCreatorWithReserve.dirBytesAvailableFunc = func(path string, reserve uint64) (uint64, error) {
+						return dirAvailable - reserve, nil
+					}
+
+					By("Adding HostDisk volume that is slightly too large for available bytes when reserve is accounted for")
+					addHostDisk(vmi, "volume1", v1.HostDiskExistsOrCreate, "64Mi")
+
+					By("Executing CreateHostDisks func which should create disk.img minus reserve")
+					err := hostDiskCreatorWithReserve.Create(vmi)
+					Expect(err).NotTo(HaveOccurred())
+
+					img1, err := os.Stat(vmi.Spec.Volumes[0].HostDisk.Path)
+					Expect(err).NotTo(HaveOccurred())
+					Expect(img1.Size()).To(BeNumerically("==", dirAvailable-hostDiskCreatorWithReserve.minimumPVCReserveBytes)) // 64Mi minus reserve
+					close(done)
+				}, 5)
+
+				It("Should refuse to create disk image if reserve causes image to exceed lessPVCSpaceToleration", func(done Done) {
+					By("Creating a new minimal vmi")
+					vmi := v1.NewMinimalVMI("fake-vmi")
+					dirAvailable := uint64(64 << 20)
+
+					hostDiskCreatorWithReserve.dirBytesAvailableFunc = func(path string, reserve uint64) (uint64, error) {
+						return dirAvailable - reserve, nil
+					}
+					hostDiskCreatorWithReserve.setlessPVCSpaceToleration(1) // 1% of 64Mi, tolerate up to 671088 bytes lost
+
+					By("Adding HostDisk volume that is slightly too large for available bytes when reserve is accounted for")
+					addHostDisk(vmi, "volume1", v1.HostDiskExistsOrCreate, "64Mi")
+
+					By("Executing CreateHostDisks func which should NOT create disk.img minus reserve")
+					err := hostDiskCreatorWithReserve.Create(vmi)
+					Expect(err).To(HaveOccurred())
+					Expect(err.Error()).To(ContainSubstring("unable to create"))
+
+					_, err = os.Stat(vmi.Spec.Volumes[0].HostDisk.Path)
+					Expect(true).To(Equal(os.IsNotExist(err)))
+
+					close(done)
+				}, 5)
+
 				It("Should take lessPVCSpaceToleration into account when creating disk images", func(done Done) {
 					By("Creating a new minimal vmi")
 					vmi := v1.NewMinimalVMI("fake-vmi")
@@ -222,7 +290,7 @@ var _ = Describe("HostDisk", func() {
 						return origSize * (100 - uint64(toleration) + uint64(diff)) / 100
 					}
 
-					fakeDirBytesAvailable := func(path string) (uint64, error) {
+					fakeDirBytesAvailable := func(path string, reserve uint64) (uint64, error) {
 						if strings.Contains(path, "volume1") {
 							// toleration +1
 							return calcToleratedSize(size64Mi, 1), nil

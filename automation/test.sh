@@ -54,6 +54,7 @@ elif [[ $TARGET =~ sig-network ]]; then
   fi
 elif [[ $TARGET =~ sig-storage ]]; then
   export KUBEVIRT_PROVIDER=${TARGET/-sig-storage/}
+  export KUBEVIRT_STORAGE="rook-ceph-default"
 elif [[ $TARGET =~ sig-compute ]]; then
   export KUBEVIRT_PROVIDER=${TARGET/-sig-compute/}
 else
@@ -67,6 +68,8 @@ fi
 
 if [[ $TARGET =~ sriov.* ]]; then
   export KUBEVIRT_NUM_NODES=3
+elif [[ $TARGET =~ vgpu.* ]]; then
+  export KUBEVIRT_NUM_NODES=1
 else
   export KUBEVIRT_NUM_NODES=2
 fi
@@ -78,6 +81,8 @@ export RHEL_NFS_DIR=${RHEL_NFS_DIR:-/var/lib/stdci/shared/kubevirt-images/rhel7}
 export RHEL_LOCK_PATH=${RHEL_LOCK_PATH:-/var/lib/stdci/shared/download_rhel_image.lock}
 export WINDOWS_NFS_DIR=${WINDOWS_NFS_DIR:-/var/lib/stdci/shared/kubevirt-images/windows2016}
 export WINDOWS_LOCK_PATH=${WINDOWS_LOCK_PATH:-/var/lib/stdci/shared/download_windows_image.lock}
+export WINDOWS_SYSPREP_NFS_DIR=${WINDOWS_SYSPREP_NFS_DIR:-/var/lib/stdci/shared/kubevirt-images/windows2012_syspreped}
+export WINDOWS_SYSPREP_LOCK_PATH=${WINDOWS_SYSPREP_LOCK_PATH:-/var/lib/stdci/shared/download_windows_syspreped_image.lock}
 
 wait_for_download_lock() {
   local max_lock_attempts=60
@@ -148,7 +153,17 @@ if [[ $TARGET =~ os-.* ]] || [[ $TARGET =~ (okd|ocp)-.* ]]; then
     safe_download "$RHEL_LOCK_PATH" "$rhel_image_url" "$rhel_image" || exit 1
 fi
 
-if [[ $TARGET =~ windows.* ]]; then
+if [[ $TARGET =~ windows_sysprep.* ]]; then
+  # Create images directory
+  if [[ ! -d $WINDOWS_SYSPREP_NFS_DIR ]]; then
+    mkdir -p $WINDOWS_SYSPREP_NFS_DIR
+  fi
+
+  # Download Windows image
+  win_image_url="${TEMPLATES_SERVER}/windows2012_syspreped.img"
+  win_image="$WINDOWS_SYSPREP_NFS_DIR/disk.img"
+  safe_download "$WINDOWS_SYSPREP_LOCK_PATH" "$win_image_url" "$win_image" || exit 1
+elif [[ $TARGET =~ windows.* ]]; then
   # Create images directory
   if [[ ! -d $WINDOWS_NFS_DIR ]]; then
     mkdir -p $WINDOWS_NFS_DIR
@@ -160,7 +175,8 @@ if [[ $TARGET =~ windows.* ]]; then
   safe_download "$WINDOWS_LOCK_PATH" "$win_image_url" "$win_image" || exit 1
 fi
 
-kubectl() { cluster-up/kubectl.sh "$@"; }
+kubectl() { KUBEVIRTCI_VERBOSE=false cluster-up/kubectl.sh "$@"; }
+cli() { cluster-up/cli.sh "$@"; }
 
 collect_debug_logs() {
     local containers
@@ -225,8 +241,6 @@ kubectl get nodes
 
 make cluster-sync
 
-hack/dockerized bazel shutdown
-
 # OpenShift is running important containers under default namespace
 namespaces=(kubevirt default)
 if [[ $NAMESPACE != "kubevirt" ]]; then
@@ -281,17 +295,24 @@ ginko_params="--noColor --seed=42"
 
 # Prepare PV for Windows testing
 if [[ $TARGET =~ windows.* ]]; then
+  if [[ $TARGET =~ windows_sysprep.* ]]; then
+    disk_name=disk-windows-sysprep
+    os_label=windows-sysprep
+  else
+    disk_name=disk-windows
+    os_label=windows
+  fi
   kubectl create -f - <<EOF
 ---
 apiVersion: v1
 kind: PersistentVolume
 metadata:
-  name: disk-windows
+  name: $disk_name
   labels:
-    kubevirt.io/test: "windows"
+    kubevirt.io/test: $os_label
 spec:
   capacity:
-    storage: 30Gi
+    storage: 35Gi
   accessModes:
     - ReadWriteOnce
   nfs:
@@ -303,7 +324,9 @@ fi
 
 # Set KUBEVIRT_E2E_FOCUS and KUBEVIRT_E2E_SKIP only if both of them are not already set
 if [[ -z ${KUBEVIRT_E2E_FOCUS} && -z ${KUBEVIRT_E2E_SKIP} ]]; then
-  if [[ $TARGET =~ windows.* ]]; then
+  if [[ $TARGET =~ windows_sysprep.* ]]; then
+    export KUBEVIRT_E2E_FOCUS="\\[Sysprep\\]"
+  elif [[ $TARGET =~ windows.* ]]; then
     # Run only Windows tests
     export KUBEVIRT_E2E_FOCUS=Windows
   elif [[ $TARGET =~ (cnao|multus) ]]; then
@@ -311,22 +334,26 @@ if [[ -z ${KUBEVIRT_E2E_FOCUS} && -z ${KUBEVIRT_E2E_SKIP} ]]; then
   elif [[ $TARGET =~ sig-network ]]; then
     export KUBEVIRT_E2E_FOCUS="\\[sig-network\\]"
   elif [[ $TARGET =~ sig-storage ]]; then
-    export KUBEVIRT_E2E_FOCUS="\\[sig-storage\\]"
+    export KUBEVIRT_E2E_FOCUS="\\[sig-storage\\]|\\[rook-ceph\\]"
+  elif [[ $TARGET =~ vgpu.* ]]; then
+    export KUBEVIRT_E2E_FOCUS=MediatedDevices
   elif [[ $TARGET =~ sig-compute ]]; then
     export KUBEVIRT_E2E_FOCUS="\\[sig-compute\\]"
-    export KUBEVIRT_E2E_SKIP="GPU"
+    export KUBEVIRT_E2E_SKIP="GPU|MediatedDevices"
   elif [[ $TARGET =~ sriov.* ]]; then
     export KUBEVIRT_E2E_FOCUS=SRIOV
   elif [[ $TARGET =~ gpu.* ]]; then
     export KUBEVIRT_E2E_FOCUS=GPU
   elif [[ $TARGET =~ (okd|ocp).* ]]; then
-    export KUBEVIRT_E2E_SKIP="SRIOV|GPU"
+    export KUBEVIRT_E2E_SKIP="SRIOV|GPU|MediatedDevices"
   else
-    export KUBEVIRT_E2E_SKIP="Multus|SRIOV|GPU|Macvtap"
+    export KUBEVIRT_E2E_SKIP="Multus|SRIOV|GPU|Macvtap|MediatedDevices"
   fi
 
-  if [[ "$KUBEVIRT_STORAGE" == "rook-ceph" || "$KUBEVIRT_STORAGE" == "rook-ceph-default" ]]; then
-    export KUBEVIRT_E2E_FOCUS=rook-ceph
+  if ! [[ $TARGET =~ sig-storage ]]; then
+    if [[ "$KUBEVIRT_STORAGE" == "rook-ceph" || "$KUBEVIRT_STORAGE" == "rook-ceph-default" ]]; then
+        export KUBEVIRT_E2E_FOCUS=rook-ceph
+    fi
   fi
 fi
 
@@ -367,3 +394,22 @@ fi
 
 # Run functional tests
 FUNC_TEST_ARGS=$ginko_params make functest
+
+# Run REST API coverage based on k8s audit log and openapi spec
+if [ -n "$RUN_REST_COVERAGE" ]; then
+  echo "Generating REST API coverage report"
+  wget https://github.com/mfranczy/crd-rest-coverage/releases/download/v0.1.3/rest-coverage -O _out/rest-coverage
+  chmod +x _out/rest-coverage
+  AUDIT_LOG_PATH=${AUDIT_LOG_PATH-/var/log/k8s-audit/k8s-audit.log}
+  log_dest="$ARTIFACTS_PATH/cluster-audit.log"
+  cli scp "$AUDIT_LOG_PATH" - > $log_dest
+  _out/rest-coverage \
+    --swagger-path "api/openapi-spec/swagger.json" \
+    --audit-log-path $log_dest \
+    --output-path "$ARTIFACTS_PATH/rest-coverage.json" \
+    --ignore-resource-version
+  echo "REST API coverage report generated"
+fi
+
+# Sanity check test execution by looking at results file
+./automation/assert-not-all-tests-skipped.sh "${ARTIFACTS}/junit.functest.xml"

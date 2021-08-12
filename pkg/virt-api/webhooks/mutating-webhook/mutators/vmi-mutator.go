@@ -25,6 +25,7 @@ import (
 	"net/http"
 	"reflect"
 	"strings"
+	"time"
 
 	admissionv1 "k8s.io/api/admission/v1"
 	k8sv1 "k8s.io/api/core/v1"
@@ -33,6 +34,8 @@ import (
 
 	v1 "kubevirt.io/client-go/api/v1"
 	"kubevirt.io/client-go/log"
+	"kubevirt.io/kubevirt/pkg/util"
+	utiltypes "kubevirt.io/kubevirt/pkg/util/types"
 	webhookutils "kubevirt.io/kubevirt/pkg/util/webhooks"
 	"kubevirt.io/kubevirt/pkg/virt-api/webhooks"
 	virtconfig "kubevirt.io/kubevirt/pkg/virt-config"
@@ -57,7 +60,7 @@ func (mutator *VMIsMutator) Mutate(ar *admissionv1.AdmissionReview) *admissionv1
 		return webhookutils.ToAdmissionResponseError(err)
 	}
 
-	var patch []patchOperation
+	var patch []utiltypes.PatchOperation
 
 	// Patch the spec, metadata and status with defaults if we deal with a create operation
 	if ar.Request.Operation == admissionv1.Create {
@@ -118,34 +121,57 @@ func (mutator *VMIsMutator) Mutate(ar *admissionv1.AdmissionReview) *admissionv1
 		// Set the phase to pending to avoid blank status
 		newVMI.Status.Phase = v1.Pending
 
+		now := metav1.NewTime(time.Now())
+		newVMI.Status.PhaseTransitionTimestamps = append(newVMI.Status.PhaseTransitionTimestamps, v1.VirtualMachineInstancePhaseTransitionTimestamp{
+			Phase:                    newVMI.Status.Phase,
+			PhaseTransitionTimestamp: now,
+		})
+
+		if mutator.ClusterConfig.NonRootEnabled() {
+			if err := canBeNonRoot(newVMI); err != nil {
+				return &admissionv1.AdmissionResponse{
+					Result: &metav1.Status{
+						Message: err.Error(),
+						Code:    http.StatusUnprocessableEntity,
+					},
+				}
+			} else {
+				if newVMI.ObjectMeta.Annotations == nil {
+					newVMI.ObjectMeta.Annotations = make(map[string]string)
+				}
+				newVMI.ObjectMeta.Annotations[v1.NonRootVMIAnnotation] = ""
+			}
+		}
+
 		var value interface{}
 		value = newVMI.Spec
-		patch = append(patch, patchOperation{
+		patch = append(patch, utiltypes.PatchOperation{
 			Op:    "replace",
 			Path:  "/spec",
 			Value: value,
 		})
 
 		value = newVMI.ObjectMeta
-		patch = append(patch, patchOperation{
+		patch = append(patch, utiltypes.PatchOperation{
 			Op:    "replace",
 			Path:  "/metadata",
 			Value: value,
 		})
 
 		value = newVMI.Status
-		patch = append(patch, patchOperation{
+		patch = append(patch, utiltypes.PatchOperation{
 			Op:    "replace",
 			Path:  "/status",
 			Value: value,
 		})
+
 	} else if ar.Request.Operation == admissionv1.Update {
 		// Ignore status updates if they are not coming from our service accounts
 		// TODO: As soon as CRDs support field selectors we can remove this and just enable
 		// the status subresource. Until then we need to update Status and Metadata labels in parallel for e.g. Migrations.
 		if !reflect.DeepEqual(newVMI.Status, oldVMI.Status) {
 			if !webhooks.IsKubeVirtServiceAccount(ar.Request.UserInfo.Username) {
-				patch = append(patch, patchOperation{
+				patch = append(patch, utiltypes.PatchOperation{
 					Op:    "replace",
 					Path:  "/status",
 					Value: oldVMI.Status,
@@ -238,8 +264,14 @@ func (mutator *VMIsMutator) setDefaultGuestCPUTopology(vmi *v1.VirtualMachineIns
 }
 
 func (mutator *VMIsMutator) setDefaultMachineType(vmi *v1.VirtualMachineInstance) {
-	if vmi.Spec.Domain.Machine.Type == "" {
-		vmi.Spec.Domain.Machine.Type = mutator.ClusterConfig.GetMachineType()
+	machineType := mutator.ClusterConfig.GetMachineType()
+
+	if machine := vmi.Spec.Domain.Machine; machine != nil {
+		if machine.Type == "" {
+			machine.Type = machineType
+		}
+	} else {
+		vmi.Spec.Domain.Machine = &v1.Machine{Type: machineType}
 	}
 }
 
@@ -308,4 +340,16 @@ func (mutator *VMIsMutator) setDefaultResourceRequests(vmi *v1.VirtualMachineIns
 		}
 		resources.Requests[k8sv1.ResourceCPU] = *mutator.ClusterConfig.GetCPURequest()
 	}
+}
+
+func canBeNonRoot(vmi *v1.VirtualMachineInstance) error {
+	// VirtioFS doesn't work with session mode
+	if util.IsVMIVirtiofsEnabled(vmi) {
+		return fmt.Errorf("VirtioFS doesn't work with session mode(used by nonroot)")
+	}
+
+	if util.IsSRIOVVmi(vmi) {
+		return fmt.Errorf("SRIOV doesn't work with nonroot")
+	}
+	return nil
 }
