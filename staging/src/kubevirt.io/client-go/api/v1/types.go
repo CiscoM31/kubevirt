@@ -773,6 +773,7 @@ const (
 	Resumed                      SyncEvent = "Resumed"
 	AccessCredentialsSyncFailed  SyncEvent = "AccessCredentialsSyncFailed"
 	AccessCredentialsSyncSuccess SyncEvent = "AccessCredentialsSyncSuccess"
+	VMInterfaceIPChange          SyncEvent = "VMInterfaceIPChanged"
 )
 
 func (s SyncEvent) String() string {

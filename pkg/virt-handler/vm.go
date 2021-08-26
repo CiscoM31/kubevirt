@@ -845,6 +845,8 @@ func (d *VirtualMachineController) updateVMIStatus(origVMI *v1.VirtualMachineIns
 
 	vmi := origVMI.DeepCopy()
 	oldStatus := *vmi.Status.DeepCopy()
+	intfChangeDetected := false
+	var ipAddresses []string
 
 	vmi = d.setMigrationProgressStatus(vmi, domain)
 
@@ -970,6 +972,29 @@ func (d *VirtualMachineController) updateVMIStatus(origVMI *v1.VirtualMachineIns
 					delete(domainInterfaceStatusByMac, interfaceMAC)
 				}
 				newInterfaces = append(newInterfaces, newInterface)
+
+				// check if any IP addresses on the interface changed
+				if existingIntfStatus, ok := existingInterfaceStatusByName[newInterface.Name]; ok {
+					if _, found := existingInterfaceStatusByName[newInterface.Name]; found {
+						if len(existingIntfStatus.IPs) != len(newInterface.IPs) {
+							intfChangeDetected = true
+							ipAddresses = append(ipAddresses, newInterface.IPs...)
+						} else {
+							for i := 0; i < len(existingIntfStatus.IPs); i++ {
+								if existingIntfStatus.IPs[i] != newInterface.IPs[i] {
+									intfChangeDetected = true
+									ipAddresses = append(ipAddresses, newInterface.IPs...)
+								}
+							}
+						}
+					}
+				} else {
+					// no existing status found, we just received first update for this interface
+					if len(newInterface.IPs) > 0 {
+						intfChangeDetected = true
+						ipAddresses = append(ipAddresses, newInterface.IPs...)
+					}
+				}
 			}
 
 			// If any of domain.Status.Interfaces were not handled above, it means that the vm contains additional
@@ -1157,6 +1182,12 @@ func (d *VirtualMachineController) updateVMIStatus(origVMI *v1.VirtualMachineIns
 			d.vmiExpectations.LowerExpectations(key, 1, 0)
 			return err
 		}
+	}
+
+	if intfChangeDetected {
+		evMsg := fmt.Sprintf("Detected VM Interface IP change: %+v", ipAddresses)
+		d.recorder.Event(vmi, k8sv1.EventTypeNormal, v1.VMInterfaceIPChange.String(), evMsg)
+		log.Log.Infof(evMsg)
 	}
 
 	if oldStatus.Phase != vmi.Status.Phase {
