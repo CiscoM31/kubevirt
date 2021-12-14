@@ -28,7 +28,6 @@ bazel run \
     nginx \
     scsi-target-utils \
     procps-ng \
-    nmap-ncat \
     iputils \
     e2fsprogs
 
@@ -41,7 +40,6 @@ bazel run \
     nginx \
     scsi-target-utils \
     procps-ng \
-    nmap-ncat \
     iputils \
     e2fsprogs
 
