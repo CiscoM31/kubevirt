@@ -11,7 +11,7 @@ require (
 	github.com/google/gofuzz v1.1.0
 	github.com/gorilla/websocket v1.4.2
 	github.com/k8snetworkplumbingwg/network-attachment-definition-client v0.0.0-20191119172530-79f836b90111
-	github.com/kubernetes-csi/external-snapshotter/v2 v2.1.1
+	github.com/kubernetes-csi/external-snapshotter/v2 v2.1.3
 	github.com/onsi/ginkgo v1.14.1
 	github.com/onsi/gomega v1.10.2
 	github.com/openshift/client-go v0.0.0
